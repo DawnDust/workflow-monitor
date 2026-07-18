@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "enabled": true,
+  "timezone": "Asia/Shanghai",
+  "state_dir": ".project_hooks",
+  "backend": "project_hooks",
+  "core_read_order": [
+    "maintenance/CURRENT_TASK.md",
+    "maintenance/PROJECT_CONTEXT.md",
+    "maintenance/CHANGE_ARCHIVE.md",
+    "maintenance/DECISION_LOG.md",
+    "maintenance/WORKFLOW_SPEC.md"
+  ],
+  "git_auto_commit": {
+    "enabled": true,
+    "eligible_task_sizes": ["large"]
+  }
+}
