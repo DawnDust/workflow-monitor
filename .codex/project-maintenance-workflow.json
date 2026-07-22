@@ -9,8 +9,16 @@
     "maintenance/project_context.md",
     "maintenance/change_archive.md",
     "maintenance/decision_log.md",
+    "maintenance/branch_workflow.md",
     "maintenance/workflow_spec.md"
   ],
+  "branch_policy": {
+    "default_branch": "main",
+    "exploration_types": ["research", "experiment", "sandbox"],
+    "archive_prefix": "archive",
+    "success_integration": "squash_pr",
+    "require_user_merge_confirmation": true
+  },
   "git_auto_commit": {
     "enabled": true,
     "eligible_task_sizes": ["large"]

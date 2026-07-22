@@ -14,3 +14,5 @@
 | 保留维护索引的标准 README 文件名 | 20260722_keep_readme_case_001 | 2026-07-22 18:54:01 | `maintenance/README.md` 存在；根目录链接和生命周期检查使用相同大小写 | 成功；仅 README 恢复标准名称，其余维护文件保持小写 `snake_case.md` |
 | 发布工作区架构与维护文件命名优化 | 20260722_publish_structure_001 | 2026-07-22 19:03:22 | 项目检查与暂存区格式检查通过；目标为 `origin/main` | 进行中；准备提交并推送主体改动 |
 | 完成工作区架构与维护文件命名优化发布 | 20260722_publish_structure_001 | 2026-07-22 19:04:02 | 本地与远程 `main` 均为 `98345f53c9e1f7f38a49aeec217f5b9738360b8f` | 成功；五个业务目录、维护文件命名和 README 例外已发布 |
+| 建立探索分支维护工作流 | 20260722_branch_workflow_001 | 2026-07-22 22:11:26 | `python -m project_hooks check` 通过；`python -m unittest discover -s tests -v` 共 8 项通过；`git diff --check` 无错误 | 成功；新增分支策略、尝试记录、PR 准备与失败归档命令，覆盖安全失败和旧 CLI 兼容；未执行 push、PR 或合并 |
+| 准备发布探索分支维护工作流 | 20260722_publish_branch_workflow_001 | 2026-07-22 22:27:11 | GitHub CLI 已登录 `DawnDust`；工作树范围、项目检查和 `git diff --check` 已确认 | 进行中；全部改动属于本次工作流，准备提交并推送 `origin/main` |

@@ -15,6 +15,8 @@ python -m project_hooks check
 
 之后由仓库内 [AGENTS.md](./AGENTS.md) 约束 Codex：每次任务先读取维护上下文并执行 `start`，结束前归档并执行 `end`。
 
+`main` 只保存稳定内容。新理论、算法、实验或不确定改动从干净的 `main` 启动探索任务；验证成功后通过 Squash PR 合并，失败、暂停或不可判决的尝试保存在 `archive/` 分支。完整规则见 [maintenance/branch_workflow.md](./maintenance/branch_workflow.md)。
+
 ## 项目结构
 
 | 目录 | 放什么 |
@@ -34,6 +36,7 @@ python -m project_hooks check
 python -m project_hooks install
 python -m project_hooks check
 python -m project_hooks status
+python -m project_hooks branch-status
 ```
 
 项目维护文档索引见 [maintenance/README.md](./maintenance/README.md)。
