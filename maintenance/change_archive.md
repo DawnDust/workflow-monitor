@@ -17,3 +17,4 @@
 | 建立探索分支维护工作流 | 20260722_branch_workflow_001 | 2026-07-22 22:11:26 | `python -m project_hooks check` 通过；`python -m unittest discover -s tests -v` 共 8 项通过；`git diff --check` 无错误 | 成功；新增分支策略、尝试记录、PR 准备与失败归档命令，覆盖安全失败和旧 CLI 兼容；未执行 push、PR 或合并 |
 | 准备发布探索分支维护工作流 | 20260722_publish_branch_workflow_001 | 2026-07-22 22:27:11 | GitHub CLI 已登录 `DawnDust`；工作树范围、项目检查和 `git diff --check` 已确认 | 进行中；全部改动属于本次工作流，准备提交并推送 `origin/main` |
 | 完成探索分支维护工作流发布 | 20260722_publish_branch_workflow_002 | 2026-07-22 22:28:57 | 主体提交 `db5ec8c8164acd8ae95d5729aaba448fa4721f79` 已推送，推送后本地 `HEAD` 与 `origin/main` 一致 | 成功；探索分支策略、Hook 命令、维护文档和 8 项测试已进入远程 `main` |
+| 修复自动提交后的真实索引同步 | 20260722_fix_auto_index_001 | 2026-07-22 22:31:42 | 新增回归测试确认任务路径保持干净、无关预暂存改动仍被保留；完整测试 9 项通过 | 成功；临时索引推进 `HEAD` 后只刷新已提交任务路径，不再产生相互抵消的 `MM` 假脏状态 |
