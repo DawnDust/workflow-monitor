@@ -9,3 +9,7 @@
 | 创建并发布私有模板仓库 `DawnDust/project-maintenance-template` | 20260722_publish_template_001 | 2026-07-22 17:16:34 | `gh repo create` 返回 `Resource not accessible by personal access token`；内置浏览器连接 GitHub 失败 | 阻塞；本地已切换 `main` 并配置目标 `origin`，远程仓库尚未创建、没有提交或推送 |
 | 恢复私有模板仓库发布 | 20260722_publish_template_002 | 2026-07-22 17:25:21 | GitHub CLI OAuth 权限包含 `repo`；私有空仓库创建成功 | 进行中；准备提交并推送 `main`，随后从远程 clone 验证 |
 | 完成私有模板仓库发布与远程验证 | 20260722_publish_template_002 | 2026-07-22 17:37:29 | 远程 clone 得到 `2cef663488836c898e64d7c083022bccc1efc872`；`install`、`check` 和 `.githooks` 配置通过 | 成功；仓库为 private template，默认分支 `main`，首次发布与 clone 验证完成 |
+| 优化模板工作区内容架构 | 20260722_optimize_structure_001 | 2026-07-22 18:24:07 | `source/`、`data/`、`theory/`、`analysis/`、`outputs/` 及各自说明存在；项目检查通过 | 成功；根目录提供一览表和统一命名规则，目录保持扁平且可按规模扩展 |
+| 统一维护文档文件名为小写 | 20260722_lowercase_maintenance_001 | 2026-07-22 18:28:31 | 6 个 `maintenance/` 文件均通过严格小写检查；全仓库无旧大写路径引用；项目检查通过 | 成功；配置、生命周期代码、AGENTS 和 Markdown 链接全部同步为小写路径 |
+| 保留维护索引的标准 README 文件名 | 20260722_keep_readme_case_001 | 2026-07-22 18:54:01 | `maintenance/README.md` 存在；根目录链接和生命周期检查使用相同大小写 | 成功；仅 README 恢复标准名称，其余维护文件保持小写 `snake_case.md` |
+| 发布工作区架构与维护文件命名优化 | 20260722_publish_structure_001 | 2026-07-22 19:03:22 | 项目检查与暂存区格式检查通过；目标为 `origin/main` | 进行中；准备提交并推送主体改动 |

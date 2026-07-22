@@ -22,11 +22,11 @@ TASK_ID_RE = re.compile(r"^\d{8}_[a-z0-9][a-z0-9_-]*_\d{3}$")
 MANAGED_HOOK_MARKER = "# project-maintenance-hooks managed"
 TRACKED_HOOKS_DIR = ".githooks"
 DEFAULT_READ_ORDER = [
-    "maintenance/CURRENT_TASK.md",
-    "maintenance/PROJECT_CONTEXT.md",
-    "maintenance/CHANGE_ARCHIVE.md",
-    "maintenance/DECISION_LOG.md",
-    "maintenance/WORKFLOW_SPEC.md",
+    "maintenance/current_task.md",
+    "maintenance/project_context.md",
+    "maintenance/change_archive.md",
+    "maintenance/decision_log.md",
+    "maintenance/workflow_spec.md",
 ]
 
 
@@ -151,7 +151,7 @@ def check_repository(*, raise_on_error: bool = False) -> list[str]:
     ]:
         if not (ROOT / rel).is_file():
             errors.append(f"缺少维护文件: {rel}")
-    current = ROOT / "maintenance/CURRENT_TASK.md"
+    current = ROOT / "maintenance/current_task.md"
     if current.is_file():
         text = current.read_text(encoding="utf-8")
         for heading in ("当前主目标", "当前判决", "真实断点", "接下来三步", "当前阻塞", "最近交接"):
@@ -214,7 +214,7 @@ def task_status() -> dict:
         return {"active": False, "checks": check_repository()}
     record = read_active()
     paths = changed(record["baseline"], snapshot())
-    required = ["maintenance/CHANGE_ARCHIVE.md", "maintenance/CURRENT_TASK.md"]
+    required = ["maintenance/change_archive.md", "maintenance/current_task.md"]
     missing = [path for path in required if path not in paths]
     return {
         "active": True,
@@ -315,11 +315,11 @@ def finish_task(args: argparse.Namespace) -> dict:
         raise WorkflowError(f"活动任务是 {record['task_id']}，不是 {args.task_id}")
     check_repository(raise_on_error=True)
     paths = changed(record["baseline"], snapshot())
-    for required in ("maintenance/CHANGE_ARCHIVE.md", "maintenance/CURRENT_TASK.md"):
+    for required in ("maintenance/change_archive.md", "maintenance/current_task.md"):
         if required not in paths:
             raise WorkflowError(f"结束前必须实际更新 {required}")
-    if args.route == "changed" and "maintenance/DECISION_LOG.md" not in paths:
-        raise WorkflowError("路线发生变化时必须更新 maintenance/DECISION_LOG.md")
+    if args.route == "changed" and "maintenance/decision_log.md" not in paths:
+        raise WorkflowError("路线发生变化时必须更新 maintenance/decision_log.md")
     finished_at = timestamp()
     report = {
         "task_id": args.task_id,
