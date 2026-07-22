@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime
 from typing import Callable
 
@@ -42,6 +43,64 @@ def short(value: object, limit: int = 90) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def timeline_layout(timeline: dict, branch: str = "全部分支", query: str = "") -> dict:
+    """Return deterministic coordinates and visibility for the timeline canvas."""
+    commits = list(timeline.get("commits", []))
+    all_lanes = list(timeline.get("lanes", []))
+    if branch != "全部分支":
+        commits = [
+            commit for commit in commits
+            if commit.get("lane") == branch or branch in commit.get("event_branches", [])
+        ]
+        used = {branch}
+        used.update(commit.get("lane") for commit in commits)
+        lanes = [lane for lane in all_lanes if lane in used]
+    else:
+        lanes = all_lanes
+    for commit in commits:
+        if commit.get("lane") not in lanes:
+            lanes.append(commit.get("lane") or "其他")
+        for event_branch in commit.get("event_branches", []):
+            if branch == "全部分支" and event_branch not in lanes:
+                lanes.append(event_branch)
+
+    lane_y = {lane: 48 + index * 72 for index, lane in enumerate(lanes)}
+    needle = query.strip().casefold()
+    nodes: list[dict] = []
+    coordinates: dict[str, tuple[int, int]] = {}
+    for index, commit in enumerate(commits):
+        x = 70 + index * 132
+        y = lane_y[commit.get("lane") or "其他"]
+        searchable = json.dumps(commit, ensure_ascii=False, default=str).casefold()
+        node = {**commit, "x": x, "y": y, "match": not needle or needle in searchable}
+        nodes.append(node)
+        coordinates[commit["hash"]] = (x, y)
+
+    visible = set(coordinates)
+    edges = [
+        {**edge, "start": coordinates[edge["parent"]], "end": coordinates[edge["child"]]}
+        for edge in timeline.get("edges", [])
+        if edge["parent"] in visible and edge["child"] in visible
+    ]
+    associations = []
+    for node in nodes:
+        for event_branch in node.get("event_branches", []):
+            if event_branch != node.get("lane") and event_branch in lane_y:
+                associations.append({
+                    "commit": node["hash"], "branch": event_branch,
+                    "start": (node["x"], node["y"]), "end": (node["x"], lane_y[event_branch]),
+                })
+    return {
+        "lanes": lanes,
+        "lane_y": lane_y,
+        "nodes": nodes,
+        "edges": edges,
+        "associations": associations,
+        "width": max(900, 140 + len(nodes) * 132),
+        "height": max(160, 92 + len(lanes) * 72),
+    }
+
+
 class DashboardDataProvider:
     def __init__(self, model: MaintenanceReadModel, classifier: Callable[[str], dict], branch: str | None = None):
         self.model = model
@@ -63,7 +122,11 @@ class DashboardController:
 
     def refresh(self) -> tuple[dict | None, str | None]:
         try:
-            self.snapshot = self.provider.load()
+            snapshot = self.provider.load()
+            if snapshot.get("timeline_error") and self.snapshot and self.snapshot.get("timeline", {}).get("status") == "passed":
+                snapshot["timeline"] = deepcopy(self.snapshot["timeline"])
+                snapshot["timeline"]["stale"] = True
+            self.snapshot = snapshot
             return self.snapshot, None
         except Exception as exc:
             return self.snapshot, str(exc)
@@ -163,6 +226,168 @@ class TablePage:
         self.frame.clipboard_append(json.dumps(record, ensure_ascii=False, indent=2, default=str))
 
 
+class TimelinePage:
+    ALL_BRANCHES = "全部分支"
+
+    def __init__(self, parent, tk, ttk, scrolledtext, *, refresh: Callable[[], None]):
+        self.tk, self.ttk = tk, ttk
+        self.frame = ttk.Frame(parent, padding=8)
+        self.refresh_callback = refresh
+        self.timeline: dict = {"lanes": [], "commits": [], "edges": []}
+        self.selected_hash: str | None = None
+        self.node_by_hash: dict[str, dict] = {}
+        self.first_render = True
+
+        controls = ttk.Frame(self.frame)
+        controls.pack(fill="x", pady=(0, 6))
+        ttk.Label(controls, text="分支").pack(side="left")
+        self.branch = tk.StringVar(value=self.ALL_BRANCHES)
+        self.branch_box = ttk.Combobox(controls, textvariable=self.branch, state="readonly", width=24)
+        self.branch_box.pack(side="left", padx=(6, 12))
+        self.branch_box.bind("<<ComboboxSelected>>", lambda _event: self.render())
+        ttk.Label(controls, text="搜索（高亮）").pack(side="left")
+        self.query = tk.StringVar()
+        entry = ttk.Entry(controls, textvariable=self.query, width=30)
+        entry.pack(side="left", padx=(6, 8))
+        self.query.trace_add("write", lambda *_: self.render())
+        ttk.Button(controls, text="复制选中", command=self.copy_selected).pack(side="left")
+        ttk.Button(controls, text="刷新", command=refresh).pack(side="left", padx=(6, 0))
+
+        ttk.Label(
+            self.frame,
+            text="● 关联任务的提交　○ 普通提交　实线 Git 父子关系　虚线 跨分支事件关联",
+        ).pack(anchor="w", pady=(0, 5))
+
+        graph_frame = ttk.Frame(self.frame)
+        graph_frame.pack(fill="both", expand=True)
+        self.labels = tk.Canvas(graph_frame, width=180, background="#f8fafc", highlightthickness=0)
+        self.canvas = tk.Canvas(graph_frame, background="#ffffff", highlightthickness=1, highlightbackground="#d1d5db")
+        vertical = ttk.Scrollbar(graph_frame, orient="vertical", command=self.scroll_y)
+        horizontal = ttk.Scrollbar(graph_frame, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(xscrollcommand=horizontal.set, yscrollcommand=vertical.set)
+        self.labels.configure(yscrollcommand=vertical.set)
+        self.labels.grid(row=0, column=0, sticky="ns")
+        self.canvas.grid(row=0, column=1, sticky="nsew")
+        vertical.grid(row=0, column=2, sticky="ns")
+        horizontal.grid(row=1, column=1, sticky="ew")
+        graph_frame.columnconfigure(1, weight=1)
+        graph_frame.rowconfigure(0, weight=1)
+
+        ttk.Label(self.frame, text="提交详情").pack(anchor="w", pady=(8, 3))
+        self.detail = scrolledtext.ScrolledText(self.frame, height=9, wrap="word")
+        self.detail.pack(fill="x")
+        self.detail.configure(state="disabled")
+        self.message = ttk.Label(self.frame, text="", foreground="#92400e")
+        self.message.pack(fill="x", pady=(4, 0))
+
+    def scroll_y(self, *arguments) -> None:
+        self.labels.yview(*arguments)
+        self.canvas.yview(*arguments)
+
+    def set_data(self, timeline: dict, *, error: str | None = None) -> None:
+        self.timeline = timeline
+        lanes = list(timeline.get("lanes", []))
+        values = [self.ALL_BRANCHES, *lanes]
+        self.branch_box.configure(values=values)
+        if self.branch.get() not in values:
+            self.branch.set(self.ALL_BRANCHES)
+        self.message.configure(text=(f"时间线刷新失败，继续显示上一次数据：{error}" if error else ""))
+        self.render()
+
+    def render(self) -> None:
+        old_xview = self.canvas.xview()
+        layout = timeline_layout(self.timeline, self.branch.get(), self.query.get())
+        self.canvas.delete("all")
+        self.labels.delete("all")
+        self.node_by_hash = {node["hash"]: node for node in layout["nodes"]}
+        self.canvas.configure(scrollregion=(0, 0, layout["width"], layout["height"]))
+        self.labels.configure(scrollregion=(0, 0, 180, layout["height"]))
+
+        for lane in layout["lanes"]:
+            y = layout["lane_y"][lane]
+            self.canvas.create_line(0, y, layout["width"], y, fill="#e5e7eb", width=1)
+            font = ("TkDefaultFont", 9, "bold") if lane == self.timeline.get("default_branch") else ("TkDefaultFont", 9)
+            self.labels.create_text(10, y, anchor="w", text=short(lane, 25), fill="#111827", font=font)
+
+        for edge in layout["edges"]:
+            x1, y1 = edge["start"]
+            x2, y2 = edge["end"]
+            midpoint = (x1 + x2) / 2
+            self.canvas.create_line(x1, y1, midpoint, y1, midpoint, y2, x2, y2, fill="#64748b", width=2)
+        for association in layout["associations"]:
+            x1, y1 = association["start"]
+            x2, y2 = association["end"]
+            self.canvas.create_line(x1, y1, x2, y2, fill="#2563eb", dash=(4, 3), width=1)
+            self.canvas.create_rectangle(x2 - 4, y2 - 4, x2 + 4, y2 + 4, outline="#2563eb", fill="#ffffff")
+
+        if self.selected_hash not in self.node_by_hash:
+            self.selected_hash = layout["nodes"][-1]["hash"] if layout["nodes"] else None
+        for node in layout["nodes"]:
+            x, y = node["x"], node["y"]
+            linked = bool(node.get("task_ids"))
+            matched = node["match"]
+            fill = "#2563eb" if linked and matched else ("#ffffff" if matched else "#e5e7eb")
+            outline = "#b45309" if node["hash"] == self.selected_hash else ("#1e3a8a" if matched else "#9ca3af")
+            width = 3 if node["hash"] == self.selected_hash else 2
+            tag = f"commit-{node['hash']}"
+            if len(node.get("parents", [])) > 1:
+                item = self.canvas.create_rectangle(x - 8, y - 8, x + 8, y + 8, fill=fill, outline=outline, width=width, tags=(tag,))
+            else:
+                item = self.canvas.create_oval(x - 8, y - 8, x + 8, y + 8, fill=fill, outline=outline, width=width, tags=(tag,))
+            self.canvas.tag_bind(item, "<Button-1>", lambda _event, commit_hash=node["hash"]: self.select(commit_hash))
+            label = f"{node['short_hash']}\n{short(node['subject'], 18)}"
+            text_item = self.canvas.create_text(x, y - 28, text=label, width=118, justify="center", fill="#111827" if matched else "#9ca3af", tags=(tag,))
+            self.canvas.tag_bind(text_item, "<Button-1>", lambda _event, commit_hash=node["hash"]: self.select(commit_hash))
+            if node.get("task_ids"):
+                self.canvas.create_text(x, y + 19, text=f"{len(node['task_ids'])} 个任务", fill="#1e3a8a", font=("TkDefaultFont", 8))
+
+        self.show_detail()
+        if self.first_render and layout["nodes"]:
+            self.canvas.xview_moveto(1.0)
+            self.first_render = False
+        elif old_xview:
+            self.canvas.xview_moveto(old_xview[0])
+
+    def select(self, commit_hash: str) -> None:
+        self.selected_hash = commit_hash
+        self.render()
+
+    def selected_record(self) -> dict | None:
+        return self.node_by_hash.get(self.selected_hash or "")
+
+    def show_detail(self) -> None:
+        record = self.selected_record()
+        if record is None:
+            text = "没有可显示的提交。"
+        else:
+            tasks = "\n".join(f"- {item}" for item in record.get("task_ids", [])) or "无"
+            event_lines = []
+            for item in record.get("events", []):
+                payload = item.get("payload", {})
+                summary = next((payload.get(key) for key in ("summary", "scope", "goal", "decision", "state") if payload.get(key)), "")
+                task = f"｜{item['task_id']}" if item.get("task_id") else ""
+                suffix = f"｜{short(summary, 80)}" if summary else ""
+                event_lines.append(f"- {item['event_type']}｜{item.get('branch')}{task}{suffix}")
+            events = "\n".join(event_lines) or "无"
+            text = (
+                f"提交：{record['hash']}\n时间：{record['occurred_at']}\n作者：{record['author']}\n"
+                f"泳道：{record['lane']}\n引用：{', '.join(record.get('refs', [])) or '无'}\n"
+                f"父提交：{', '.join(record.get('parents', [])) or '无'}\n\n标题\n{record['subject']}\n\n"
+                f"关联任务\n{tasks}\n\n关联事件\n{events}"
+            )
+        self.detail.configure(state="normal")
+        self.detail.delete("1.0", "end")
+        self.detail.insert("1.0", text)
+        self.detail.configure(state="disabled")
+
+    def copy_selected(self) -> None:
+        record = self.selected_record()
+        if not record:
+            return
+        self.frame.clipboard_clear()
+        self.frame.clipboard_append(json.dumps(record, ensure_ascii=False, indent=2, default=str))
+
+
 class DashboardApp:
     def __init__(self, root, tk, ttk, scrolledtext, provider: DashboardDataProvider, refresh_seconds: float):
         self.root, self.tk, self.ttk = root, tk, ttk
@@ -193,6 +418,11 @@ class DashboardApp:
         self.overview.pack(fill="both", expand=True)
         self.overview.configure(state="disabled")
         self.notebook.add(self.overview_frame, text="概览")
+
+        self.timeline_page = TimelinePage(
+            self.notebook, tk, ttk, scrolledtext, refresh=self.refresh,
+        )
+        self.notebook.add(self.timeline_page.frame, text="时间线")
 
         self.history_page = TablePage(self.notebook, tk, ttk, scrolledtext,
             columns=[("occurred_at", "时间", 180), ("task_id", "任务 ID", 190), ("result", "结果", 110), ("branch", "分支", 130), ("summary", "摘要", 360)],
@@ -230,7 +460,8 @@ class DashboardApp:
             self.snapshot = snapshot
             self.apply_snapshot(snapshot)
             rebuilt = "；本次已重建" if snapshot["health"]["rebuilt"] else ""
-            self.status.configure(text=f"刷新成功：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{rebuilt}")
+            timeline_warning = f"；时间线警告：{snapshot['timeline_error']}" if snapshot.get("timeline_error") else ""
+            self.status.configure(text=f"刷新成功：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{rebuilt}{timeline_warning}")
         else:
             self.status.configure(text=f"刷新失败，继续显示上一次数据：{error}")
 
@@ -244,6 +475,10 @@ class DashboardApp:
         self.overview.delete("1.0", "end")
         self.overview.insert("1.0", overview)
         self.overview.configure(state="disabled")
+        self.timeline_page.set_data(
+            snapshot.get("timeline", {"lanes": [], "commits": [], "edges": []}),
+            error=snapshot.get("timeline_error"),
+        )
         self.history_page.set_records(snapshot["history"])
         self.decision_page.set_records(snapshot["decisions"])
         exploration_records = list(snapshot["explorations"])

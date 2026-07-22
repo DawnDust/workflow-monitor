@@ -17,8 +17,9 @@ from project_hooks.dashboard import (
     launch_dashboard,
     short,
     sort_records,
+    timeline_layout,
 )
-from project_hooks.read_model import MaintenanceReadModel
+from project_hooks.read_model import MaintenanceReadModel, ReadModelError
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
@@ -99,6 +100,90 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(snapshot["decisions"][0]["decision"], "read model")
         self.assertGreaterEqual(len(snapshot["events"]), 4)
         self.assertEqual(snapshot["health"]["status"], "passed")
+        self.assertEqual(snapshot["timeline"]["status"], "passed")
+        self.assertGreaterEqual(len(snapshot["timeline"]["commits"]), 1)
+
+    def test_timeline_maps_branches_tasks_unlinked_commits_and_squash(self) -> None:
+        note = self.root / "plain.txt"
+        note.write_text("ordinary commit\n", encoding="utf-8")
+        self.git("add", "plain.txt")
+        self.git("commit", "-m", "ordinary unlinked commit")
+        ordinary_hash = self.git("rev-parse", "HEAD").stdout.strip()
+
+        task_id = "20260722_timeline_001"
+        self.start(task_id, "--track", "research", "--topic", "timeline")
+        experiment = self.root / "experiment.txt"
+        experiment.write_text("timeline experiment\n", encoding="utf-8")
+        self.update_state("timeline branch complete")
+        self.end(task_id, state="active")
+        self.commit_all("record timeline experiment")
+        research_hash = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("update-ref", "refs/remotes/origin/research/timeline", research_hash)
+
+        self.git("switch", "main")
+        self.git("merge", "--squash", "research/timeline")
+        self.git("commit", "-m", "squash timeline experiment")
+        squash_hash = self.git("rev-parse", "HEAD").stdout.strip()
+
+        model = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        )
+        timeline = model.timeline()
+        commits = {item["hash"]: item for item in timeline["commits"]}
+        self.assertIn("main", timeline["lanes"])
+        self.assertIn("research/timeline", timeline["lanes"])
+        self.assertEqual(commits[ordinary_hash]["task_ids"], [])
+        self.assertIn(task_id, commits[research_hash]["task_ids"])
+        self.assertIn(task_id, commits[squash_hash]["task_ids"])
+        self.assertEqual(commits[research_hash]["lane"], "research/timeline")
+        self.assertEqual(commits[squash_hash]["lane"], "main")
+
+        self.git("branch", "-D", "research/timeline")
+        remote_only = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).timeline()
+        self.assertIn(research_hash, {item["hash"] for item in remote_only["commits"]})
+        self.git("update-ref", "-d", "refs/remotes/origin/research/timeline")
+        after_delete = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).timeline()
+        self.assertIn("research/timeline", after_delete["lanes"])
+        visible = {item["hash"]: item for item in after_delete["commits"]}
+        self.assertNotIn(research_hash, visible)
+        self.assertIn("research/timeline", visible[squash_hash]["event_branches"])
+
+    def test_timeline_git_failure_does_not_block_sqlite_snapshot(self) -> None:
+        model = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        )
+        with patch.object(model, "_build_timeline", side_effect=ReadModelError("git unavailable")):
+            snapshot = model.dashboard_snapshot()
+        self.assertEqual(snapshot["health"]["status"], "passed")
+        self.assertEqual(snapshot["timeline"]["status"], "unavailable")
+        self.assertIn("git unavailable", snapshot["timeline_error"])
+
+    def test_timeline_cache_invalidates_after_git_commit(self) -> None:
+        model = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        )
+        before = model.timeline()
+        extra = self.root / "cache.txt"
+        extra.write_text("new tip\n", encoding="utf-8")
+        self.git("add", "cache.txt")
+        self.git("commit", "-m", "advance timeline tip")
+        after = model.timeline()
+        self.assertEqual(len(after["commits"]), len(before["commits"]) + 1)
+        self.assertNotEqual(after, before)
 
     def test_legacy_migration_is_complete_idempotent_and_deletes_sources(self) -> None:
         maintenance = self.root / "maintenance"
@@ -338,6 +423,49 @@ class DashboardPresentationTests(unittest.TestCase):
         second, error = controller.refresh()
         self.assertEqual(second, first)
         self.assertIn("database unavailable", error)
+
+    def test_timeline_layout_filters_highlights_and_links_branches(self) -> None:
+        timeline = {
+            "lanes": ["main", "research/model"],
+            "commits": [
+                {"hash": "a" * 40, "short_hash": "aaaaaaaa", "parents": [], "lane": "main",
+                 "subject": "baseline", "task_ids": [], "event_branches": [], "events": []},
+                {"hash": "b" * 40, "short_hash": "bbbbbbbb", "parents": ["a" * 40], "lane": "research/model",
+                 "subject": "model task", "task_ids": ["task-1"], "event_branches": ["research/model"], "events": []},
+                {"hash": "c" * 40, "short_hash": "cccccccc", "parents": ["a" * 40], "lane": "main",
+                 "subject": "squash model", "task_ids": ["task-1"], "event_branches": ["research/model"], "events": []},
+            ],
+            "edges": [
+                {"parent": "a" * 40, "child": "b" * 40},
+                {"parent": "a" * 40, "child": "c" * 40},
+            ],
+        }
+        layout = timeline_layout(timeline, query="model task")
+        self.assertEqual(len(layout["nodes"]), 3)
+        self.assertEqual([item["match"] for item in layout["nodes"]], [False, True, False])
+        self.assertEqual(len(layout["associations"]), 1)
+        focused = timeline_layout(timeline, branch="research/model")
+        self.assertEqual({item["hash"] for item in focused["nodes"]}, {"b" * 40, "c" * 40})
+        self.assertEqual(focused["lanes"], ["main", "research/model"])
+
+    def test_timeline_refresh_error_preserves_previous_graph(self) -> None:
+        class Provider:
+            def __init__(self):
+                self.calls = 0
+
+            def load(self):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"timeline": {"status": "passed", "commits": [{"hash": "abc"}]}, "timeline_error": None}
+                return {"timeline": {"status": "unavailable", "commits": []}, "timeline_error": "git unavailable"}
+
+        controller = DashboardController(Provider())
+        first, error = controller.refresh()
+        self.assertIsNone(error)
+        second, error = controller.refresh()
+        self.assertIsNone(error)
+        self.assertEqual(second["timeline"]["commits"], first["timeline"]["commits"])
+        self.assertTrue(second["timeline"]["stale"])
 
     def test_tkinter_unavailable_has_cli_fallback(self) -> None:
         with patch("project_hooks.dashboard.import_tk", side_effect=DashboardError("missing\n" + CLI_FALLBACK)):
