@@ -552,6 +552,11 @@ def auto_commit(record: dict, paths: list[str], result: str, message: str | None
         completed = run_git(["commit", "-m", commit_message], env=env, check=False)
         if completed.returncode != 0:
             raise WorkflowError("自动提交失败: " + (completed.stderr or completed.stdout).strip())
+        # The temporary index advances HEAD but intentionally leaves the user's
+        # real index untouched. Refresh only the committed task paths so they do
+        # not appear as inverse staged/unstaged changes against the new HEAD;
+        # unrelated pre-existing staged changes remain intact.
+        run_git(["reset", "--quiet", "HEAD", "--", *staged])
         return {
             "status": "committed",
             "commit": run_git(["rev-parse", "HEAD"]).stdout.strip(),

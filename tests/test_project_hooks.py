@@ -198,6 +198,48 @@ class ProjectHooksBranchWorkflowTests(unittest.TestCase):
         self.assertFalse(result["network_actions_performed"])
         self.assertEqual(self.git("branch", "--show-current").stdout.strip(), result["branch"])
 
+    def test_auto_commit_refreshes_task_paths_and_preserves_unrelated_staging(self) -> None:
+        user_note = self.root / "user_note.txt"
+        user_note.write_text("baseline\n", encoding="utf-8")
+        self.git("add", "user_note.txt")
+        self.git("commit", "-m", "add user note")
+        user_note.write_text("user staged work\n", encoding="utf-8")
+        self.git("add", "user_note.txt")
+
+        task_id = "20260722_autocommit_001"
+        self.hooks(
+            "start",
+            task_id,
+            "--kind",
+            "governance",
+            "--scope",
+            "test automatic commit index handling",
+            "--acceptance",
+            "task paths are clean and user staging is preserved",
+            "--task-size",
+            "large",
+            "--git-commit",
+            "always",
+        )
+        self.append_required_updates()
+        result = self.hooks(
+            "end",
+            task_id,
+            "--result",
+            "completed",
+            "--route",
+            "unchanged",
+            "--methods-action",
+            "updated",
+            "--main-goal",
+            "unchanged",
+            "--note",
+            "automatic commit completed",
+        )
+        self.assertEqual(json.loads(result.stdout)["git"]["status"], "committed")
+        porcelain = self.git("status", "--porcelain=v1").stdout.splitlines()
+        self.assertEqual(porcelain, ["M  user_note.txt"])
+
 
 if __name__ == "__main__":
     unittest.main()
