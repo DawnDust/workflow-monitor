@@ -1,0 +1,5 @@
+.project_hooks/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/

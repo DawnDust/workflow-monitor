@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MARKER = ROOT / ".codex/project-maintenance-workflow.json"
 TASK_ID_RE = re.compile(r"^\d{8}_[a-z0-9][a-z0-9_-]*_\d{3}$")
 MANAGED_HOOK_MARKER = "# project-maintenance-hooks managed"
+TRACKED_HOOKS_DIR = ".githooks"
 DEFAULT_READ_ORDER = [
     "maintenance/CURRENT_TASK.md",
     "maintenance/PROJECT_CONTEXT.md",
@@ -142,7 +143,12 @@ def check_repository(*, raise_on_error: bool = False) -> list[str]:
         errors.append("项目维护工作流被禁用")
     if cfg.get("core_read_order") != DEFAULT_READ_ORDER:
         errors.append("core_read_order 与 v1 项目维护协议不一致")
-    for rel in [*DEFAULT_READ_ORDER, "maintenance/README.md", "project_hooks/__main__.py"]:
+    for rel in [
+        *DEFAULT_READ_ORDER,
+        "maintenance/README.md",
+        "project_hooks/__main__.py",
+        f"{TRACKED_HOOKS_DIR}/pre-commit",
+    ]:
         if not (ROOT / rel).is_file():
             errors.append(f"缺少维护文件: {rel}")
     current = ROOT / "maintenance/CURRENT_TASK.md"
@@ -232,24 +238,30 @@ def pre_commit_check() -> None:
 def install_git_hook(force: bool = False) -> str:
     if not is_git_repo():
         return "非 Git 仓库，已跳过 pre-commit 安装"
-    hooks_dir = Path(run_git(["rev-parse", "--git-path", "hooks"]).stdout.strip())
-    if not hooks_dir.is_absolute():
-        hooks_dir = ROOT / hooks_dir
-    hook = hooks_dir / "pre-commit"
+    configured = run_git(["config", "--local", "--get", "core.hooksPath"], check=False)
+    old_path = configured.stdout.strip()
+    if old_path and old_path != TRACKED_HOOKS_DIR and not force:
+        raise WorkflowError(
+            f"本仓库已有 core.hooksPath={old_path}；使用 --force 前请先人工合并"
+        )
+    hook = ROOT / TRACKED_HOOKS_DIR / "pre-commit"
     content = f"#!/bin/sh\n{MANAGED_HOOK_MARKER}\npython -m project_hooks pre-commit\n"
+    hook_is_current = False
     if hook.exists():
         old = hook.read_text(encoding="utf-8", errors="replace")
         if old == content:
-            return f"pre-commit 已是最新版: {hook}"
-        if MANAGED_HOOK_MARKER not in old and not force:
+            hook_is_current = True
+        elif MANAGED_HOOK_MARKER not in old and not force:
             raise WorkflowError("已有非本工作流管理的 pre-commit；使用 --force 前请先人工合并")
-    hook.parent.mkdir(parents=True, exist_ok=True)
-    hook.write_text(content, encoding="utf-8", newline="\n")
-    try:
-        hook.chmod(0o755)
-    except OSError:
-        pass
-    return f"已安装 pre-commit: {hook}"
+    if not hook_is_current:
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text(content, encoding="utf-8", newline="\n")
+        try:
+            hook.chmod(0o755)
+        except OSError:
+            pass
+    run_git(["config", "--local", "core.hooksPath", TRACKED_HOOKS_DIR])
+    return f"已启用仓库内 pre-commit: {hook}（core.hooksPath={TRACKED_HOOKS_DIR}）"
 
 
 def auto_commit(record: dict, paths: list[str], result: str, message: str | None) -> dict:
