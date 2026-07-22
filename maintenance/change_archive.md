@@ -16,3 +16,4 @@
 | 完成工作区架构与维护文件命名优化发布 | 20260722_publish_structure_001 | 2026-07-22 19:04:02 | 本地与远程 `main` 均为 `98345f53c9e1f7f38a49aeec217f5b9738360b8f` | 成功；五个业务目录、维护文件命名和 README 例外已发布 |
 | 建立探索分支维护工作流 | 20260722_branch_workflow_001 | 2026-07-22 22:11:26 | `python -m project_hooks check` 通过；`python -m unittest discover -s tests -v` 共 8 项通过；`git diff --check` 无错误 | 成功；新增分支策略、尝试记录、PR 准备与失败归档命令，覆盖安全失败和旧 CLI 兼容；未执行 push、PR 或合并 |
 | 准备发布探索分支维护工作流 | 20260722_publish_branch_workflow_001 | 2026-07-22 22:27:11 | GitHub CLI 已登录 `DawnDust`；工作树范围、项目检查和 `git diff --check` 已确认 | 进行中；全部改动属于本次工作流，准备提交并推送 `origin/main` |
+| 完成探索分支维护工作流发布 | 20260722_publish_branch_workflow_002 | 2026-07-22 22:28:57 | 主体提交 `db5ec8c8164acd8ae95d5729aaba448fa4721f79` 已推送，推送后本地 `HEAD` 与 `origin/main` 一致 | 成功；探索分支策略、Hook 命令、维护文档和 8 项测试已进入远程 `main` |
