@@ -31,7 +31,9 @@
 
 ## 只读桌面窗口
 
-- `python -m project_hooks dashboard` 打开 Tkinter 窗口，显示概览、任务历史、决策、探索和原始事件。
-- 窗口支持本地筛选、排序、复制、手动刷新和自动刷新；不直接写数据库、不修改事件日志，也不执行 Git 操作。
+- `python -m project_hooks dashboard` 打开 Tkinter 窗口，显示概览、Git 时间线、任务历史、决策、探索和原始事件。
+- 时间线读取本地 Git DAG 和 `events.jsonl` 的提交历史：分支泳道显示全部可达提交，实线表示 Git 父子关系，虚线表示任务事件的跨分支关联；不会访问 GitHub 网络。
+- 窗口支持分支筛选、关键词高亮、排序、复制、手动刷新和自动刷新；不直接写数据库、不修改事件日志，也不执行 Git 操作。
+- Git 时间线刷新失败时保留上一次成功图形，SQLite 分页继续刷新并在状态栏显示警告。
 - `--refresh-seconds <N>` 设置刷新间隔，默认 3 秒，`0` 表示关闭；`--branch <name>` 查看指定分支流。
 - 图形环境不可用时继续使用 `context`、`history`、`decisions`、`explorations` 和 `db status`。

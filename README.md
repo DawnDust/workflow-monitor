@@ -44,6 +44,6 @@ python -m project_hooks dashboard
 
 动态维护数据由 `.project_hooks/maintenance.sqlite3` 查询和事务管理；Git 只跟踪追加式 `maintenance/events.jsonl`。数据库缺失、损坏或切换分支后会从事件日志重建。
 
-`dashboard` 使用 Python 自带的 Tkinter 打开只读桌面窗口，分页显示当前状态、任务历史、决策、探索和原始事件。窗口不会修改维护数据；写入仍通过生命周期 CLI 完成。可使用 `--refresh-seconds 0` 关闭自动刷新，或用 `--branch <name>` 查看指定分支流。
+`dashboard` 使用 Python 自带的 Tkinter 打开只读桌面窗口，分页显示当前状态、Git 分支与提交时间线、任务历史、决策、探索和原始事件。时间线以泳道展示所有本地及远程分支可达的提交，并用事件日志关联任务；窗口不会修改维护数据或执行网络操作。可使用 `--refresh-seconds 0` 关闭自动刷新，或用 `--branch <name>` 查看指定分支流。
 
 项目维护文档索引见 [maintenance/README.md](./maintenance/README.md)。
