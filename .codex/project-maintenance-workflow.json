@@ -1,17 +1,21 @@
 {
-  "version": 1,
+  "version": 2,
   "enabled": true,
   "timezone": "Asia/Shanghai",
   "state_dir": ".project_hooks",
   "backend": "project_hooks",
   "core_read_order": [
-    "maintenance/current_task.md",
     "maintenance/project_context.md",
-    "maintenance/change_archive.md",
-    "maintenance/decision_log.md",
     "maintenance/branch_workflow.md",
     "maintenance/workflow_spec.md"
   ],
+  "context_command": "python -m project_hooks context --format markdown",
+  "maintenance_store": {
+    "engine": "sqlite",
+    "database": ".project_hooks/maintenance.sqlite3",
+    "journal": "maintenance/events.jsonl",
+    "schema_version": 1
+  },
   "branch_policy": {
     "default_branch": "main",
     "exploration_types": ["research", "experiment", "sandbox"],

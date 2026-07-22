@@ -14,9 +14,9 @@
 | 路径 | 职责 |
 |:---|:---|
 | `.codex/project-maintenance-workflow.json` | 项目维护工作流的启用标记与策略 |
-| `project_hooks/` | 生命周期、分支门禁、检查、项目 Hook 启用和安全自动提交 |
+| `project_hooks/` | SQLite 数据层、生命周期、分支门禁、检查和安全自动提交 |
 | `.githooks/pre-commit` | 随仓库克隆的 Git 提交门禁入口 |
-| `maintenance/` | 稳定背景、当前交接、决策与永久变更档案 |
+| `maintenance/` | 静态规范与 Git 跟踪的追加式事件日志 |
 | `source/` | 外部原始资料与来源证据 |
 | `data/` | 原始、过程和处理后数据 |
 | `theory/` | 理论框架、假设、定义和推导 |
@@ -31,6 +31,9 @@
 安装项目 Hook：python -m project_hooks install
 状态：python -m project_hooks status
 分支状态：python -m project_hooks branch-status
+动态上下文：python -m project_hooks context --format markdown
+数据库检查：python -m project_hooks db verify
+只读窗口：python -m project_hooks dashboard
 ```
 
 ## 项目约定
@@ -40,5 +43,8 @@
 - 原始资料不覆盖，分析过程与交付成果分开，同一文件只保留一个权威位置。
 - 通用文件名优先使用 `YYYYMMDD_topic_v01.ext`；目录规模增大后再增加子层级。
 - `maintenance/README.md` 保留标准大写名称；其余维护文件使用小写 `snake_case.md`。
+- 动态维护数据由 `.project_hooks/maintenance.sqlite3` 管理，以 `maintenance/events.jsonl` 作为可重建事件源。
+- 事件日志只追加，不手工改写既有行；SQLite 不纳入 Git，也不是唯一备份。
 - `main` 只保存稳定、可复用、已验证内容；探索与不确定改动使用独立分支和尝试记录。
 - Hook 只管理本地状态和本地分支，不自动 push、创建 PR 或合并。
+- 桌面窗口只读取共享查询层，不提供数据库写入、Git 或生命周期快捷操作。
