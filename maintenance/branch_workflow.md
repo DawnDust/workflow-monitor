@@ -13,7 +13,7 @@
 | `sandbox/<topic>` | 方向尚未稳定的短期试验 |
 | `archive/<type>/<topic>` | 失败、暂停或不可判决尝试的长期保留 |
 
-`topic` 只使用小写字母、数字和连字符。一个探索分支对应一个 `maintenance/attempts/<task-id>.md`；同一分支上的后续任务复用该记录。
+`topic` 只使用小写字母、数字和连字符。一个探索分支对应一条 SQLite 尝试记录及其追加式事件；同一分支上的后续任务复用该记录。
 
 ## 启动与继续
 
@@ -37,7 +37,7 @@ python -m project_hooks start 20260722_example_001 --kind analysis --scope "..."
 
 只有 `validated` 可运行 `python -m project_hooks prepare-pr`。该命令要求干净工作树、完整证据、已完成维护归档，并基于最新 `main`，只输出 Squash PR 的标题和正文。Codex 随后可推送并创建 Draft PR，但必须等待用户明确确认才能 Squash Merge；冲突只在探索分支解决。合并后删除原探索分支。
 
-`negative`、`inconclusive` 或 `paused` 使用 `python -m project_hooks archive-attempt` 改名为 `archive/<type>/<topic>`。推送归档分支后回到 `main` 启动稳定治理任务，只把结论、证据链接和归档分支写入 `exploration_log.md`，不得把探索内容合并进 `main`。
+`negative`、`inconclusive` 或 `paused` 使用 `python -m project_hooks archive-attempt` 改名为 `archive/<type>/<topic>`。提交并推送归档分支后回到 `main` 启动稳定治理任务，运行 `python -m project_hooks exploration import <archive-branch>` 导入结论、证据和归档引用，不得把探索内容合并进 `main`。
 
 ## 网络边界
 

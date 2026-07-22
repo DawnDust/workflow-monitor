@@ -1,16 +1,12 @@
 # 项目维护索引
 
-本目录只维护一份索引，不在子目录重复设置 README。
+本目录保留静态规范和一份 Git 可合并的动态事件日志。SQLite 工作库位于 `.project_hooks/maintenance.sqlite3`，不纳入版本控制。
 
 | 文件 | 唯一职责 |
 |:---|:---|
-| [current_task.md](./current_task.md) | 当前目标、真实断点、下一步和最近五次交接 |
 | [project_context.md](./project_context.md) | 稳定的项目边界、架构、命令和约定 |
-| [change_archive.md](./change_archive.md) | 成功、失败、阻塞和不可判决任务的永久历史 |
-| [decision_log.md](./decision_log.md) | 路线与架构决策、替代方案和重开条件 |
 | [branch_workflow.md](./branch_workflow.md) | 稳定主线、探索分支、成功合并与失败归档规则 |
-| [exploration_log.md](./exploration_log.md) | 每次探索的目标、结论、证据与最终去向 |
-| [attempts/](./attempts/) | 每个探索分支的结构化尝试记录 |
 | [workflow_spec.md](./workflow_spec.md) | 生命周期、更新顺序和 Git 归属规则 |
+| [events.jsonl](./events.jsonl) | 追加式动态事件源，用于 Git 审阅、合并和数据库重建 |
 
-任务级机器审计位于 `.project_hooks/history/`，不再维护手工会话日志。
+不要手工改写既有事件行或直接编辑 SQLite。使用 `context`、`history`、`decisions`、`explorations` 和 `attempt show` 查询，或运行 `python -m project_hooks dashboard` 打开只读桌面窗口；使用结构化 CLI 写入。
