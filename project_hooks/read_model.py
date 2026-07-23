@@ -82,6 +82,13 @@ class MaintenanceReadModel:
             return 0, name
         return 1, name
 
+    @staticmethod
+    def _branch_kind(name: str, default: str) -> str:
+        if name == default:
+            return "stable"
+        prefix = name.split("/", 1)[0]
+        return prefix if prefix in {"research", "experiment", "sandbox", "archive"} else "other"
+
     def _build_timeline(self, connection: sqlite3.Connection) -> dict:
         signature = self._git_signature()
         if signature == self._timeline_signature and self._timeline_cache is not None:
@@ -135,12 +142,16 @@ class MaintenanceReadModel:
                 remote_groups.setdefault(branch.split("/", 1)[1], set()).add(tip)
 
         branch_tips: dict[str, str] = {}
+        branch_refs: dict[str, list[str]] = {}
         for branch, tip, remote in ref_entries:
+            source_ref = branch
             if remote and "/" in branch:
                 suffix = branch.split("/", 1)[1]
                 if local_tips.get(suffix) == tip or (suffix not in local_tips and len(remote_groups[suffix]) == 1):
                     branch = suffix
             branch_tips.setdefault(branch, tip)
+            if source_ref not in branch_refs.setdefault(branch, []):
+                branch_refs[branch].append(source_ref)
             if branch not in by_hash[tip]["refs"]:
                 by_hash[tip]["refs"].append(branch)
 
@@ -210,10 +221,24 @@ class MaintenanceReadModel:
             {"parent": parent, "child": commit["hash"]}
             for commit in commits for parent in commit["parents"] if parent in by_hash
         ]
+        branches = []
+        for name in lanes:
+            tip = branch_tips.get(name)
+            kind = self._branch_kind(name, default)
+            merged = bool(tip and tip in default_ancestry)
+            branches.append({
+                "name": name,
+                "tip": tip,
+                "refs": branch_refs.get(name, []),
+                "kind": kind,
+                "merged": merged,
+                "unmerged": kind in {"research", "experiment", "sandbox"} and bool(tip) and not merged,
+            })
         result = {
             "status": "passed",
             "default_branch": default,
             "lanes": lanes,
+            "branches": branches,
             "commits": commits,
             "edges": edges,
         }
@@ -314,11 +339,11 @@ class MaintenanceReadModel:
         connection, _ = self._connection()
         try:
             if kind == "history":
-                return rows(connection, "SELECT occurred_at, task_id, summary, evidence, result, branch, payload_json FROM task_archive ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
+                return rows(connection, "SELECT event_id, occurred_at, task_id, summary, evidence, result, branch, payload_json FROM task_archive ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             if kind == "decisions":
-                return rows(connection, "SELECT decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch FROM decisions ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
+                return rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch FROM decisions ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             if kind == "explorations":
-                return rows(connection, "SELECT branch, occurred_at, goal, result, evidence, disposition_ref FROM explorations ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
+                return rows(connection, "SELECT event_id, branch, occurred_at, goal, result, evidence, disposition_ref FROM explorations ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             if kind == "events":
                 values = rows(connection, "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
                 for value in values:
@@ -328,15 +353,64 @@ class MaintenanceReadModel:
         finally:
             connection.close()
 
+    @staticmethod
+    def _search_index(connection: sqlite3.Connection, timeline: dict) -> list[dict]:
+        result: list[dict] = []
+
+        def add(kind: str, label: str, target: str, record_id: str, occurred_at: str,
+                branch: str, title: str, summary: str, values: list[object]) -> None:
+            search_text = " ".join(str(value or "") for value in values)
+            result.append({
+                "kind": kind,
+                "kind_label": label,
+                "target": target,
+                "record_id": record_id,
+                "occurred_at": occurred_at,
+                "branch": branch,
+                "title": title,
+                "summary": summary,
+                "search_text": search_text,
+            })
+
+        task_rows = rows(connection, "SELECT event_id, occurred_at, task_id, summary, evidence, result, branch FROM task_archive")
+        for item in task_rows:
+            add("task", "任务", "history", item["event_id"], item["occurred_at"], item["branch"],
+                item["summary"] or item["task_id"] or "未命名任务", item["result"] or "",
+                [item["task_id"], item["summary"], item["evidence"], item["result"], item["branch"]])
+
+        decision_rows = rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch FROM decisions")
+        for item in decision_rows:
+            add("decision", "决策", "decisions", item["event_id"], item["occurred_at"], item["branch"],
+                item["decision"] or item["decision_id"], item["basis"] or "",
+                [item["decision_id"], item["decision"], item["alternatives"], item["basis"], item["reopen_condition"], item["branch"]])
+
+        exploration_rows = rows(connection, "SELECT event_id, branch, occurred_at, goal, result, evidence, disposition_ref FROM explorations")
+        for item in exploration_rows:
+            add("exploration", "探索", "explorations", item["event_id"], item["occurred_at"], item["branch"],
+                item["goal"] or item["branch"], item["result"] or "",
+                [item["branch"], item["goal"], item["result"], item["evidence"], item["disposition_ref"]])
+
+        for commit in timeline.get("commits", []):
+            add("commit", "提交", "timeline", commit["hash"], commit["occurred_at"], commit["lane"],
+                commit["subject"], commit["short_hash"],
+                [commit["hash"], commit["short_hash"], commit["subject"], commit["author"], commit["lane"],
+                 *commit.get("refs", []), *commit.get("task_ids", []), *commit.get("event_branches", [])])
+
+        return sorted(
+            result,
+            key=lambda item: (item["occurred_at"][:19].replace(" ", "T"), item["record_id"]),
+            reverse=True,
+        )
+
     def dashboard_snapshot(self, branch: str | None = None, *, limit: int = 1000) -> dict:
         branch = branch or self.branch_provider()
         connection, rebuilt = self._connection()
         try:
             integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
             context = self._context(connection, branch)
-            history = rows(connection, "SELECT occurred_at, task_id, summary, evidence, result, branch, payload_json FROM task_archive ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
-            decisions = rows(connection, "SELECT decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch FROM decisions ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
-            explorations = rows(connection, "SELECT branch, occurred_at, goal, result, evidence, disposition_ref FROM explorations ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
+            history = rows(connection, "SELECT event_id, occurred_at, task_id, summary, evidence, result, branch, payload_json FROM task_archive ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
+            decisions = rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch FROM decisions ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
+            explorations = rows(connection, "SELECT event_id, branch, occurred_at, goal, result, evidence, disposition_ref FROM explorations ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             events = rows(connection, "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             for event in events:
                 event["payload"] = json.loads(event.pop("payload_json"))
@@ -344,7 +418,7 @@ class MaintenanceReadModel:
             try:
                 timeline = self._build_timeline(connection)
             except (OSError, ReadModelError, subprocess.SubprocessError) as exc:
-                timeline = {"status": "unavailable", "lanes": [], "commits": [], "edges": []}
+                timeline = {"status": "unavailable", "lanes": [], "branches": [], "commits": [], "edges": []}
                 timeline_error = str(exc)
             return {
                 "branch": branch,
@@ -363,6 +437,7 @@ class MaintenanceReadModel:
                 "events": events,
                 "timeline": timeline,
                 "timeline_error": timeline_error,
+                "search_index": self._search_index(connection, timeline),
             }
         finally:
             connection.close()

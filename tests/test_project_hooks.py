@@ -13,7 +13,9 @@ from project_hooks.dashboard import (
     CLI_FALLBACK,
     DashboardController,
     DashboardError,
+    dashboard_presets,
     filter_records,
+    global_search,
     launch_dashboard,
     short,
     sort_records,
@@ -102,6 +104,8 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(snapshot["health"]["status"], "passed")
         self.assertEqual(snapshot["timeline"]["status"], "passed")
         self.assertGreaterEqual(len(snapshot["timeline"]["commits"]), 1)
+        self.assertTrue({"task", "decision", "commit"}.issubset({item["kind"] for item in snapshot["search_index"]}))
+        self.assertEqual(snapshot["timeline"]["branches"][0]["name"], "main")
 
     def test_timeline_maps_branches_tasks_unlinked_commits_and_squash(self) -> None:
         note = self.root / "plain.txt"
@@ -184,6 +188,53 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         after = model.timeline()
         self.assertEqual(len(after["commits"]), len(before["commits"]) + 1)
         self.assertNotEqual(after, before)
+
+    def test_timeline_branch_metadata_marks_unmerged_and_excludes_archive(self) -> None:
+        self.git("switch", "-c", "research/open-model")
+        open_file = self.root / "open.txt"
+        open_file.write_text("open branch\n", encoding="utf-8")
+        self.git("add", "open.txt")
+        self.git("commit", "-m", "open research")
+        open_tip = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("update-ref", "refs/remotes/origin/research/open-model", open_tip)
+        self.git("branch", "archive/research/old-model", open_tip)
+
+        self.git("switch", "main")
+        self.git("switch", "-c", "experiment/merged-model")
+        merged_file = self.root / "merged.txt"
+        merged_file.write_text("merged branch\n", encoding="utf-8")
+        self.git("add", "merged.txt")
+        self.git("commit", "-m", "validated experiment")
+        self.git("switch", "main")
+        self.git("merge", "--no-ff", "experiment/merged-model", "-m", "merge validated experiment")
+
+        timeline = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).timeline()
+        branches = {item["name"]: item for item in timeline["branches"]}
+        self.assertTrue(branches["research/open-model"]["unmerged"])
+        self.assertIn("origin/research/open-model", branches["research/open-model"]["refs"])
+        self.assertTrue(branches["experiment/merged-model"]["merged"])
+        self.assertFalse(branches["experiment/merged-model"]["unmerged"])
+        self.assertFalse(branches["archive/research/old-model"]["unmerged"])
+
+    def test_search_index_includes_exploration_records(self) -> None:
+        task_id = "20260723_search_index_001"
+        self.start(task_id, "--track", "research", "--topic", "search-index")
+        self.update_state("search index complete")
+        self.hooks("decision", "add", "--decision", "index all records", "--alternatives", "separate search",
+                   "--basis", "one query", "--reopen-condition", "new record type")
+        self.hooks("attempt", "update", "--hypothesis", "search is complete", "--evidence", "all kinds mapped",
+                   "--conclusion", "shared index works")
+        self.end(task_id, state="validated", route="changed")
+        snapshot = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "research/search-index",
+        ).dashboard_snapshot()
+        self.assertEqual({"task", "decision", "exploration", "commit"}, {item["kind"] for item in snapshot["search_index"]})
 
     def test_legacy_migration_is_complete_idempotent_and_deletes_sources(self) -> None:
         maintenance = self.root / "maintenance"
@@ -406,6 +457,40 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(filter_records([], "anything"), [])
         self.assertLessEqual(len(short(records[1]["summary"], 40)), 40)
 
+    def test_global_search_requires_all_tokens_and_handles_empty_query(self) -> None:
+        records = [
+            {"record_id": "1", "search_text": "Alpha 数据库 migration"},
+            {"record_id": "2", "search_text": "alpha dashboard"},
+            {"record_id": "3", "search_text": "数据库 decision"},
+        ]
+        self.assertEqual([item["record_id"] for item in global_search(records, "数据库 ALPHA")], ["1"])
+        self.assertEqual(global_search(records, ""), [])
+        self.assertEqual(global_search(records, "missing"), [])
+        mixed_times = [
+            {"occurred_at": "2026-07-23 10:30:00（Asia/Shanghai）", "id": "task"},
+            {"occurred_at": "2026-07-23T09:45:00+08:00", "id": "commit"},
+        ]
+        self.assertEqual([item["id"] for item in sort_records(mixed_times, "occurred_at", True)], ["task", "commit"])
+
+    def test_dashboard_presets_use_ten_negative_only_and_unmerged_explorations(self) -> None:
+        snapshot = {
+            "history": [{"event_id": f"task-{index}"} for index in range(15)],
+            "explorations": [
+                {"event_id": "negative", "result": "negative"},
+                {"event_id": "paused", "result": "paused"},
+                {"event_id": "inconclusive", "result": "inconclusive"},
+            ],
+            "timeline": {"branches": [
+                {"name": "research/open", "unmerged": True},
+                {"name": "archive/research/old", "unmerged": False},
+                {"name": "experiment/done", "unmerged": False},
+            ]},
+        }
+        presets = dashboard_presets(snapshot)
+        self.assertEqual(presets["recent"], [f"task-{index}" for index in range(10)])
+        self.assertEqual(presets["negative"], ["negative"])
+        self.assertEqual(presets["unmerged"], ["research/open"])
+
     def test_refresh_failure_preserves_last_snapshot(self) -> None:
         class Provider:
             def __init__(self):
@@ -448,6 +533,29 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual({item["hash"] for item in focused["nodes"]}, {"b" * 40, "c" * 40})
         self.assertEqual(focused["lanes"], ["main", "research/model"])
 
+    def test_timeline_layout_folds_after_fifty_and_can_expand(self) -> None:
+        commits = []
+        edges = []
+        for index in range(60):
+            commit_hash = f"{index:040x}"
+            parent = f"{index - 1:040x}" if index else None
+            commits.append({
+                "hash": commit_hash, "short_hash": commit_hash[:8], "parents": [parent] if parent else [],
+                "lane": "main", "subject": f"commit {index}", "task_ids": [], "event_branches": [], "events": [],
+            })
+            if parent:
+                edges.append({"parent": parent, "child": commit_hash})
+        timeline = {"lanes": ["main"], "commits": commits, "edges": edges}
+        folded = timeline_layout(timeline)
+        self.assertEqual(len(folded["nodes"]), 50)
+        self.assertEqual(folded["folded_count"], 10)
+        self.assertEqual(len(folded["truncated"]), 1)
+        expanded = timeline_layout(timeline, expanded=True)
+        self.assertEqual(len(expanded["nodes"]), 60)
+        self.assertEqual(expanded["folded_count"], 0)
+        subset = timeline_layout(timeline, branch_subset={"research/missing"})
+        self.assertEqual(subset["nodes"], [])
+
     def test_timeline_refresh_error_preserves_previous_graph(self) -> None:
         class Provider:
             def __init__(self):
@@ -456,8 +564,10 @@ class DashboardPresentationTests(unittest.TestCase):
             def load(self):
                 self.calls += 1
                 if self.calls == 1:
-                    return {"timeline": {"status": "passed", "commits": [{"hash": "abc"}]}, "timeline_error": None}
-                return {"timeline": {"status": "unavailable", "commits": []}, "timeline_error": "git unavailable"}
+                    return {"timeline": {"status": "passed", "commits": [{"hash": "abc"}]}, "timeline_error": None,
+                            "search_index": [{"kind": "commit", "record_id": "abc", "occurred_at": "2"}]}
+                return {"timeline": {"status": "unavailable", "commits": []}, "timeline_error": "git unavailable",
+                        "search_index": [{"kind": "task", "record_id": "task", "occurred_at": "3"}]}
 
         controller = DashboardController(Provider())
         first, error = controller.refresh()
@@ -466,6 +576,7 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(second["timeline"]["commits"], first["timeline"]["commits"])
         self.assertTrue(second["timeline"]["stale"])
+        self.assertEqual({item["kind"] for item in second["search_index"]}, {"task", "commit"})
 
     def test_tkinter_unavailable_has_cli_fallback(self) -> None:
         with patch("project_hooks.dashboard.import_tk", side_effect=DashboardError("missing\n" + CLI_FALLBACK)):
