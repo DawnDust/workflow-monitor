@@ -5,9 +5,7 @@
   "state_dir": ".project_hooks",
   "backend": "project_hooks",
   "core_read_order": [
-    "maintenance/project_context.md",
-    "maintenance/branch_workflow.md",
-    "maintenance/workflow_spec.md"
+    "maintenance/README.md"
   ],
   "context_command": "python -m project_hooks context --format markdown",
   "maintenance_store": {

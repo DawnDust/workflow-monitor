@@ -40,9 +40,7 @@ TOPIC_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 MANAGED_HOOK_MARKER = "# project-maintenance-hooks managed"
 TRACKED_HOOKS_DIR = ".githooks"
 STATIC_READ_ORDER = [
-    "maintenance/project_context.md",
-    "maintenance/branch_workflow.md",
-    "maintenance/workflow_spec.md",
+    "maintenance/README.md",
 ]
 DEFAULT_BRANCH_POLICY = {
     "default_branch": "main",

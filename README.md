@@ -15,7 +15,7 @@ python -m project_hooks check
 
 之后由仓库内 [AGENTS.md](./AGENTS.md) 约束 Codex：每次任务先通过 `context` 读取 SQLite 动态上下文并执行 `start`，通过结构化命令更新状态，最后执行 `end`。
 
-`main` 只保存稳定内容。新理论、算法、实验或不确定改动从干净的 `main` 启动探索任务；验证成功后通过 Squash PR 合并，失败、暂停或不可判决的尝试保存在 `archive/` 分支。完整规则见 [maintenance/branch_workflow.md](./maintenance/branch_workflow.md)。
+`main` 只保存稳定内容。新理论、算法、实验或不确定改动从干净的 `main` 启动探索任务；验证成功后通过 Squash PR 合并，失败、暂停或不可判决的尝试保存在 `archive/` 分支。完整规则见 [maintenance/README.md](./maintenance/README.md)。
 
 ## 项目结构
 
@@ -44,6 +44,6 @@ python -m project_hooks dashboard
 
 动态维护数据由 `.project_hooks/maintenance.sqlite3` 查询和事务管理；Git 只跟踪追加式 `maintenance/events.jsonl`。数据库缺失、损坏或切换分支后会从事件日志重建。
 
-`dashboard` 使用 Python 自带的 Tkinter 打开只读桌面窗口，分页显示当前状态、全局搜索、Git 时间线、任务历史、决策、探索和原始事件。窗口可跨任务、决策、探索和提交搜索，提供最近任务、失败探索与未合并分支快捷筛选；时间线超过 50 个提交时自动折叠旧记录。窗口不会修改维护数据或执行网络操作。可使用 `--refresh-seconds 0` 关闭自动刷新，或用 `--branch <name>` 查看指定分支流。
+`dashboard` 使用 Python 自带的 Tkinter 打开只读桌面窗口，分页显示当前状态、全局搜索、任务详情、Git 时间线、任务历史、决策、探索和原始事件。窗口可跨记录搜索和双向定位，提供最近任务、失败探索与未合并分支快捷筛选；时间线超过 50 个提交时自动折叠旧记录。窗口不会修改维护数据或执行网络操作。可使用 `--refresh-seconds 0` 关闭自动刷新，或用 `--branch <name>` 查看指定分支流。
 
 项目维护文档索引见 [maintenance/README.md](./maintenance/README.md)。

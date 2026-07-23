@@ -341,9 +341,9 @@ class MaintenanceReadModel:
             if kind == "history":
                 return rows(connection, "SELECT event_id, occurred_at, task_id, summary, evidence, result, branch, payload_json FROM task_archive ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             if kind == "decisions":
-                return rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch FROM decisions ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
+                return rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch, task_id FROM decisions ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             if kind == "explorations":
-                return rows(connection, "SELECT event_id, branch, occurred_at, goal, result, evidence, disposition_ref FROM explorations ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
+                return rows(connection, "SELECT x.event_id, x.branch, x.occurred_at, x.goal, x.result, x.evidence, x.disposition_ref, e.task_id FROM explorations x JOIN events e ON e.event_id=x.event_id ORDER BY x.occurred_at DESC, x.event_id DESC LIMIT ?", (limit,))
             if kind == "events":
                 values = rows(connection, "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
                 for value in values:
@@ -358,7 +358,8 @@ class MaintenanceReadModel:
         result: list[dict] = []
 
         def add(kind: str, label: str, target: str, record_id: str, occurred_at: str,
-                branch: str, title: str, summary: str, values: list[object]) -> None:
+                branch: str, title: str, summary: str, values: list[object],
+                task_ids: list[str] | None = None) -> None:
             search_text = " ".join(str(value or "") for value in values)
             result.append({
                 "kind": kind,
@@ -370,37 +371,157 @@ class MaintenanceReadModel:
                 "title": title,
                 "summary": summary,
                 "search_text": search_text,
+                "task_ids": task_ids or [],
             })
 
         task_rows = rows(connection, "SELECT event_id, occurred_at, task_id, summary, evidence, result, branch FROM task_archive")
         for item in task_rows:
             add("task", "任务", "history", item["event_id"], item["occurred_at"], item["branch"],
                 item["summary"] or item["task_id"] or "未命名任务", item["result"] or "",
-                [item["task_id"], item["summary"], item["evidence"], item["result"], item["branch"]])
+                [item["task_id"], item["summary"], item["evidence"], item["result"], item["branch"]],
+                [item["task_id"]] if item["task_id"] else [])
 
-        decision_rows = rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch FROM decisions")
+        decision_rows = rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch, task_id FROM decisions")
         for item in decision_rows:
             add("decision", "决策", "decisions", item["event_id"], item["occurred_at"], item["branch"],
                 item["decision"] or item["decision_id"], item["basis"] or "",
-                [item["decision_id"], item["decision"], item["alternatives"], item["basis"], item["reopen_condition"], item["branch"]])
+                [item["decision_id"], item["decision"], item["alternatives"], item["basis"], item["reopen_condition"], item["branch"], item["task_id"]],
+                [item["task_id"]] if item["task_id"] else [])
 
-        exploration_rows = rows(connection, "SELECT event_id, branch, occurred_at, goal, result, evidence, disposition_ref FROM explorations")
+        exploration_rows = rows(connection, "SELECT x.event_id, x.branch, x.occurred_at, x.goal, x.result, x.evidence, x.disposition_ref, e.task_id FROM explorations x JOIN events e ON e.event_id=x.event_id")
         for item in exploration_rows:
             add("exploration", "探索", "explorations", item["event_id"], item["occurred_at"], item["branch"],
                 item["goal"] or item["branch"], item["result"] or "",
-                [item["branch"], item["goal"], item["result"], item["evidence"], item["disposition_ref"]])
+                [item["branch"], item["goal"], item["result"], item["evidence"], item["disposition_ref"], item["task_id"]],
+                [item["task_id"]] if item["task_id"] else [])
 
         for commit in timeline.get("commits", []):
             add("commit", "提交", "timeline", commit["hash"], commit["occurred_at"], commit["lane"],
                 commit["subject"], commit["short_hash"],
                 [commit["hash"], commit["short_hash"], commit["subject"], commit["author"], commit["lane"],
-                 *commit.get("refs", []), *commit.get("task_ids", []), *commit.get("event_branches", [])])
+                 *commit.get("refs", []), *commit.get("task_ids", []), *commit.get("event_branches", [])],
+                list(commit.get("task_ids", [])))
 
         return sorted(
             result,
             key=lambda item: (item["occurred_at"][:19].replace(" ", "T"), item["record_id"]),
             reverse=True,
         )
+
+    @staticmethod
+    def _task_details(connection: sqlite3.Connection, timeline: dict) -> dict[str, dict]:
+        event_rows = rows(
+            connection,
+            "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events "
+            "WHERE task_id IS NOT NULL ORDER BY occurred_at, event_id",
+        )
+        events_by_task: dict[str, list[dict]] = {}
+        for event in event_rows:
+            event["payload"] = json.loads(event.pop("payload_json"))
+            events_by_task.setdefault(event["task_id"], []).append(event)
+
+        archives = {
+            item["task_id"]: item for item in rows(
+                connection,
+                "SELECT event_id, occurred_at, task_id, summary, evidence, result, branch, payload_json "
+                "FROM task_archive WHERE task_id IS NOT NULL",
+            )
+        }
+        decisions = rows(
+            connection,
+            "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch, task_id "
+            "FROM decisions WHERE task_id IS NOT NULL",
+        )
+        explorations = rows(
+            connection,
+            "SELECT x.event_id, x.branch, x.occurred_at, x.goal, x.result, x.evidence, x.disposition_ref, e.task_id "
+            "FROM explorations x JOIN events e ON e.event_id=x.event_id WHERE e.task_id IS NOT NULL",
+        )
+        decisions_by_task: dict[str, list[dict]] = {}
+        explorations_by_task: dict[str, list[dict]] = {}
+        commits_by_task: dict[str, list[dict]] = {}
+        for item in decisions:
+            decisions_by_task.setdefault(item["task_id"], []).append(item)
+        for item in explorations:
+            explorations_by_task.setdefault(item["task_id"], []).append(item)
+        for commit in timeline.get("commits", []):
+            for task_id in commit.get("task_ids", []):
+                commits_by_task.setdefault(task_id, []).append(commit)
+
+        task_ids = set(events_by_task) | set(archives) | set(decisions_by_task) | set(explorations_by_task) | set(commits_by_task)
+        details: dict[str, dict] = {}
+        for task_id in task_ids:
+            task_events = events_by_task.get(task_id, [])
+            archive = archives.get(task_id)
+            start = next((item for item in task_events if item["event_type"] == "task.started"), None)
+            finish = next((item for item in reversed(task_events) if item["event_type"] in {"task.finished", "task.receipt_imported"}), None)
+            attempt_start = next((item for item in task_events if item["event_type"] == "attempt.started"), None)
+            finish_payload = finish["payload"] if finish else {}
+            start_payload = start["payload"] if start else {}
+            attempt_payload = attempt_start["payload"] if attempt_start else {}
+
+            evidence: list[str] = []
+            if archive and archive.get("evidence"):
+                evidence.append(archive["evidence"])
+            conclusion = finish_payload.get("note") or ""
+            for event in task_events:
+                payload = event["payload"]
+                values = payload.get("evidence", [])
+                if isinstance(values, str):
+                    values = [values]
+                for value in values:
+                    if value and value not in evidence:
+                        evidence.append(value)
+                if payload.get("conclusion"):
+                    conclusion = payload["conclusion"]
+
+            related: list[dict] = []
+            for item in decisions_by_task.get(task_id, []):
+                related.append({
+                    "kind": "decision", "kind_label": "决策", "occurred_at": item["occurred_at"],
+                    "title": item["decision"], "summary": item["basis"], "target": "decisions",
+                    "record_id": item["event_id"], "task_id": task_id,
+                })
+            for item in explorations_by_task.get(task_id, []):
+                related.append({
+                    "kind": "exploration", "kind_label": "探索", "occurred_at": item["occurred_at"],
+                    "title": item["goal"], "summary": item["result"], "target": "explorations",
+                    "record_id": item["event_id"], "task_id": task_id,
+                })
+            for commit in commits_by_task.get(task_id, []):
+                related.append({
+                    "kind": "commit", "kind_label": "提交", "occurred_at": commit["occurred_at"],
+                    "title": commit["subject"], "summary": commit["short_hash"], "target": "timeline",
+                    "record_id": commit["hash"], "task_id": task_id,
+                })
+            for event in task_events:
+                payload = event["payload"]
+                summary = next((payload.get(key) for key in ("summary", "scope", "goal", "decision", "state", "task") if payload.get(key)), "")
+                related.append({
+                    "kind": "event", "kind_label": "事件", "occurred_at": event["occurred_at"],
+                    "title": event["event_type"], "summary": str(summary), "target": "events",
+                    "record_id": event["event_id"], "task_id": task_id,
+                })
+            related.sort(key=lambda item: (item["occurred_at"], item["record_id"]), reverse=True)
+
+            branch = (archive or {}).get("branch") or (task_events[0]["branch"] if task_events else "")
+            started_at = start["occurred_at"] if start else finish_payload.get("started_at") or (task_events[0]["occurred_at"] if task_events else "")
+            finished_at = (archive or {}).get("occurred_at") or (finish["occurred_at"] if finish else "")
+            result = (archive or {}).get("result") or "active"
+            details[task_id] = {
+                "task_id": task_id,
+                "goal": start_payload.get("scope") or (archive or {}).get("summary") or attempt_payload.get("goal") or "",
+                "acceptance": start_payload.get("acceptance") or attempt_payload.get("acceptance") or "",
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "branch": branch,
+                "result": result,
+                "route": finish_payload.get("route") or "",
+                "conclusion": conclusion,
+                "evidence": evidence,
+                "related": related,
+            }
+        return details
 
     def dashboard_snapshot(self, branch: str | None = None, *, limit: int = 1000) -> dict:
         branch = branch or self.branch_provider()
@@ -409,8 +530,8 @@ class MaintenanceReadModel:
             integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
             context = self._context(connection, branch)
             history = rows(connection, "SELECT event_id, occurred_at, task_id, summary, evidence, result, branch, payload_json FROM task_archive ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
-            decisions = rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch FROM decisions ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
-            explorations = rows(connection, "SELECT event_id, branch, occurred_at, goal, result, evidence, disposition_ref FROM explorations ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
+            decisions = rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch, task_id FROM decisions ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
+            explorations = rows(connection, "SELECT x.event_id, x.branch, x.occurred_at, x.goal, x.result, x.evidence, x.disposition_ref, e.task_id FROM explorations x JOIN events e ON e.event_id=x.event_id ORDER BY x.occurred_at DESC, x.event_id DESC LIMIT ?", (limit,))
             events = rows(connection, "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             for event in events:
                 event["payload"] = json.loads(event.pop("payload_json"))
@@ -438,6 +559,7 @@ class MaintenanceReadModel:
                 "timeline": timeline,
                 "timeline_error": timeline_error,
                 "search_index": self._search_index(connection, timeline),
+                "task_details": self._task_details(connection, timeline),
             }
         finally:
             connection.close()

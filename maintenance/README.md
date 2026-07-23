@@ -1,12 +1,100 @@
-# 项目维护索引
+# 项目维护规范
 
-本目录保留静态规范和一份 Git 可合并的动态事件日志。SQLite 工作库位于 `.project_hooks/maintenance.sqlite3`，不纳入版本控制。
+本项目将生命周期、状态、决策、探索和交接管理全部保留在仓库内。SQLite 提供查询投影，`events.jsonl` 是可审阅、可重建的追加式事件源；不依赖全局 Codex Hook、全局 Git Hook 或插件。
 
-| 文件 | 唯一职责 |
+## 一、项目边界
+
+### 目录职责
+
+| 路径 | 职责 |
 |:---|:---|
-| [project_context.md](./project_context.md) | 稳定的项目边界、架构、命令和约定 |
-| [branch_workflow.md](./branch_workflow.md) | 稳定主线、探索分支、成功合并与失败归档规则 |
-| [workflow_spec.md](./workflow_spec.md) | 生命周期、更新顺序和 Git 归属规则 |
-| [events.jsonl](./events.jsonl) | 追加式动态事件源，用于 Git 审阅、合并和数据库重建 |
+| `.codex/project-maintenance-workflow.json` | 工作流启用标记与策略 |
+| `project_hooks/` | SQLite 数据层、生命周期、分支门禁、检查和安全自动提交 |
+| `.githooks/pre-commit` | 随仓库克隆的提交门禁入口 |
+| `maintenance/events.jsonl` | Git 跟踪的追加式动态事件源 |
+| `source/` | 外部原始资料与来源证据 |
+| `data/` | 原始、过程和处理后数据 |
+| `theory/` | 理论框架、假设、定义和推导 |
+| `analysis/` | 分析代码、Notebook、实验与过程记录 |
+| `outputs/` | 报告、图表、模型和可交付成果 |
 
-不要手工改写既有事件行或直接编辑 SQLite。使用 `context`、`history`、`decisions`、`explorations` 和 `attempt show` 查询，或运行 `python -m project_hooks dashboard` 打开只读桌面窗口；使用结构化 CLI 写入。
+### 项目约定
+
+- 原始资料不覆盖，过程与成果分开，同一文件只保留一个权威位置。
+- 通用文件名优先使用 `YYYYMMDD_topic_v01.ext`，目录规模增大后再增加子层级。
+- 动态数据由 `.project_hooks/maintenance.sqlite3` 管理，以 `maintenance/events.jsonl` 作为可重建事件源。
+- 事件日志只追加，不手工改写既有行；SQLite 不纳入 Git，也不是唯一备份。
+- `main` 只保存稳定、可复用、已验证内容；不确定改动使用独立探索分支。
+- Hook 只管理本地状态和分支，不自动 push、创建 PR 或合并。
+- Dashboard 只读，不写数据库、不修改日志，也不执行 Git 或网络操作。
+
+### 常用命令
+
+```powershell
+python -m project_hooks install
+python -m project_hooks check
+python -m project_hooks status
+python -m project_hooks branch-status
+python -m project_hooks context --format markdown
+python -m project_hooks db verify
+python -m project_hooks dashboard
+```
+
+新 clone 或 worktree 必须运行一次 `install`，仅为当前仓库设置 `core.hooksPath=.githooks`。
+
+## 二、任务生命周期
+
+每次任务固定按以下顺序执行：
+
+1. 运行 `python -m project_hooks context --format markdown`，再读取本规范。
+2. 首次写入前运行 `python -m project_hooks start <task_id> ...`。
+3. 使用 `state update` 更新当前状态；路线改变时使用 `decision add`；探索任务使用 `attempt update` 记录假设、证据和结论。
+4. 运行 `python -m project_hooks end <task_id> ...`，由 Hook 写入任务档案与交接事件。
+
+稳定维护使用 `--track stable`。探索使用 `--track research|experiment|sandbox --topic <slug>`，由命令保存基线并安全创建或复用分支。
+
+只有标记为 `large` 且使用 `--git-commit auto|always` 的任务才尝试自动提交。自动提交只包含任务启动后实际变化且不与启动前脏文件重叠的路径，保留既有暂存区，且不执行 push。`auto` 遇到归属冲突时跳过并报告，`always` 遇到冲突时阻止结束。
+
+任务启动分支会写入活动状态；`status`、`end` 和 pre-commit 均拒绝任务中途切换分支。禁止绕过 `end`、删除活动状态、直接编辑 SQLite 或手工修改既有事件。
+
+## 三、分支与探索
+
+`main` 只接收规范整理、Hook 维护、已确认小修和验证后的成果。新理论、算法、实验及结果不确定的改动不得直接在 `main` 尝试。
+
+| 分支格式 | 用途 |
+|:---|:---|
+| `research/<topic>` | 理论、模型和知识路线探索 |
+| `experiment/<topic>` | 可验证的实验、数据或算法尝试 |
+| `sandbox/<topic>` | 方向尚未稳定的短期试验 |
+| `archive/<type>/<topic>` | 失败、暂停或不可判决尝试的长期保留 |
+
+`topic` 只使用小写字母、数字和连字符。一个探索分支对应一条尝试记录；同一分支上的后续任务复用该记录。
+
+探索结束必须显式选择：
+
+- `active`：仍需继续。
+- `validated`：验收成立，证据与结论完整，可准备 PR。
+- `negative`：结果否定原假设。
+- `inconclusive`：证据不足，暂不可判决。
+- `paused`：主动暂停并保留现场。
+
+只有 `validated` 可运行 `prepare-pr`。成功成果基于最新 `main` 通过 Squash PR 合并，必须等待用户明确确认；冲突只在探索分支解决。`negative`、`inconclusive` 和 `paused` 使用 `archive-attempt` 归档，之后在 `main` 通过 `exploration import` 导入结论和证据，不合并探索内容。
+
+`prepare-pr` 和 `archive-attempt` 只检查或修改本地分支。所有 push、PR、远程分支删除和合并均由外部流程显式执行。
+
+## 四、记录与只读 Dashboard
+
+`events.jsonl` 保存任务、状态、交接、决策和探索的不可抹除事件。SQLite 保存事件投影、查询索引、活动任务和临时文件基线，可随时从事件日志重建。
+
+运行 `python -m project_hooks dashboard` 打开 Tkinter 窗口，包含：
+
+- 概览、全局搜索、任务详情、Git 时间线、任务历史、决策、探索和原始事件。
+- 跨任务、决策、探索和提交的搜索，以及最近任务、失败探索和未合并分支快捷筛选。
+- 任务详情中心，集中显示目标、验收条件、结论、证据和关联记录，并支持双向定位。
+- 本地 Git DAG：实线表示父子关系，虚线表示事件关联；不访问 GitHub。
+- 默认保留最近 50 次提交，旧提交折叠并可临时展开；搜索旧提交时自动展开。
+- 分支筛选、本页高亮、排序、复制、手动刷新和自动刷新。
+
+Git 时间线刷新失败时保留上一次成功图形，SQLite 分页继续刷新并显示警告。`--refresh-seconds <N>` 设置刷新间隔，默认 3 秒，`0` 表示关闭；`--branch <name>` 查看指定分支流。
+
+图形环境不可用时，继续使用 `context`、`history`、`decisions`、`explorations` 和 `db status`。
