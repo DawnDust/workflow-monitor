@@ -17,7 +17,7 @@ from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 from .dashboard import DashboardDataProvider, DashboardError, launch_dashboard
-from .read_model import MaintenanceReadModel, ReadModelError
+from .read_model import MaintenanceReadModel, ReadModelError, git_state_summary
 from .store import (
     SCHEMA_VERSION,
     StoreError,
@@ -575,9 +575,6 @@ def finish_task(args: argparse.Namespace) -> dict:
         "route": args.route, "methods_action": args.methods_action, "main_goal": args.main_goal,
         "note": args.note, "attempt_state": args.attempt_state, "started_at": record["started_at"],
     }))
-    events.append(emit("handoff.recorded", branch=branch, task_id=args.task_id, payload={
-        "task": record["declaration"]["scope"], "result": args.note, "main_goal_change": args.main_goal,
-    }))
     persist(events)
     paths = changed(record["baseline"], snapshot())
     report = {"task_id": args.task_id, "started_at": record["started_at"], "finished_at": timestamp(),
@@ -679,7 +676,8 @@ def markdown_context(data: dict) -> str:
     lines = ["# 动态维护上下文", "", f"- 当前分支：`{data['branch']}`",
              f"- 当前状态：{state.get('status', '未设置')}", f"- 主目标版本：{state.get('main_goal_version', '未设置')}",
              "", "## 当前主目标", "", state.get("goal") or "未设置", "", "## 当前判决", "",
-             state.get("judgment") or "未设置", "", "## 真实断点", "", state.get("breakpoint") or "未设置",
+             state.get("judgment") or "未设置", "", "## 工作断点", "", state.get("breakpoint") or "未设置",
+             "", "## 真实断点", "", git_state_summary(data.get("git_state") or {}),
              "", "## 接下来三步", ""]
     for index, item in enumerate(state.get("next_steps", []), 1):
         lines.append(f"{index}. {item}")

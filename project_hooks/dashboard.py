@@ -7,7 +7,7 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Callable
 
-from .read_model import MaintenanceReadModel, ReadModelError
+from .read_model import MaintenanceReadModel, ReadModelError, git_state_summary
 
 
 CLI_FALLBACK = (
@@ -25,6 +25,19 @@ class DashboardError(RuntimeError):
 
 
 PRIMARY_TABS = ("概览", "搜索", "任务", "时间线", "记录")
+
+RESULT_LABELS = {
+    "completed": "完成",
+    "blocked": "阻塞",
+    "failed": "失败",
+    "indeterminate": "待判定",
+    "active": "进行中",
+}
+
+
+def result_label(value: object) -> str:
+    text = str(value or "")
+    return RESULT_LABELS.get(text, text or "未知")
 
 
 def filter_records(records: list[dict], query: str) -> list[dict]:
@@ -408,15 +421,13 @@ class TaskPage:
         panes.add(detail_frame, weight=3)
 
         self.tree = ttk.Treeview(
-            list_frame, columns=("started_at", "result", "branch", "goal"),
-            show="tree headings", height=18,
+            list_frame, columns=("occurred_at", "goal", "result", "status"),
+            show="headings", height=18,
         )
-        self.tree.heading("#0", text="任务 ID")
-        for key, label, width in (("started_at", "开始", 135), ("result", "结果", 75),
-                                  ("branch", "分支", 105), ("goal", "目标", 230)):
+        for key, label, width in (("occurred_at", "时间", 135), ("goal", "任务", 300),
+                                  ("result", "结果", 75), ("status", "状态", 85)):
             self.tree.heading(key, text=label)
             self.tree.column(key, width=width, minwidth=65, stretch=True)
-        self.tree.column("#0", width=190, minwidth=150, stretch=True)
         vertical = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
         horizontal = ttk.Scrollbar(list_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
@@ -483,8 +494,10 @@ class TaskPage:
         selected_iid = None
         for index, task in enumerate(self.visible):
             iid = f"task-{index}"
-            self.tree.insert("", "end", iid=iid, text=task["task_id"], values=(
-                short(task.get("started_at"), 16), task.get("result"), task.get("branch"), short(task.get("goal"), 55),
+            occurred_at = task.get("finished_at") or task.get("started_at")
+            self.tree.insert("", "end", iid=iid, values=(
+                short(occurred_at, 16), short(task.get("goal"), 65),
+                result_label(task.get("result")), task.get("status") or "未知",
             ))
             if task["task_id"] == self.current_task_id:
                 selected_iid = iid
@@ -525,12 +538,16 @@ class TaskPage:
         if isinstance(acceptance, list):
             acceptance = "\n".join(f"- {item}" for item in acceptance) or "未记录"
         evidence = "\n".join(f"- {item}" for item in task.get("evidence", [])) or "无"
+        linked_commits = "\n".join(f"- {item}" for item in task.get("linked_commits", [])) or "无"
+        publication_commits = "\n".join(f"- {item}" for item in task.get("publication_commits", [])) or "无"
         self._set_summary(
             f"任务：{task['task_id']}\n分支：{task.get('branch') or '未知'}\n"
             f"开始：{task.get('started_at') or '未知'}\n结束：{task.get('finished_at') or '进行中'}\n"
-            f"结果：{task.get('result') or '未知'}　路线：{task.get('route') or '未记录'}\n\n"
+            f"结果：{result_label(task.get('result'))}　状态：{task.get('status') or '未知'}　"
+            f"路线：{task.get('route') or '未记录'}\n\n"
             f"目标\n{task.get('goal') or '未记录'}\n\n验收条件\n{acceptance}\n\n"
-            f"结论\n{task.get('conclusion') or '未记录'}\n\n证据\n{evidence}"
+            f"结论\n{task.get('conclusion') or '未记录'}\n\n证据\n{evidence}\n\n"
+            f"关联提交\n{linked_commits}\n\n已发布提交\n{publication_commits}"
         )
         self.set_related(task.get("related", []))
 
@@ -1183,7 +1200,8 @@ class DashboardApp:
             f"状态：{state.get('status') or '未设置'}　目标版本：{state.get('main_goal_version') or '未设置'}",
             f"活动任务：{active.get('task_id')}（{active.get('branch')}）" if active else "活动任务：无", "",
             "当前目标", state.get("goal") or "未设置", "", "当前判决", state.get("judgment") or "未设置", "",
-            "真实断点", state.get("breakpoint") or "未设置", "", "接下来三步",
+            "工作断点", state.get("breakpoint") or "未设置", "",
+            "真实断点", git_state_summary(context.get("git_state") or {}), "", "接下来三步",
         ]
         steps = state.get("next_steps", [])
         lines.extend(f"{index}. {item}" for index, item in enumerate(steps, 1))

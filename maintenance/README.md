@@ -12,11 +12,11 @@
 | `project_hooks/` | SQLite 数据层、生命周期、分支门禁、检查和安全自动提交 |
 | `.githooks/pre-commit` | 随仓库克隆的提交门禁入口 |
 | `maintenance/events.jsonl` | Git 跟踪的追加式动态事件源 |
-| `source/` | 外部原始资料与来源证据 |
-| `data/` | 原始、过程和处理后数据 |
-| `theory/` | 理论框架、假设、定义和推导 |
-| `analysis/` | 分析代码、Notebook、实验与过程记录 |
-| `outputs/` | 报告、图表、模型和可交付成果 |
+| `source/` | 外部原始资料与来源证据，首次使用时创建 |
+| `data/` | 原始、过程和处理后数据，首次使用时创建 |
+| `theory/` | 理论框架、假设、定义和推导，首次使用时创建 |
+| `analysis/` | 分析代码、Notebook、实验与过程记录，首次使用时创建 |
+| `outputs/` | 报告、图表、模型和可交付成果，首次使用时创建 |
 
 ### 项目约定
 
@@ -49,7 +49,7 @@ python -m project_hooks dashboard
 1. 运行 `python -m project_hooks context --format markdown`，再读取本规范。
 2. 首次写入前运行 `python -m project_hooks start <task_id> ...`。
 3. 使用 `state update` 更新当前状态；路线改变时使用 `decision add`；探索任务使用 `attempt update` 记录假设、证据和结论。
-4. 运行 `python -m project_hooks end <task_id> ...`，由 Hook 写入任务档案与交接事件。
+4. 运行 `python -m project_hooks end <task_id> ...`，由 Hook 写入单一完成事件；最近交接由完成记录投影生成。
 
 稳定维护使用 `--track stable`。探索使用 `--track research|experiment|sandbox --topic <slug>`，由命令保存基线并安全创建或复用分支。
 
@@ -84,13 +84,17 @@ python -m project_hooks dashboard
 
 ## 四、记录与只读 Dashboard
 
-`events.jsonl` 保存任务、状态、交接、决策和探索的不可抹除事件。SQLite 保存事件投影、查询索引、活动任务和临时文件基线，可随时从事件日志重建。
+`events.jsonl` 保存任务、状态、决策和探索的不可抹除事件。任务完成事件同时提供交接投影，旧版独立交接事件继续兼容并按任务去重。SQLite 保存事件投影、查询索引、活动任务和临时文件基线，可随时从事件日志重建。
+
+`context` 和 Dashboard 分开显示两个断点：持久化的“工作断点”说明最后完成到哪里；只读“真实断点”实时比较本地 HEAD 与本地 `origin/main` 跟踪引用，显示同步、领先、落后、分叉或不可用。该检查不执行 `fetch` 或其他网络操作。
+
+任务的发布状态不单独写事件，而是根据任务关联提交与 `origin/main` 的祖先关系实时推导为已发布、部分发布、待发布、仅记录或未知。发布后不再创建“记录已发布”专用任务。
 
 运行 `python -m project_hooks dashboard` 打开 Tkinter 窗口，包含：
 
 - 五个日常分页：概览、搜索、任务、时间线和记录。
 - 跨任务、决策、探索和提交的搜索，以及最近任务、失败探索和未合并分支快捷筛选。
-- 任务页将可搜索历史列表与详情合并，集中显示目标、验收条件、结论、证据和关联记录。
+- 任务页默认只列出时间、任务、结果和状态；详情集中显示任务 ID、分支、目标、验收条件、结论、证据、发布提交和关联记录。
 - 记录页统一查看和筛选决策与探索；原始事件、Schema、日志哈希和刷新诊断集中在独立的只读“高级查看”窗口。
 - 任务、记录、提交与原始事件之间支持双向定位。
 - 本地 Git DAG：实线表示父子关系，虚线表示事件关联；不访问 GitHub。
