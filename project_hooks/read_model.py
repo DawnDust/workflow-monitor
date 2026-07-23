@@ -15,6 +15,24 @@ class ReadModelError(RuntimeError):
     pass
 
 
+GIT_RELATION_LABELS = {
+    "synced": "同步",
+    "ahead": "领先",
+    "behind": "落后",
+    "diverged": "分叉",
+    "unavailable": "不可用",
+}
+
+
+def git_state_summary(state: dict) -> str:
+    branch = state.get("branch") or "未知分支"
+    head = state.get("head") or "未知"
+    upstream_ref = state.get("upstream_ref") or "origin/main"
+    upstream_head = state.get("upstream_head") or "不可用"
+    relation = GIT_RELATION_LABELS.get(state.get("relation"), state.get("relation") or "不可用")
+    return f"本地 {branch}：{head}\n{upstream_ref}：{upstream_head}\n关系：{relation}"
+
+
 class MaintenanceReadModel:
     def __init__(self, database: Path, journal: Path, branch_provider: Callable[[], str], repo: Path | None = None):
         self.database_path = database
@@ -51,6 +69,43 @@ class MaintenanceReadModel:
         )
         head = self._git("rev-parse", "--verify", "HEAD").strip()
         return f"{head}\n{refs}\n{journal_hash(self.journal_path)}"
+
+    def git_state(self, default_branch: str = "main") -> dict:
+        branch = self.branch_provider()
+        upstream_ref = f"origin/{default_branch}"
+        result = {
+            "branch": branch,
+            "head": None,
+            "upstream_ref": upstream_ref,
+            "upstream_head": None,
+            "relation": "unavailable",
+            "ahead": None,
+            "behind": None,
+            "error": None,
+        }
+        try:
+            result["head"] = self._git("rev-parse", "--verify", "HEAD").strip()
+            result["upstream_head"] = self._git(
+                "rev-parse", "--verify", f"refs/remotes/{upstream_ref}",
+            ).strip()
+            counts = self._git(
+                "rev-list", "--left-right", "--count", f"HEAD...refs/remotes/{upstream_ref}",
+            ).strip().split()
+            if len(counts) != 2:
+                raise ReadModelError("Git 未返回可识别的领先/落后计数")
+            ahead, behind = (int(value) for value in counts)
+            result["ahead"], result["behind"] = ahead, behind
+            if ahead == 0 and behind == 0:
+                result["relation"] = "synced"
+            elif ahead > 0 and behind == 0:
+                result["relation"] = "ahead"
+            elif ahead == 0 and behind > 0:
+                result["relation"] = "behind"
+            else:
+                result["relation"] = "diverged"
+        except (ReadModelError, ValueError) as exc:
+            result["error"] = str(exc)
+        return result
 
     def _event_commit_map(self) -> dict[str, list[str]]:
         output = self._git(
@@ -178,6 +233,11 @@ class MaintenanceReadModel:
                     commit["event_branches"].append(event["branch"])
 
         default = "main" if "main" in branch_tips else (next(iter(branch_tips), "main"))
+        publication_ref = f"origin/{default}"
+        publication_tip = next(
+            (tip for branch, tip, remote in ref_entries if remote and branch == publication_ref),
+            None,
+        )
 
         def ancestry(start: str) -> set[str]:
             found: set[str] = set()
@@ -191,6 +251,9 @@ class MaintenanceReadModel:
             return found
 
         default_ancestry = ancestry(branch_tips[default]) if default in branch_tips else set()
+        publication_ancestry = ancestry(publication_tip) if publication_tip else set()
+        for commit in commits:
+            commit["published"] = commit["hash"] in publication_ancestry if publication_tip else None
         claimed: set[str] = set()
         for branch in sorted(branch_tips, key=lambda name: self._lane_priority(name, default)):
             current = branch_tips[branch]
@@ -237,6 +300,11 @@ class MaintenanceReadModel:
         result = {
             "status": "passed",
             "default_branch": default,
+            "publication": {
+                "ref": publication_ref,
+                "tip": publication_tip,
+                "available": publication_tip is not None,
+            },
             "lanes": lanes,
             "branches": branches,
             "commits": commits,
@@ -286,23 +354,66 @@ class MaintenanceReadModel:
         )]
         return result
 
-    @staticmethod
-    def _context(connection: sqlite3.Connection, branch: str) -> dict:
+    def _context(self, connection: sqlite3.Connection, branch: str) -> dict:
         state = connection.execute("SELECT * FROM project_state WHERE branch=?", (branch,)).fetchone()
         state_branch = branch
         if state is None and branch != "main":
             state = connection.execute("SELECT * FROM project_state WHERE branch='main'").fetchone()
             state_branch = "main"
-        handoffs = rows(
+        handoff_branch = branch
+        archive_rows = rows(
             connection,
-            "SELECT occurred_at, task, result, main_goal_change FROM handoffs WHERE branch=? ORDER BY occurred_at DESC, event_id DESC LIMIT 5",
-            (branch,),
+            "SELECT event_id, occurred_at, task_id, summary, result, payload_json "
+            "FROM task_archive WHERE branch=? ORDER BY occurred_at DESC, event_id DESC LIMIT 20",
+            (handoff_branch,),
         )
-        if not handoffs and branch != "main":
-            handoffs = rows(
+        legacy_handoffs = rows(
+            connection,
+            "SELECT event_id, occurred_at, task_id, task, result, main_goal_change "
+            "FROM handoffs WHERE branch=? ORDER BY occurred_at DESC, event_id DESC LIMIT 20",
+            (handoff_branch,),
+        )
+        if not archive_rows and not legacy_handoffs and branch != "main":
+            handoff_branch = "main"
+            archive_rows = rows(
                 connection,
-                "SELECT occurred_at, task, result, main_goal_change FROM handoffs WHERE branch='main' ORDER BY occurred_at DESC, event_id DESC LIMIT 5",
+                "SELECT event_id, occurred_at, task_id, summary, result, payload_json "
+                "FROM task_archive WHERE branch='main' ORDER BY occurred_at DESC, event_id DESC LIMIT 20",
             )
+            legacy_handoffs = rows(
+                connection,
+                "SELECT event_id, occurred_at, task_id, task, result, main_goal_change "
+                "FROM handoffs WHERE branch='main' ORDER BY occurred_at DESC, event_id DESC LIMIT 20",
+            )
+        handoff_by_task: dict[str, dict] = {}
+        for item in legacy_handoffs:
+            key = item.get("task_id") or f"legacy:{item['occurred_at']}:{item['task']}"
+            handoff_by_task[key] = {
+                "event_id": item["event_id"],
+                "occurred_at": item["occurred_at"],
+                "task_id": item.get("task_id"),
+                "task": item["task"],
+                "result": item["result"],
+                "main_goal_change": item["main_goal_change"],
+            }
+        for item in archive_rows:
+            payload = json.loads(item["payload_json"])
+            key = item.get("task_id") or f"archive:{item['occurred_at']}:{item['summary']}"
+            handoff_by_task[key] = {
+                "event_id": item["event_id"],
+                "occurred_at": item["occurred_at"],
+                "task_id": item.get("task_id"),
+                "task": item["summary"],
+                "result": payload.get("note") or item["result"],
+                "main_goal_change": payload.get("main_goal") or "unchanged",
+            }
+        handoffs = sorted(
+            handoff_by_task.values(),
+            key=lambda item: (item["occurred_at"], item["event_id"]),
+            reverse=True,
+        )[:5]
+        for item in handoffs:
+            item.pop("event_id", None)
         state_data = dict(state) if state else None
         if state_data:
             state_data["next_steps"] = json.loads(state_data.pop("next_steps_json"))
@@ -317,7 +428,13 @@ class MaintenanceReadModel:
                 "state_updated": bool(active["state_updated"]),
                 "decisions_added": active["decisions_added"],
             }
-        return {"branch": branch, "state": state_data, "recent_handoffs": handoffs, "active_task": active_data}
+        return {
+            "branch": branch,
+            "state": state_data,
+            "git_state": self.git_state(),
+            "recent_handoffs": handoffs,
+            "active_task": active_data,
+        }
 
     def context(self, branch: str | None = None) -> dict:
         branch = branch or self.branch_provider()
@@ -508,6 +625,22 @@ class MaintenanceReadModel:
             started_at = start["occurred_at"] if start else finish_payload.get("started_at") or (task_events[0]["occurred_at"] if task_events else "")
             finished_at = (archive or {}).get("occurred_at") or (finish["occurred_at"] if finish else "")
             result = (archive or {}).get("result") or "active"
+            task_commits = commits_by_task.get(task_id, [])
+            linked_commits = [commit["hash"] for commit in task_commits]
+            published_commits = [commit["hash"] for commit in task_commits if commit.get("published")]
+            publication_available = timeline.get("publication", {}).get("available", False)
+            if not finish:
+                publication_status = "进行中"
+            elif not linked_commits:
+                publication_status = "仅记录"
+            elif not publication_available:
+                publication_status = "未知"
+            elif len(published_commits) == len(linked_commits):
+                publication_status = "已发布"
+            elif published_commits:
+                publication_status = "部分发布"
+            else:
+                publication_status = "待发布"
             details[task_id] = {
                 "task_id": task_id,
                 "goal": start_payload.get("scope") or (archive or {}).get("summary") or attempt_payload.get("goal") or "",
@@ -516,6 +649,10 @@ class MaintenanceReadModel:
                 "finished_at": finished_at,
                 "branch": branch,
                 "result": result,
+                "status": publication_status,
+                "publication_status": publication_status,
+                "linked_commits": linked_commits,
+                "publication_commits": published_commits,
                 "route": finish_payload.get("route") or "",
                 "conclusion": conclusion,
                 "evidence": evidence,

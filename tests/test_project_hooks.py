@@ -23,11 +23,13 @@ from project_hooks.dashboard import (
     normalize_records,
     record_identity,
     record_location,
+    result_label,
     short,
     sort_records,
     timeline_layout,
 )
-from project_hooks.read_model import MaintenanceReadModel, ReadModelError
+from project_hooks.read_model import MaintenanceReadModel, ReadModelError, git_state_summary
+from project_hooks.store import append_events
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
@@ -88,7 +90,137 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertTrue(database.exists())
         output = self.hooks("context", "--format", "markdown").stdout
         self.assertIn("# 动态维护上下文", output)
+        self.assertIn("## 工作断点", output)
+        self.assertIn("## 真实断点", output)
+        context = json.loads(self.hooks("context", "--format", "json").stdout)
+        self.assertEqual(context["git_state"]["relation"], "unavailable")
         self.assertEqual(self.git("config", "--local", "--get", "core.hooksPath").stdout.strip(), ".githooks")
+
+    def test_git_state_tracks_synced_ahead_behind_and_diverged(self) -> None:
+        model = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        )
+        base = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("update-ref", "refs/remotes/origin/main", base)
+        self.assertEqual(model.git_state()["relation"], "synced")
+
+        local = self.root / "local.txt"
+        local.write_text("local\n", encoding="utf-8")
+        self.git("add", "local.txt")
+        self.git("commit", "-m", "local change")
+        self.assertEqual(model.git_state()["relation"], "ahead")
+
+        local_tip = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("update-ref", "refs/remotes/origin/main", local_tip)
+        self.git("reset", "--hard", base)
+        self.assertEqual(model.git_state()["relation"], "behind")
+
+        divergent = self.root / "divergent.txt"
+        divergent.write_text("divergent\n", encoding="utf-8")
+        self.git("add", "divergent.txt")
+        self.git("commit", "-m", "divergent change")
+        state = model.git_state()
+        self.assertEqual(state["relation"], "diverged")
+        self.assertIn("关系：分叉", git_state_summary(state))
+
+    def test_publication_status_is_derived_from_linked_commits(self) -> None:
+        base = self.git("rev-parse", "HEAD").stdout.strip()
+        task_id = "20260723_publication_001"
+        self.start(task_id)
+        self.update_state("publication started")
+        self.commit_all("record task start")
+        first_commit = self.git("rev-parse", "HEAD").stdout.strip()
+        self.end(task_id)
+        self.commit_all("record task finish")
+        final_commit = self.git("rev-parse", "HEAD").stdout.strip()
+
+        self.git("update-ref", "refs/remotes/origin/main", base)
+        model = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        )
+        self.assertEqual(model.dashboard_snapshot()["task_details"][task_id]["publication_status"], "待发布")
+
+        self.git("update-ref", "refs/remotes/origin/main", first_commit)
+        partial = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).dashboard_snapshot()["task_details"][task_id]
+        self.assertEqual(partial["publication_status"], "部分发布")
+        self.assertEqual(partial["publication_commits"], [first_commit])
+
+        self.git("update-ref", "refs/remotes/origin/main", final_commit)
+        published = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).dashboard_snapshot()["task_details"][task_id]
+        self.assertEqual(published["publication_status"], "已发布")
+
+        recorded_id = "20260723_recorded_only_001"
+        self.start(recorded_id)
+        self.update_state("record only")
+        self.end(recorded_id)
+        recorded = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).dashboard_snapshot()["task_details"][recorded_id]
+        self.assertEqual(recorded["publication_status"], "仅记录")
+
+        self.git("update-ref", "-d", "refs/remotes/origin/main")
+        unknown = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).dashboard_snapshot()["task_details"][task_id]
+        self.assertEqual(unknown["publication_status"], "未知")
+
+    def test_finish_uses_one_event_and_recent_handoffs_deduplicate_legacy(self) -> None:
+        task_id = "20260723_single_finish_001"
+        self.start(task_id)
+        self.update_state("single finish")
+        self.end(task_id)
+        model = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        )
+        events = [item for item in model.records("events", 20) if item["task_id"] == task_id]
+        self.assertEqual([item["event_type"] for item in events].count("task.finished"), 1)
+        self.assertNotIn("handoff.recorded", [item["event_type"] for item in events])
+        self.assertEqual(model.context()["recent_handoffs"][0]["task_id"], task_id)
+
+        finish = next(item for item in events if item["event_type"] == "task.finished")
+        append_events(
+            self.root / "maintenance/events.jsonl",
+            self.root / ".project_hooks",
+            [{
+                "event_id": "legacy-handoff-for-finished-task",
+                "schema_version": 1,
+                "event_type": "handoff.recorded",
+                "occurred_at": finish["occurred_at"],
+                "branch": "main",
+                "task_id": task_id,
+                "payload": {
+                    "task": "legacy duplicate",
+                    "result": "legacy duplicate",
+                    "main_goal_change": "unchanged",
+                },
+            }],
+        )
+        (self.root / ".project_hooks/maintenance.sqlite3").unlink()
+        deduplicated = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).context()["recent_handoffs"]
+        self.assertEqual(sum(item.get("task_id") == task_id for item in deduplicated), 1)
+        self.assertEqual(deduplicated[0]["result"], "test completed")
 
     def test_shared_read_model_maps_dashboard_data(self) -> None:
         task_id = "20260722_readmodel_001"
@@ -497,6 +629,11 @@ class ProjectHooksSqliteTests(unittest.TestCase):
 
 
 class DashboardPresentationTests(unittest.TestCase):
+    def test_result_labels_are_presentational_only(self) -> None:
+        self.assertEqual(result_label("completed"), "完成")
+        self.assertEqual(result_label("indeterminate"), "待判定")
+        self.assertEqual(result_label("custom"), "custom")
+
     def test_filter_sort_and_long_values(self) -> None:
         records = [
             {"task": "beta", "summary": "短文本"},
