@@ -13,11 +13,14 @@ from project_hooks.dashboard import (
     CLI_FALLBACK,
     DashboardController,
     DashboardError,
+    PRIMARY_TABS,
+    advanced_summary,
     dashboard_presets,
     filter_records,
     global_search,
     launch_dashboard,
     linked_task_ids,
+    normalize_records,
     record_identity,
     record_location,
     short,
@@ -529,7 +532,7 @@ class DashboardPresentationTests(unittest.TestCase):
 
     def test_dashboard_presets_use_ten_negative_only_and_unmerged_explorations(self) -> None:
         snapshot = {
-            "history": [{"event_id": f"task-{index}"} for index in range(15)],
+            "history": [{"task_id": f"task-{index}"} for index in range(15)],
             "explorations": [
                 {"event_id": "negative", "result": "negative"},
                 {"event_id": "paused", "result": "paused"},
@@ -545,6 +548,29 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(presets["recent"], [f"task-{index}" for index in range(10)])
         self.assertEqual(presets["negative"], ["negative"])
         self.assertEqual(presets["unmerged"], ["research/open"])
+
+    def test_five_primary_tabs_and_normalized_records(self) -> None:
+        self.assertEqual(PRIMARY_TABS, ("概览", "搜索", "任务", "时间线", "记录"))
+        records = normalize_records(
+            [{"event_id": "d1", "occurred_at": "2026-07-23 10:00:00", "branch": "main",
+              "decision": "keep five pages", "decision_id": "D-1", "task_id": "task-1"}],
+            [{"event_id": "e1", "occurred_at": "2026-07-23 11:00:00", "branch": "research/ui",
+              "goal": "test layout", "result": "validated", "task_id": "task-2"}],
+        )
+        self.assertEqual([item["record_type"] for item in records], ["exploration", "decision"])
+        self.assertEqual(records[0]["title"], "test layout")
+        self.assertEqual(records[1]["task_id"], "task-1")
+
+    def test_advanced_summary_contains_technical_status(self) -> None:
+        text = advanced_summary({
+            "health": {"status": "passed", "schema_version": 1, "events": 42,
+                       "rebuilt": False, "journal_hash": "abc123"},
+            "timeline_error": None,
+        })
+        self.assertIn("数据库：passed", text)
+        self.assertIn("Schema：1", text)
+        self.assertIn("事件：42", text)
+        self.assertIn("abc123", text)
 
     def test_refresh_failure_preserves_last_snapshot(self) -> None:
         class Provider:
