@@ -56,6 +56,9 @@ DEFAULT_STORE = {
     "schema_version": SCHEMA_VERSION,
 }
 ATTEMPT_STATES = ("active", "validated", "negative", "inconclusive", "paused")
+STATE_ARGUMENTS = (
+    "goal", "judgment", "breakpoint", "blocker", "status", "main_goal_version",
+)
 
 
 class WorkflowError(RuntimeError):
@@ -418,9 +421,7 @@ def task_status() -> dict:
     }
 
 
-def state_update(args: argparse.Namespace) -> dict:
-    record = read_active()
-    branch = assert_active_branch(record)
+def project_state_payload(record: dict, args: argparse.Namespace, branch: str) -> dict:
     connection = database()
     current = connection.execute("SELECT * FROM project_state WHERE branch=?", (branch,)).fetchone()
     if current is None and branch != "main":
@@ -439,6 +440,17 @@ def state_update(args: argparse.Namespace) -> dict:
         "next_steps": next_steps,
         "blocker": args.blocker if args.blocker is not None else base.get("blocker", "无。"),
     }
+    return payload
+
+
+def state_arguments_requested(args: argparse.Namespace) -> bool:
+    return any(getattr(args, name, None) is not None for name in STATE_ARGUMENTS) or args.next is not None
+
+
+def state_update(args: argparse.Namespace) -> dict:
+    record = read_active()
+    branch = assert_active_branch(record)
+    payload = project_state_payload(record, args, branch)
     persist([emit("project_state.updated", branch=branch, task_id=record["task_id"], payload=payload)])
     update_active_flags(state_updated=True)
     return payload
@@ -547,12 +559,20 @@ def finish_task(args: argparse.Namespace) -> dict:
         raise WorkflowError(f"活动任务是 {record['task_id']}，不是 {args.task_id}")
     branch = assert_active_branch(record)
     check_repository(raise_on_error=True)
-    if not record["state_updated"]:
+    final_state_requested = state_arguments_requested(args)
+    if not record["state_updated"] and not final_state_requested:
         raise WorkflowError("结束前必须执行 state update")
     if args.route == "changed" and record["decisions_added"] < 1:
         raise WorkflowError("路线发生变化时必须在本任务执行 decision add")
     attempt = get_attempt(branch) if record["git"]["track"] != "stable" else None
     events: list[dict] = []
+    if final_state_requested:
+        events.append(emit(
+            "project_state.updated",
+            branch=branch,
+            task_id=args.task_id,
+            payload=project_state_payload(record, args, branch),
+        ))
     if attempt:
         if not args.attempt_state:
             raise WorkflowError("探索任务结束时必须显式使用 --attempt-state")
@@ -576,6 +596,9 @@ def finish_task(args: argparse.Namespace) -> dict:
         "note": args.note, "attempt_state": args.attempt_state, "started_at": record["started_at"],
     }))
     persist(events)
+    if final_state_requested:
+        update_active_flags(state_updated=True)
+        record["state_updated"] = True
     paths = changed(record["baseline"], snapshot())
     report = {"task_id": args.task_id, "started_at": record["started_at"], "finished_at": timestamp(),
               "result": args.result, "route": args.route, "methods_action": args.methods_action,
@@ -672,7 +695,7 @@ def context_data(branch: str | None = None) -> dict:
 
 
 def markdown_context(data: dict) -> str:
-    state = data.get("state") or {}
+    state = data.get("overview_state") or data.get("state") or {}
     lines = ["# 动态维护上下文", "", f"- 当前分支：`{data['branch']}`",
              f"- 当前状态：{state.get('status', '未设置')}", f"- 主目标版本：{state.get('main_goal_version', '未设置')}",
              "", "## 当前主目标", "", state.get("goal") or "未设置", "", "## 当前判决", "",
@@ -892,6 +915,12 @@ def non_negative_float(value: str) -> float:
     return number
 
 
+def add_state_arguments(parser: argparse.ArgumentParser) -> None:
+    for name in ("goal", "judgment", "breakpoint", "blocker", "status", "main-goal-version"):
+        parser.add_argument(f"--{name}")
+    parser.add_argument("--next", action="append")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="project-hooks")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -921,9 +950,7 @@ def build_parser() -> argparse.ArgumentParser:
     state = sub.add_parser("state")
     state_sub = state.add_subparsers(dest="state_command", required=True)
     state_update_parser = state_sub.add_parser("update")
-    for name in ("goal", "judgment", "breakpoint", "blocker", "status", "main-goal-version"):
-        state_update_parser.add_argument(f"--{name}")
-    state_update_parser.add_argument("--next", action="append")
+    add_state_arguments(state_update_parser)
     decision = sub.add_parser("decision")
     decision_sub = decision.add_subparsers(dest="decision_command", required=True)
     decision_add_parser = decision_sub.add_parser("add")
@@ -964,6 +991,7 @@ def build_parser() -> argparse.ArgumentParser:
     end.add_argument("--evidence", action="append")
     end.add_argument("--commit-message")
     end.add_argument("--attempt-state", choices=ATTEMPT_STATES)
+    add_state_arguments(end)
     return parser
 
 

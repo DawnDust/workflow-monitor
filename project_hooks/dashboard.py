@@ -7,7 +7,12 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Callable
 
-from .read_model import MaintenanceReadModel, ReadModelError, git_state_summary
+from .read_model import (
+    MaintenanceReadModel,
+    ReadModelError,
+    git_state_summary,
+    is_auxiliary_task_id,
+)
 
 
 CLI_FALLBACK = (
@@ -109,8 +114,22 @@ def advanced_summary(snapshot: dict) -> str:
 
 
 def dashboard_presets(snapshot: dict) -> dict[str, list[str]]:
+    if snapshot.get("task_details"):
+        recent_tasks = sorted(
+            (
+                item for item in snapshot["task_details"].values()
+                if not item.get("is_auxiliary")
+            ),
+            key=lambda item: (item.get("finished_at") or item.get("started_at") or "", item["task_id"]),
+            reverse=True,
+        )
+    else:
+        recent_tasks = [
+            item for item in snapshot.get("history", [])
+            if item.get("task_id") and not is_auxiliary_task_id(item["task_id"])
+        ]
     return {
-        "recent": [item.get("task_id") for item in snapshot.get("history", [])[:10] if item.get("task_id")],
+        "recent": [item["task_id"] for item in recent_tasks[:10]],
         "negative": [
             item.get("event_id") for item in snapshot.get("explorations", [])
             if item.get("result") == "negative" and item.get("event_id")
@@ -487,7 +506,11 @@ class TaskPage:
 
     def render_list(self) -> None:
         subset = getattr(self, "task_subset", None)
-        records = [item for item in self.tasks.values() if subset is None or item["task_id"] in subset]
+        records = [
+            item for item in self.tasks.values()
+            if not item.get("is_auxiliary")
+            and (subset is None or item["task_id"] in subset)
+        ]
         records = filter_records(records, self.query.get())
         self.visible = sorted(records, key=lambda item: (item.get("started_at", ""), item["task_id"]), reverse=True)
         self.tree.delete(*self.tree.get_children())
@@ -540,6 +563,15 @@ class TaskPage:
         evidence = "\n".join(f"- {item}" for item in task.get("evidence", [])) or "无"
         linked_commits = "\n".join(f"- {item}" for item in task.get("linked_commits", [])) or "无"
         publication_commits = "\n".join(f"- {item}" for item in task.get("publication_commits", [])) or "无"
+        auxiliary_lines = []
+        for item in task.get("auxiliary_tasks", []):
+            auxiliary_lines.append(
+                f"- {item['finished_at'] or item['started_at']}｜{item['goal']}｜"
+                f"{result_label(item['result'])}｜{item['task_id']}"
+            )
+            if item.get("conclusion"):
+                auxiliary_lines.append(f"  {item['conclusion']}")
+        auxiliary_tasks = "\n".join(auxiliary_lines) or "无"
         self._set_summary(
             f"任务：{task['task_id']}\n分支：{task.get('branch') or '未知'}\n"
             f"开始：{task.get('started_at') or '未知'}\n结束：{task.get('finished_at') or '进行中'}\n"
@@ -547,7 +579,8 @@ class TaskPage:
             f"路线：{task.get('route') or '未记录'}\n\n"
             f"目标\n{task.get('goal') or '未记录'}\n\n验收条件\n{acceptance}\n\n"
             f"结论\n{task.get('conclusion') or '未记录'}\n\n证据\n{evidence}\n\n"
-            f"关联提交\n{linked_commits}\n\n已发布提交\n{publication_commits}"
+            f"关联提交\n{linked_commits}\n\n已发布提交\n{publication_commits}\n\n"
+            f"发布记录\n{auxiliary_tasks}"
         )
         self.set_related(task.get("related", []))
 
@@ -1193,7 +1226,7 @@ class DashboardApp:
     @staticmethod
     def overview_text(snapshot: dict) -> str:
         context = snapshot["context"]
-        state = context.get("state") or {}
+        state = context.get("overview_state") or context.get("state") or {}
         active = context.get("active_task")
         lines = [
             "项目状态",
