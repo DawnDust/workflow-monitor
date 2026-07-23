@@ -28,19 +28,28 @@
 - Hook 只管理本地状态和分支，不自动 push、创建 PR 或合并。
 - Dashboard 只读，不写数据库、不修改日志，也不执行 Git 或网络操作。
 
-### 常用命令
+### 日常入口
 
 ```powershell
-python -m project_hooks install
-python -m project_hooks check
-python -m project_hooks status
-python -m project_hooks branch-status
+python -m project_hooks
 python -m project_hooks context --format markdown
-python -m project_hooks db verify
+python -m project_hooks start --help
+python -m project_hooks end --help
 python -m project_hooks dashboard
 ```
 
-新 clone 或 worktree 必须运行一次 `install`，仅为当前仓库设置 `core.hooksPath=.githooks`。
+无参数入口显示行动优先概览；`context` 保留完整的目标、判决、断点和交接信息，供生命周期与自动化读取。普通 `--help` 只列日常入口，`--help-all` 列出高级命令。新 clone 或 worktree 必须先运行一次 `install`，仅为当前仓库设置 `core.hooksPath=.githooks`。
+
+### 高级命令
+
+| 分类 | 命令 |
+|:---|:---|
+| 安装与检查 | `install`、`check`、`status`、`branch-status` |
+| 状态与记录 | `state`、`history`、`decisions`、`decision`、`explorations` |
+| 探索流程 | `attempt`、`exploration`、`prepare-pr`、`archive-attempt` |
+| 数据维护 | `db status`、`db verify`、`db rebuild`、`db migrate` |
+
+使用 `python -m project_hooks <命令> --help` 查看具体参数。`pre-commit` 是仓库 Hook 的内部入口，不属于用户命令。
 
 ## 二、任务生命周期
 
@@ -95,6 +104,7 @@ python -m project_hooks dashboard
 运行 `python -m project_hooks dashboard` 打开 Tkinter 窗口，包含：
 
 - 五个日常分页：概览、搜索、任务、时间线和记录。
+- 概览按状态、活动任务、阻塞、下一步和 Git 同步顺序显示行动信息；当前目标和最近完成记录各压缩为一行，完整判决、断点和历史仍可从其他页面查看。
 - 跨任务、决策、探索和提交的搜索，以及最近任务、失败探索和未合并分支快捷筛选。
 - 任务页默认只列出时间、任务、结果和状态；历史 `publish_*` 与 `record_*_publication_*` 辅助任务折叠到主体任务详情，搜索和高级查看仍保留原始记录。
 - 记录页统一查看和筛选决策与探索；原始事件、Schema、日志哈希和刷新诊断集中在独立的只读“高级查看”窗口。

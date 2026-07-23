@@ -39,6 +39,58 @@ def git_state_summary(state: dict) -> str:
     return f"本地 {branch}：{head}\n{upstream_ref}：{upstream_head}\n关系：{relation}"
 
 
+def compact_text(value: object, fallback: str = "未设置") -> str:
+    text = " ".join(str(value or "").split())
+    return text or fallback
+
+
+def git_state_inline(state: dict) -> str:
+    branch = state.get("branch") or "未知分支"
+    head = str(state.get("head") or "未知")
+    upstream_ref = state.get("upstream_ref") or "origin/main"
+    upstream_head = str(state.get("upstream_head") or "不可用")
+    relation = GIT_RELATION_LABELS.get(state.get("relation"), state.get("relation") or "不可用")
+    local = head[:8] if head not in {"未知", "不可用"} else head
+    upstream = upstream_head[:8] if upstream_head not in {"未知", "不可用"} else upstream_head
+    return f"{branch} {local} 与 {upstream_ref} {upstream}：{relation}"
+
+
+def action_overview_text(context: dict) -> str:
+    state = context.get("overview_state") or context.get("state") or {}
+    active = context.get("active_task")
+    active_text = (
+        f"{active.get('task_id')}（{active.get('branch') or context.get('branch') or '未知分支'}）"
+        if active else "无"
+    )
+    lines = [
+        "项目行动概览",
+        f"状态：{compact_text(state.get('status'))}（目标版本：{compact_text(state.get('main_goal_version'))}）",
+        f"活动任务：{active_text}",
+        f"当前阻塞：{compact_text(state.get('blocker'), '无。')}",
+        "下一步：",
+    ]
+    steps = state.get("next_steps") or []
+    lines.extend(f"{index}. {compact_text(item)}" for index, item in enumerate(steps, 1))
+    if not steps:
+        lines.append("无。")
+    lines.extend([
+        f"Git 同步：{git_state_inline(context.get('git_state') or {})}",
+        f"当前目标：{compact_text(state.get('goal'))}",
+    ])
+    handoffs = context.get("recent_handoffs") or []
+    if handoffs:
+        latest = handoffs[0]
+        lines.append(
+            "最近完成："
+            f"{compact_text(latest.get('occurred_at'), '未知时间')}｜"
+            f"{compact_text(latest.get('task'), '未知任务')}｜"
+            f"{compact_text(latest.get('result'), '未知结果')}"
+        )
+    else:
+        lines.append("最近完成：无。")
+    return "\n".join(lines) + "\n"
+
+
 def is_auxiliary_task_id(task_id: str | None) -> bool:
     return bool(task_id and AUXILIARY_TASK_RE.fullmatch(task_id))
 
