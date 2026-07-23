@@ -31,10 +31,37 @@ def filter_records(records: list[dict], query: str) -> list[dict]:
     return [record for record in records if needle in json.dumps(record, ensure_ascii=False, default=str).casefold()]
 
 
+def global_search(records: list[dict], query: str) -> list[dict]:
+    tokens = [item for item in query.casefold().split() if item]
+    if not tokens:
+        return []
+    return [
+        record for record in records
+        if all(token in record.get("search_text", "").casefold() for token in tokens)
+    ]
+
+
+def dashboard_presets(snapshot: dict) -> dict[str, list[str]]:
+    return {
+        "recent": [item.get("event_id") for item in snapshot.get("history", [])[:10] if item.get("event_id")],
+        "negative": [
+            item.get("event_id") for item in snapshot.get("explorations", [])
+            if item.get("result") == "negative" and item.get("event_id")
+        ],
+        "unmerged": [
+            item["name"] for item in snapshot.get("timeline", {}).get("branches", [])
+            if item.get("unmerged")
+        ],
+    }
+
+
 def sort_records(records: list[dict], key: str, descending: bool = False) -> list[dict]:
     def value(record: dict) -> tuple[bool, str]:
         item = record.get(key)
-        return item is None, str(item or "").casefold()
+        text = str(item or "").casefold()
+        if key == "occurred_at":
+            text = text[:19].replace(" ", "t")
+        return item is None, text
     return sorted(records, key=value, reverse=descending)
 
 
@@ -43,11 +70,27 @@ def short(value: object, limit: int = 90) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def timeline_layout(timeline: dict, branch: str = "全部分支", query: str = "") -> dict:
+def timeline_layout(
+    timeline: dict,
+    branch: str = "全部分支",
+    query: str = "",
+    *,
+    expanded: bool = False,
+    limit: int = 50,
+    branch_subset: set[str] | None = None,
+) -> dict:
     """Return deterministic coordinates and visibility for the timeline canvas."""
     commits = list(timeline.get("commits", []))
     all_lanes = list(timeline.get("lanes", []))
-    if branch != "全部分支":
+    if branch_subset is not None:
+        commits = [
+            commit for commit in commits
+            if commit.get("lane") in branch_subset or branch_subset.intersection(commit.get("event_branches", []))
+        ]
+        used = set(branch_subset)
+        used.update(commit.get("lane") for commit in commits)
+        lanes = [lane for lane in all_lanes if lane in used]
+    elif branch != "全部分支":
         commits = [
             commit for commit in commits
             if commit.get("lane") == branch or branch in commit.get("event_branches", [])
@@ -57,6 +100,12 @@ def timeline_layout(timeline: dict, branch: str = "全部分支", query: str = "
         lanes = [lane for lane in all_lanes if lane in used]
     else:
         lanes = all_lanes
+
+    total_count = len(commits)
+    folded_count = 0 if expanded or total_count <= limit else total_count - limit
+    hidden_hashes = {commit["hash"] for commit in commits[:folded_count]}
+    if folded_count:
+        commits = commits[folded_count:]
     for commit in commits:
         if commit.get("lane") not in lanes:
             lanes.append(commit.get("lane") or "其他")
@@ -68,8 +117,9 @@ def timeline_layout(timeline: dict, branch: str = "全部分支", query: str = "
     needle = query.strip().casefold()
     nodes: list[dict] = []
     coordinates: dict[str, tuple[int, int]] = {}
+    start_x = 170 if folded_count else 70
     for index, commit in enumerate(commits):
-        x = 70 + index * 132
+        x = start_x + index * 132
         y = lane_y[commit.get("lane") or "其他"]
         searchable = json.dumps(commit, ensure_ascii=False, default=str).casefold()
         node = {**commit, "x": x, "y": y, "match": not needle or needle in searchable}
@@ -81,6 +131,11 @@ def timeline_layout(timeline: dict, branch: str = "全部分支", query: str = "
         {**edge, "start": coordinates[edge["parent"]], "end": coordinates[edge["child"]]}
         for edge in timeline.get("edges", [])
         if edge["parent"] in visible and edge["child"] in visible
+    ]
+    truncated = [
+        {**edge, "end": coordinates[edge["child"]]}
+        for edge in timeline.get("edges", [])
+        if edge["parent"] in hidden_hashes and edge["child"] in visible
     ]
     associations = []
     for node in nodes:
@@ -95,8 +150,11 @@ def timeline_layout(timeline: dict, branch: str = "全部分支", query: str = "
         "lane_y": lane_y,
         "nodes": nodes,
         "edges": edges,
+        "truncated": truncated,
         "associations": associations,
-        "width": max(900, 140 + len(nodes) * 132),
+        "total_count": total_count,
+        "folded_count": folded_count,
+        "width": max(900, start_x + 70 + len(nodes) * 132),
         "height": max(160, 92 + len(lanes) * 72),
     }
 
@@ -126,6 +184,13 @@ class DashboardController:
             if snapshot.get("timeline_error") and self.snapshot and self.snapshot.get("timeline", {}).get("status") == "passed":
                 snapshot["timeline"] = deepcopy(self.snapshot["timeline"])
                 snapshot["timeline"]["stale"] = True
+                old_commits = [item for item in self.snapshot.get("search_index", []) if item.get("kind") == "commit"]
+                current = [item for item in snapshot.get("search_index", []) if item.get("kind") != "commit"]
+                snapshot["search_index"] = sorted(
+                    [*current, *deepcopy(old_commits)],
+                    key=lambda item: (item.get("occurred_at", ""), item.get("record_id", "")),
+                    reverse=True,
+                )
             self.snapshot = snapshot
             return self.snapshot, None
         except Exception as exc:
@@ -133,12 +198,16 @@ class DashboardController:
 
 
 class TablePage:
-    def __init__(self, parent, tk, ttk, scrolledtext, *, columns: list[tuple[str, str, int]], detail: Callable[[dict], str], refresh: Callable[[], None]):
+    def __init__(self, parent, tk, ttk, scrolledtext, *, columns: list[tuple[str, str, int]],
+                 detail: Callable[[dict], str], refresh: Callable[[], None],
+                 activate: Callable[[dict], None] | None = None, show_query: bool = True):
         self.tk, self.ttk = tk, ttk
         self.frame = ttk.Frame(parent, padding=8)
         self.columns = columns
         self.detail_formatter = detail
         self.refresh_callback = refresh
+        self.activate_callback = activate
+        self.predicate: Callable[[dict], bool] | None = None
         self.records: list[dict] = []
         self.visible: list[dict] = []
         keys = [item[0] for item in columns]
@@ -147,12 +216,15 @@ class TablePage:
 
         controls = ttk.Frame(self.frame)
         controls.pack(fill="x", pady=(0, 6))
-        ttk.Label(controls, text="筛选").pack(side="left")
         self.query = tk.StringVar()
-        entry = ttk.Entry(controls, textvariable=self.query, width=36)
-        entry.pack(side="left", padx=(6, 8))
+        if show_query:
+            ttk.Label(controls, text="筛选").pack(side="left")
+            entry = ttk.Entry(controls, textvariable=self.query, width=36)
+            entry.pack(side="left", padx=(6, 8))
         self.query.trace_add("write", lambda *_: self.render())
         ttk.Button(controls, text="复制选中", command=self.copy_selected).pack(side="left")
+        if activate:
+            ttk.Button(controls, text="打开记录", command=self.activate_selected).pack(side="left", padx=(6, 0))
         ttk.Button(controls, text="刷新", command=refresh).pack(side="left", padx=(6, 0))
 
         table_frame = ttk.Frame(self.frame)
@@ -166,6 +238,8 @@ class TablePage:
             self.tree.heading(key, text=label, command=lambda selected=key: self.sort(selected))
             self.tree.column(key, width=width, minwidth=70, stretch=True)
         self.tree.bind("<<TreeviewSelect>>", self.show_detail)
+        if activate:
+            self.tree.bind("<Double-1>", lambda _event: self.activate_selected())
 
         ttk.Label(self.frame, text="详情").pack(anchor="w", pady=(8, 3))
         self.detail = scrolledtext.ScrolledText(self.frame, height=10, wrap="word")
@@ -174,6 +248,10 @@ class TablePage:
 
     def set_records(self, records: list[dict]) -> None:
         self.records = list(records)
+        self.render()
+
+    def set_predicate(self, predicate: Callable[[dict], bool] | None) -> None:
+        self.predicate = predicate
         self.render()
 
     def sort(self, key: str) -> None:
@@ -186,7 +264,8 @@ class TablePage:
     def render(self) -> None:
         selected = self.tree.selection()
         selected_id = selected[0] if selected else None
-        self.visible = sort_records(filter_records(self.records, self.query.get()), self.sort_key, self.descending)
+        source = self.records if self.predicate is None else [record for record in self.records if self.predicate(record)]
+        self.visible = sort_records(filter_records(source, self.query.get()), self.sort_key, self.descending)
         self.tree.delete(*self.tree.get_children())
         for index, record in enumerate(self.visible):
             iid = f"row-{index}"
@@ -225,9 +304,29 @@ class TablePage:
         self.frame.clipboard_clear()
         self.frame.clipboard_append(json.dumps(record, ensure_ascii=False, indent=2, default=str))
 
+    def activate_selected(self) -> None:
+        record = self.selected_record()
+        if record and self.activate_callback:
+            self.activate_callback(record)
+
+    def select_record(self, key: str, value: object) -> bool:
+        self.predicate = None
+        self.query.set("")
+        self.render()
+        for index, record in enumerate(self.visible):
+            if record.get(key) == value:
+                iid = f"row-{index}"
+                self.tree.selection_set(iid)
+                self.tree.focus(iid)
+                self.tree.see(iid)
+                self.show_detail()
+                return True
+        return False
+
 
 class TimelinePage:
     ALL_BRANCHES = "全部分支"
+    FOLD_LIMIT = 50
 
     def __init__(self, parent, tk, ttk, scrolledtext, *, refresh: Callable[[], None]):
         self.tk, self.ttk = tk, ttk
@@ -237,6 +336,9 @@ class TimelinePage:
         self.selected_hash: str | None = None
         self.node_by_hash: dict[str, dict] = {}
         self.first_render = True
+        self.expanded = False
+        self.branch_subset: set[str] | None = None
+        self.error_message: str | None = None
 
         controls = ttk.Frame(self.frame)
         controls.pack(fill="x", pady=(0, 6))
@@ -244,13 +346,15 @@ class TimelinePage:
         self.branch = tk.StringVar(value=self.ALL_BRANCHES)
         self.branch_box = ttk.Combobox(controls, textvariable=self.branch, state="readonly", width=24)
         self.branch_box.pack(side="left", padx=(6, 12))
-        self.branch_box.bind("<<ComboboxSelected>>", lambda _event: self.render())
-        ttk.Label(controls, text="搜索（高亮）").pack(side="left")
+        self.branch_box.bind("<<ComboboxSelected>>", self.branch_changed)
+        ttk.Label(controls, text="本页高亮").pack(side="left")
         self.query = tk.StringVar()
         entry = ttk.Entry(controls, textvariable=self.query, width=30)
         entry.pack(side="left", padx=(6, 8))
         self.query.trace_add("write", lambda *_: self.render())
         ttk.Button(controls, text="复制选中", command=self.copy_selected).pack(side="left")
+        self.fold_button = ttk.Button(controls, text="无需折叠", command=self.toggle_expanded, state="disabled")
+        self.fold_button.pack(side="left", padx=(6, 0))
         ttk.Button(controls, text="刷新", command=refresh).pack(side="left", padx=(6, 0))
 
         ttk.Label(
@@ -286,17 +390,34 @@ class TimelinePage:
 
     def set_data(self, timeline: dict, *, error: str | None = None) -> None:
         self.timeline = timeline
+        self.error_message = error
         lanes = list(timeline.get("lanes", []))
         values = [self.ALL_BRANCHES, *lanes]
         self.branch_box.configure(values=values)
         if self.branch.get() not in values:
             self.branch.set(self.ALL_BRANCHES)
-        self.message.configure(text=(f"时间线刷新失败，继续显示上一次数据：{error}" if error else ""))
+        self.render()
+
+    def branch_changed(self, _event=None) -> None:
+        self.branch_subset = None
+        self.render()
+
+    def set_branch_subset(self, branches: set[str] | None) -> None:
+        self.branch_subset = None if branches is None else set(branches)
+        if branches is not None:
+            self.branch.set(self.ALL_BRANCHES)
+        self.render()
+
+    def toggle_expanded(self) -> None:
+        self.expanded = not self.expanded
         self.render()
 
     def render(self) -> None:
         old_xview = self.canvas.xview()
-        layout = timeline_layout(self.timeline, self.branch.get(), self.query.get())
+        layout = timeline_layout(
+            self.timeline, self.branch.get(), self.query.get(), expanded=self.expanded,
+            limit=self.FOLD_LIMIT, branch_subset=self.branch_subset,
+        )
         self.canvas.delete("all")
         self.labels.delete("all")
         self.node_by_hash = {node["hash"]: node for node in layout["nodes"]}
@@ -308,6 +429,20 @@ class TimelinePage:
             self.canvas.create_line(0, y, layout["width"], y, fill="#e5e7eb", width=1)
             font = ("TkDefaultFont", 9, "bold") if lane == self.timeline.get("default_branch") else ("TkDefaultFont", 9)
             self.labels.create_text(10, y, anchor="w", text=short(lane, 25), fill="#111827", font=font)
+
+        if layout["folded_count"]:
+            self.canvas.create_rectangle(
+                8, 8, 125, layout["height"] - 8,
+                fill="#f1f5f9", outline="#94a3b8", dash=(4, 3),
+            )
+            self.canvas.create_text(
+                66, layout["height"] / 2,
+                text=f"早期 {layout['folded_count']} 次提交\n已折叠\n{len(layout['truncated'])} 条关系截断",
+                width=105, justify="center", fill="#475569",
+            )
+            for edge in layout["truncated"]:
+                x2, y2 = edge["end"]
+                self.canvas.create_line(125, y2, x2, y2, fill="#94a3b8", dash=(5, 4), width=2)
 
         for edge in layout["edges"]:
             x1, y1 = edge["start"]
@@ -342,6 +477,24 @@ class TimelinePage:
                 self.canvas.create_text(x, y + 19, text=f"{len(node['task_ids'])} 个任务", fill="#1e3a8a", font=("TkDefaultFont", 8))
 
         self.show_detail()
+        if layout["total_count"] > self.FOLD_LIMIT:
+            self.fold_button.configure(
+                state="normal",
+                text=(f"恢复折叠（保留 {self.FOLD_LIMIT} 条）" if self.expanded else f"展开全部（折叠 {layout['folded_count']} 条）"),
+            )
+        else:
+            self.fold_button.configure(state="disabled", text="无需折叠")
+        messages = []
+        if self.error_message:
+            messages.append(f"时间线刷新失败，继续显示上一次数据：{self.error_message}")
+        if self.branch_subset is not None:
+            messages.append(
+                f"未合并分支：{len(self.branch_subset)} 条" if self.branch_subset
+                else "没有未合并的探索分支。"
+            )
+        if layout["folded_count"]:
+            messages.append(f"已折叠早期 {layout['folded_count']} 次提交。")
+        self.message.configure(text="｜".join(messages))
         if self.first_render and layout["nodes"]:
             self.canvas.xview_moveto(1.0)
             self.first_render = False
@@ -351,6 +504,22 @@ class TimelinePage:
     def select(self, commit_hash: str) -> None:
         self.selected_hash = commit_hash
         self.render()
+
+    def reveal_commit(self, commit_hash: str) -> bool:
+        if not any(item.get("hash") == commit_hash for item in self.timeline.get("commits", [])):
+            return False
+        self.expanded = True
+        self.branch_subset = None
+        self.branch.set(self.ALL_BRANCHES)
+        self.query.set("")
+        self.selected_hash = commit_hash
+        self.render()
+        record = self.node_by_hash.get(commit_hash)
+        if record:
+            width = max(1, int(self.canvas.cget("scrollregion").split()[2]))
+            viewport = max(1, self.canvas.winfo_width())
+            self.canvas.xview_moveto(max(0.0, min(1.0, (record["x"] - viewport / 2) / width)))
+        return True
 
     def selected_record(self) -> dict | None:
         return self.node_by_hash.get(self.selected_hash or "")
@@ -394,6 +563,7 @@ class DashboardApp:
         self.controller = DashboardController(provider)
         self.refresh_seconds = refresh_seconds
         self.snapshot: dict | None = None
+        self.active_preset: str | None = None
         root.title("Project Maintenance")
         root.geometry("1120x760")
         root.minsize(800, 560)
@@ -405,6 +575,22 @@ class DashboardApp:
         self.health_label = ttk.Label(toolbar, text="数据库：加载中")
         self.health_label.pack(side="left", padx=(18, 0))
         ttk.Button(toolbar, text="刷新", command=self.refresh).pack(side="right")
+
+        search_toolbar = ttk.Frame(root, padding=(10, 0, 10, 8))
+        search_toolbar.pack(fill="x")
+        ttk.Label(search_toolbar, text="全局搜索").pack(side="left")
+        self.global_query = tk.StringVar()
+        global_entry = ttk.Entry(search_toolbar, textvariable=self.global_query, width=27)
+        global_entry.pack(side="left", padx=(6, 5))
+        global_entry.bind("<Return>", lambda _event: self.perform_global_search())
+        ttk.Button(search_toolbar, text="搜索", command=self.perform_global_search).pack(side="left")
+        ttk.Label(search_toolbar, text="快捷筛选").pack(side="left", padx=(18, 5))
+        self.preset_buttons = {}
+        for name, label in (("recent", "最近任务"), ("negative", "失败探索"), ("unmerged", "未合并分支")):
+            button = ttk.Button(search_toolbar, text=label, command=lambda selected=name: self.toggle_preset(selected))
+            button.pack(side="left", padx=(0, 5))
+            self.preset_buttons[name] = button
+        ttk.Button(search_toolbar, text="清除", command=self.clear_preset).pack(side="left")
 
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 6))
@@ -418,6 +604,15 @@ class DashboardApp:
         self.overview.pack(fill="both", expand=True)
         self.overview.configure(state="disabled")
         self.notebook.add(self.overview_frame, text="概览")
+
+        self.search_page = TablePage(
+            self.notebook, tk, ttk, scrolledtext,
+            columns=[("kind_label", "类型", 80), ("occurred_at", "时间", 180), ("branch", "分支", 150),
+                     ("title", "标题", 320), ("summary", "摘要", 250)],
+            detail=self.search_result_detail, refresh=self.refresh,
+            activate=self.open_search_result, show_query=False,
+        )
+        self.notebook.add(self.search_page.frame, text="搜索")
 
         self.timeline_page = TimelinePage(
             self.notebook, tk, ttk, scrolledtext, refresh=self.refresh,
@@ -492,6 +687,90 @@ class DashboardApp:
             })
         self.exploration_page.set_records(exploration_records)
         self.event_page.set_records(snapshot["events"])
+        self.update_preset_buttons()
+        if self.active_preset:
+            self.apply_active_preset(switch=False)
+        if self.global_query.get().strip():
+            self.update_search_results(switch=False)
+
+    def perform_global_search(self) -> None:
+        self.clear_preset()
+        self.update_search_results(switch=True)
+
+    def update_search_results(self, *, switch: bool) -> None:
+        records = global_search((self.snapshot or {}).get("search_index", []), self.global_query.get())
+        self.search_page.set_records(records)
+        self.notebook.tab(self.search_page.frame, text=f"搜索（{len(records)}）" if self.global_query.get().strip() else "搜索")
+        if switch:
+            self.notebook.select(self.search_page.frame)
+
+    def toggle_preset(self, name: str) -> None:
+        if self.active_preset == name:
+            self.clear_preset()
+            return
+        self.active_preset = name
+        self.global_query.set("")
+        self.search_page.set_records([])
+        self.notebook.tab(self.search_page.frame, text="搜索")
+        for page in (self.history_page, self.decision_page, self.exploration_page, self.event_page):
+            page.query.set("")
+        self.timeline_page.query.set("")
+        self.apply_active_preset(switch=True)
+        self.update_preset_buttons()
+
+    def clear_preset(self) -> None:
+        self.active_preset = None
+        for page in (self.history_page, self.decision_page, self.exploration_page, self.event_page):
+            page.set_predicate(None)
+        self.timeline_page.set_branch_subset(None)
+        self.update_preset_buttons()
+
+    def apply_active_preset(self, *, switch: bool) -> None:
+        if not self.snapshot or not self.active_preset:
+            return
+        self.history_page.set_predicate(None)
+        self.exploration_page.set_predicate(None)
+        self.timeline_page.set_branch_subset(None)
+        if self.active_preset == "recent":
+            recent_ids = set(dashboard_presets(self.snapshot)["recent"])
+            self.history_page.set_predicate(lambda item, ids=recent_ids: item.get("event_id") in ids)
+            target = self.history_page.frame
+        elif self.active_preset == "negative":
+            negative_ids = set(dashboard_presets(self.snapshot)["negative"])
+            self.exploration_page.set_predicate(lambda item, ids=negative_ids: item.get("event_id") in ids)
+            target = self.exploration_page.frame
+        else:
+            names = set(dashboard_presets(self.snapshot)["unmerged"])
+            self.timeline_page.set_branch_subset(names)
+            target = self.timeline_page.frame
+        if switch:
+            self.notebook.select(target)
+
+    def update_preset_buttons(self) -> None:
+        if not hasattr(self, "preset_buttons"):
+            return
+        snapshot = self.snapshot or {}
+        values = dashboard_presets(snapshot)
+        counts = {name: len(items) for name, items in values.items()}
+        labels = {"recent": "最近任务", "negative": "失败探索", "unmerged": "未合并分支"}
+        for name, button in self.preset_buttons.items():
+            prefix = "✓ " if self.active_preset == name else ""
+            button.configure(text=f"{prefix}{labels[name]}（{counts[name]}）")
+
+    def open_search_result(self, record: dict) -> None:
+        target, record_id = record.get("target"), record.get("record_id")
+        self.clear_preset()
+        if target == "history":
+            self.history_page.select_record("event_id", record_id)
+            self.notebook.select(self.history_page.frame)
+        elif target == "decisions":
+            self.decision_page.select_record("event_id", record_id)
+            self.notebook.select(self.decision_page.frame)
+        elif target == "explorations":
+            self.exploration_page.select_record("event_id", record_id)
+            self.notebook.select(self.exploration_page.frame)
+        elif target == "timeline" and self.timeline_page.reveal_commit(record_id):
+            self.notebook.select(self.timeline_page.frame)
 
     @staticmethod
     def overview_text(snapshot: dict) -> str:
@@ -550,6 +829,14 @@ class DashboardApp:
                     + f"\n\n结论\n{attempt.get('conclusion') or '未填写'}")
         return (f"分支：{record.get('branch')}\n时间：{record.get('occurred_at')}\n结果：{record.get('result')}\n\n"
                 f"目标\n{record.get('goal', '')}\n\n证据\n{record.get('evidence', '')}\n\n去向\n{record.get('disposition_ref', '')}")
+
+    @staticmethod
+    def search_result_detail(record: dict) -> str:
+        return (
+            f"类型：{record.get('kind_label')}\n时间：{record.get('occurred_at')}\n分支：{record.get('branch')}\n\n"
+            f"标题\n{record.get('title', '')}\n\n摘要\n{record.get('summary', '')}\n\n"
+            f"双击记录或点击“打开记录”可定位到原分页。"
+        )
 
     @staticmethod
     def event_detail(record: dict) -> str:
