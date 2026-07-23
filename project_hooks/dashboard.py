@@ -41,6 +41,28 @@ def global_search(records: list[dict], query: str) -> list[dict]:
     ]
 
 
+def linked_task_ids(record: dict | None) -> list[str]:
+    if not record:
+        return []
+    values = list(record.get("task_ids") or [])
+    if record.get("task_id"):
+        values.insert(0, record["task_id"])
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def record_location(record: dict) -> tuple[str | None, str | None]:
+    return record.get("target"), record.get("record_id")
+
+
+def record_identity(record: dict | None) -> tuple[str, object] | None:
+    if not record:
+        return None
+    for key in ("record_id", "event_id", "decision_id", "hash", "task_id", "branch"):
+        if record.get(key) is not None:
+            return key, record[key]
+    return None
+
+
 def dashboard_presets(snapshot: dict) -> dict[str, list[str]]:
     return {
         "recent": [item.get("event_id") for item in snapshot.get("history", [])[:10] if item.get("event_id")],
@@ -200,7 +222,8 @@ class DashboardController:
 class TablePage:
     def __init__(self, parent, tk, ttk, scrolledtext, *, columns: list[tuple[str, str, int]],
                  detail: Callable[[dict], str], refresh: Callable[[], None],
-                 activate: Callable[[dict], None] | None = None, show_query: bool = True):
+                 activate: Callable[[dict], None] | None = None, show_query: bool = True,
+                 activate_label: str = "打开记录"):
         self.tk, self.ttk = tk, ttk
         self.frame = ttk.Frame(parent, padding=8)
         self.columns = columns
@@ -224,7 +247,7 @@ class TablePage:
         self.query.trace_add("write", lambda *_: self.render())
         ttk.Button(controls, text="复制选中", command=self.copy_selected).pack(side="left")
         if activate:
-            ttk.Button(controls, text="打开记录", command=self.activate_selected).pack(side="left", padx=(6, 0))
+            ttk.Button(controls, text=activate_label, command=self.activate_selected).pack(side="left", padx=(6, 0))
         ttk.Button(controls, text="刷新", command=refresh).pack(side="left", padx=(6, 0))
 
         table_frame = ttk.Frame(self.frame)
@@ -262,16 +285,20 @@ class TablePage:
         self.render()
 
     def render(self) -> None:
-        selected = self.tree.selection()
-        selected_id = selected[0] if selected else None
+        selected_key = record_identity(self.selected_record())
         source = self.records if self.predicate is None else [record for record in self.records if self.predicate(record)]
         self.visible = sort_records(filter_records(source, self.query.get()), self.sort_key, self.descending)
         self.tree.delete(*self.tree.get_children())
         for index, record in enumerate(self.visible):
             iid = f"row-{index}"
             self.tree.insert("", "end", iid=iid, values=[short(record.get(key)) for key, _, _ in self.columns])
-        if selected_id and self.tree.exists(selected_id):
-            self.tree.selection_set(selected_id)
+        selected_index = next(
+            (index for index, record in enumerate(self.visible) if record_identity(record) == selected_key),
+            None,
+        )
+        if selected_index is not None:
+            self.tree.selection_set(f"row-{selected_index}")
+            self.show_detail()
         elif self.visible:
             self.tree.selection_set("row-0")
             self.show_detail()
@@ -324,11 +351,108 @@ class TablePage:
         return False
 
 
+class TaskDetailPage:
+    def __init__(self, parent, tk, ttk, scrolledtext, *, refresh: Callable[[], None],
+                 open_related: Callable[[dict], None]):
+        self.frame = ttk.Frame(parent, padding=8)
+        self.tasks: dict[str, dict] = {}
+        self.current_task_id: str | None = None
+
+        controls = ttk.Frame(self.frame)
+        controls.pack(fill="x", pady=(0, 6))
+        ttk.Label(controls, text="任务").pack(side="left")
+        self.selected = tk.StringVar()
+        self.selector = ttk.Combobox(controls, textvariable=self.selected, state="readonly", width=42)
+        self.selector.pack(side="left", padx=(6, 8))
+        self.selector.bind("<<ComboboxSelected>>", self.select_from_box)
+        ttk.Button(controls, text="复制摘要", command=self.copy_summary).pack(side="left")
+        ttk.Button(controls, text="刷新", command=refresh).pack(side="left", padx=(6, 0))
+
+        ttk.Label(self.frame, text="任务摘要").pack(anchor="w", pady=(0, 3))
+        self.summary = scrolledtext.ScrolledText(self.frame, height=12, wrap="word")
+        self.summary.pack(fill="x")
+        self.summary.configure(state="disabled")
+
+        self.related_page = TablePage(
+            self.frame, tk, ttk, scrolledtext,
+            columns=[("kind_label", "类型", 80), ("occurred_at", "时间", 180),
+                     ("title", "标题", 350), ("summary", "摘要", 300)],
+            detail=lambda record: json.dumps(record, ensure_ascii=False, indent=2, default=str),
+            refresh=refresh, activate=open_related, activate_label="打开记录",
+        )
+        self.related_page.frame.pack(fill="both", expand=True, padx=0, pady=(8, 0))
+        self._set_summary("请选择任务历史中的记录，或从其他分页打开关联任务。")
+
+    def set_tasks(self, tasks: dict[str, dict]) -> None:
+        previous = self.current_task_id
+        self.tasks = dict(tasks)
+        ordered = sorted(
+            self.tasks,
+            key=lambda task_id: (self.tasks[task_id].get("started_at", ""), task_id),
+            reverse=True,
+        )
+        self.selector.configure(values=ordered)
+        if previous and previous in self.tasks:
+            self.selected.set(previous)
+            self.render()
+        elif previous:
+            self.current_task_id = None
+            self.selected.set("")
+            self.related_page.set_records([])
+            self._set_summary(f"任务 {previous} 已不在当前数据中，可能已切换分支或记录被过滤。")
+
+    def select_from_box(self, _event=None) -> None:
+        self.open_task(self.selected.get())
+
+    def open_task(self, task_id: str) -> bool:
+        if task_id not in self.tasks:
+            self.current_task_id = None
+            self.related_page.set_records([])
+            self._set_summary(f"找不到任务 {task_id}。")
+            return False
+        self.current_task_id = task_id
+        self.selected.set(task_id)
+        self.render()
+        return True
+
+    def render(self) -> None:
+        task = self.tasks.get(self.current_task_id or "")
+        if not task:
+            return
+        acceptance = task.get("acceptance") or "未记录"
+        if isinstance(acceptance, list):
+            acceptance = "\n".join(f"- {item}" for item in acceptance) or "未记录"
+        evidence = "\n".join(f"- {item}" for item in task.get("evidence", [])) or "无"
+        text = (
+            f"任务：{task['task_id']}\n分支：{task.get('branch') or '未知'}\n"
+            f"开始：{task.get('started_at') or '未知'}\n结束：{task.get('finished_at') or '进行中'}\n"
+            f"结果：{task.get('result') or '未知'}\n路线：{task.get('route') or '未记录'}\n\n"
+            f"目标\n{task.get('goal') or '未记录'}\n\n验收条件\n{acceptance}\n\n"
+            f"结论\n{task.get('conclusion') or '未记录'}\n\n证据\n{evidence}"
+        )
+        self._set_summary(text)
+        self.related_page.set_records(task.get("related", []))
+
+    def _set_summary(self, text: str) -> None:
+        self.summary.configure(state="normal")
+        self.summary.delete("1.0", "end")
+        self.summary.insert("1.0", text)
+        self.summary.configure(state="disabled")
+
+    def copy_summary(self) -> None:
+        task = self.tasks.get(self.current_task_id or "")
+        if not task:
+            return
+        self.frame.clipboard_clear()
+        self.frame.clipboard_append(self.summary.get("1.0", "end-1c"))
+
+
 class TimelinePage:
     ALL_BRANCHES = "全部分支"
     FOLD_LIMIT = 50
 
-    def __init__(self, parent, tk, ttk, scrolledtext, *, refresh: Callable[[], None]):
+    def __init__(self, parent, tk, ttk, scrolledtext, *, refresh: Callable[[], None],
+                 open_task: Callable[[str], None]):
         self.tk, self.ttk = tk, ttk
         self.frame = ttk.Frame(parent, padding=8)
         self.refresh_callback = refresh
@@ -339,6 +463,7 @@ class TimelinePage:
         self.expanded = False
         self.branch_subset: set[str] | None = None
         self.error_message: str | None = None
+        self.open_task_callback = open_task
 
         controls = ttk.Frame(self.frame)
         controls.pack(fill="x", pady=(0, 6))
@@ -356,6 +481,14 @@ class TimelinePage:
         self.fold_button = ttk.Button(controls, text="无需折叠", command=self.toggle_expanded, state="disabled")
         self.fold_button.pack(side="left", padx=(6, 0))
         ttk.Button(controls, text="刷新", command=refresh).pack(side="left", padx=(6, 0))
+
+        task_controls = ttk.Frame(self.frame)
+        task_controls.pack(fill="x", pady=(0, 6))
+        ttk.Label(task_controls, text="关联任务").pack(side="left")
+        self.task_id = tk.StringVar()
+        self.task_box = ttk.Combobox(task_controls, textvariable=self.task_id, state="readonly", width=38)
+        self.task_box.pack(side="left", padx=(6, 8))
+        ttk.Button(task_controls, text="打开关联任务", command=self.open_selected_task).pack(side="left")
 
         ttk.Label(
             self.frame,
@@ -526,6 +659,10 @@ class TimelinePage:
 
     def show_detail(self) -> None:
         record = self.selected_record()
+        task_ids = linked_task_ids(record)
+        self.task_box.configure(values=task_ids)
+        if self.task_id.get() not in task_ids:
+            self.task_id.set(task_ids[0] if task_ids else "")
         if record is None:
             text = "没有可显示的提交。"
         else:
@@ -548,6 +685,10 @@ class TimelinePage:
         self.detail.delete("1.0", "end")
         self.detail.insert("1.0", text)
         self.detail.configure(state="disabled")
+
+    def open_selected_task(self) -> None:
+        if self.task_id.get():
+            self.open_task_callback(self.task_id.get())
 
     def copy_selected(self) -> None:
         record = self.selected_record()
@@ -614,23 +755,33 @@ class DashboardApp:
         )
         self.notebook.add(self.search_page.frame, text="搜索")
 
-        self.timeline_page = TimelinePage(
+        self.task_page = TaskDetailPage(
             self.notebook, tk, ttk, scrolledtext, refresh=self.refresh,
+            open_related=self.open_related_record,
+        )
+        self.notebook.add(self.task_page.frame, text="任务详情")
+
+        self.timeline_page = TimelinePage(
+            self.notebook, tk, ttk, scrolledtext, refresh=self.refresh, open_task=self.open_task,
         )
         self.notebook.add(self.timeline_page.frame, text="时间线")
 
         self.history_page = TablePage(self.notebook, tk, ttk, scrolledtext,
             columns=[("occurred_at", "时间", 180), ("task_id", "任务 ID", 190), ("result", "结果", 110), ("branch", "分支", 130), ("summary", "摘要", 360)],
-            detail=self.history_detail, refresh=self.refresh)
+            detail=self.history_detail, refresh=self.refresh, activate=self.open_record_task,
+            activate_label="打开任务")
         self.decision_page = TablePage(self.notebook, tk, ttk, scrolledtext,
             columns=[("decision_id", "决策 ID", 180), ("occurred_at", "时间", 180), ("branch", "分支", 130), ("decision", "决策", 480)],
-            detail=self.decision_detail, refresh=self.refresh)
+            detail=self.decision_detail, refresh=self.refresh, activate=self.open_record_task,
+            activate_label="打开关联任务")
         self.exploration_page = TablePage(self.notebook, tk, ttk, scrolledtext,
             columns=[("branch", "分支", 210), ("occurred_at", "时间", 180), ("result", "结果", 110), ("goal", "目标", 330), ("disposition_ref", "PR / 归档", 180)],
-            detail=self.exploration_detail, refresh=self.refresh)
+            detail=self.exploration_detail, refresh=self.refresh, activate=self.open_record_task,
+            activate_label="打开关联任务")
         self.event_page = TablePage(self.notebook, tk, ttk, scrolledtext,
             columns=[("occurred_at", "时间", 180), ("event_type", "事件类型", 190), ("branch", "分支", 140), ("task_id", "任务 ID", 210), ("event_id", "事件 ID", 300)],
-            detail=self.event_detail, refresh=self.refresh)
+            detail=self.event_detail, refresh=self.refresh, activate=self.open_record_task,
+            activate_label="打开关联任务")
         for page, label in ((self.history_page, "任务历史"), (self.decision_page, "决策"),
                             (self.exploration_page, "探索"), (self.event_page, "事件")):
             self.notebook.add(page.frame, text=label)
@@ -674,6 +825,7 @@ class DashboardApp:
             snapshot.get("timeline", {"lanes": [], "commits": [], "edges": []}),
             error=snapshot.get("timeline_error"),
         )
+        self.task_page.set_tasks(snapshot.get("task_details", {}))
         self.history_page.set_records(snapshot["history"])
         self.decision_page.set_records(snapshot["decisions"])
         exploration_records = list(snapshot["explorations"])
@@ -683,6 +835,7 @@ class DashboardApp:
                 "branch": attempt["branch"], "occurred_at": attempt["updated_at"], "result": attempt["state"],
                 "goal": attempt["goal"], "evidence": attempt["evidence"],
                 "disposition_ref": attempt.get("pr") or attempt.get("archive_branch") or "active attempt",
+                "task_id": attempt["attempt_id"],
                 "_attempt": attempt,
             })
         self.exploration_page.set_records(exploration_records)
@@ -758,19 +911,50 @@ class DashboardApp:
             button.configure(text=f"{prefix}{labels[name]}（{counts[name]}）")
 
     def open_search_result(self, record: dict) -> None:
-        target, record_id = record.get("target"), record.get("record_id")
+        target, record_id = record_location(record)
         self.clear_preset()
+        self.open_target_record(target, record_id)
+
+    def open_target_record(self, target: str | None, record_id: str | None) -> bool:
         if target == "history":
-            self.history_page.select_record("event_id", record_id)
+            found = self.history_page.select_record("event_id", record_id)
             self.notebook.select(self.history_page.frame)
+            return found
         elif target == "decisions":
-            self.decision_page.select_record("event_id", record_id)
+            found = self.decision_page.select_record("event_id", record_id)
             self.notebook.select(self.decision_page.frame)
+            return found
         elif target == "explorations":
-            self.exploration_page.select_record("event_id", record_id)
+            found = self.exploration_page.select_record("event_id", record_id)
             self.notebook.select(self.exploration_page.frame)
-        elif target == "timeline" and self.timeline_page.reveal_commit(record_id):
+            return found
+        elif target == "events":
+            found = self.event_page.select_record("event_id", record_id)
+            self.notebook.select(self.event_page.frame)
+            return found
+        elif target == "timeline" and record_id and self.timeline_page.reveal_commit(record_id):
             self.notebook.select(self.timeline_page.frame)
+            return True
+        self.status.configure(text=f"找不到关联记录：{target or '未知类型'} / {record_id or '未知 ID'}")
+        return False
+
+    def open_related_record(self, record: dict) -> None:
+        self.clear_preset()
+        self.open_target_record(*record_location(record))
+
+    def open_record_task(self, record: dict) -> None:
+        task_ids = linked_task_ids(record)
+        if not task_ids:
+            self.status.configure(text="该记录没有关联任务。")
+            return
+        self.open_task(task_ids[0])
+
+    def open_task(self, task_id: str) -> None:
+        self.clear_preset()
+        if self.task_page.open_task(task_id):
+            self.notebook.select(self.task_page.frame)
+        else:
+            self.status.configure(text=f"找不到关联任务：{task_id}")
 
     @staticmethod
     def overview_text(snapshot: dict) -> str:

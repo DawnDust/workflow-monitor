@@ -17,6 +17,9 @@ from project_hooks.dashboard import (
     filter_records,
     global_search,
     launch_dashboard,
+    linked_task_ids,
+    record_identity,
+    record_location,
     short,
     sort_records,
     timeline_layout,
@@ -107,6 +110,50 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertTrue({"task", "decision", "commit"}.issubset({item["kind"] for item in snapshot["search_index"]}))
         self.assertEqual(snapshot["timeline"]["branches"][0]["name"], "main")
 
+    def test_task_details_aggregate_decisions_explorations_events_and_commits(self) -> None:
+        task_id = "20260723_task_detail_001"
+        self.start(task_id, "--track", "research", "--topic", "task-detail")
+        self.update_state("task details ready")
+        self.hooks("decision", "add", "--decision", "use a task detail center", "--alternatives", "separate pages",
+                   "--basis", "one navigation hub", "--reopen-condition", "new record type")
+        self.hooks("attempt", "update", "--hypothesis", "task links are sufficient", "--evidence", "records share task id",
+                   "--conclusion", "aggregation is deterministic")
+        self.end(task_id, state="validated", route="changed")
+        self.commit_all("record task detail experiment")
+
+        model = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "research/task-detail",
+        )
+        detail = model.dashboard_snapshot()["task_details"][task_id]
+        self.assertEqual(detail["goal"], "test database workflow")
+        self.assertEqual(detail["result"], "completed")
+        self.assertEqual(detail["conclusion"], "aggregation is deterministic")
+        self.assertIn("records share task id", detail["evidence"])
+        kinds = {item["kind"] for item in detail["related"]}
+        self.assertTrue({"decision", "exploration", "event", "commit"}.issubset(kinds))
+        self.assertTrue(all(item["task_id"] == task_id for item in detail["related"]))
+
+    def test_one_commit_can_link_to_multiple_task_details(self) -> None:
+        task_ids = ["20260723_multi_001", "20260723_multi_002"]
+        for task_id in task_ids:
+            self.start(task_id)
+            self.update_state(f"complete {task_id}")
+            self.end(task_id)
+        self.commit_all("complete two maintenance tasks")
+        commit_hash = self.git("rev-parse", "HEAD").stdout.strip()
+
+        model = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        )
+        details = model.dashboard_snapshot()["task_details"]
+        for task_id in task_ids:
+            commits = [item for item in details[task_id]["related"] if item["kind"] == "commit"]
+            self.assertEqual([item["record_id"] for item in commits], [commit_hash])
+
     def test_timeline_maps_branches_tasks_unlinked_commits_and_squash(self) -> None:
         note = self.root / "plain.txt"
         note.write_text("ordinary commit\n", encoding="utf-8")
@@ -173,6 +220,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(snapshot["health"]["status"], "passed")
         self.assertEqual(snapshot["timeline"]["status"], "unavailable")
         self.assertIn("git unavailable", snapshot["timeline_error"])
+        self.assertEqual(snapshot["task_details"], {})
 
     def test_timeline_cache_invalidates_after_git_commit(self) -> None:
         model = MaintenanceReadModel(
@@ -471,6 +519,13 @@ class DashboardPresentationTests(unittest.TestCase):
             {"occurred_at": "2026-07-23T09:45:00+08:00", "id": "commit"},
         ]
         self.assertEqual([item["id"] for item in sort_records(mixed_times, "occurred_at", True)], ["task", "commit"])
+
+    def test_record_navigation_handles_unlinked_and_multiple_tasks(self) -> None:
+        self.assertEqual(linked_task_ids({"task_id": None}), [])
+        self.assertEqual(linked_task_ids({"task_id": "task-1", "task_ids": ["task-1", "task-2"]}), ["task-1", "task-2"])
+        self.assertEqual(record_location({"target": "timeline", "record_id": "abc"}), ("timeline", "abc"))
+        self.assertEqual(record_identity({"event_id": "event-1", "task_id": "task-1"}), ("event_id", "event-1"))
+        self.assertIsNone(record_identity({}))
 
     def test_dashboard_presets_use_ten_negative_only_and_unmerged_explorations(self) -> None:
         snapshot = {
