@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from project_hooks.dashboard import (
     CLI_FALLBACK,
+    DashboardApp,
     DashboardController,
     DashboardError,
     PRIMARY_TABS,
@@ -31,6 +32,7 @@ from project_hooks.dashboard import (
 from project_hooks.read_model import (
     MaintenanceReadModel,
     ReadModelError,
+    action_overview_text,
     git_state_summary,
     is_auxiliary_task_id,
     is_publication_step,
@@ -92,8 +94,19 @@ class ProjectHooksSqliteTests(unittest.TestCase):
     def test_install_rebuilds_database_and_context_is_available(self) -> None:
         database = self.root / ".project_hooks/maintenance.sqlite3"
         self.assertFalse(database.exists())
+        missing = self.hooks(check=False)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("python -m project_hooks install", missing.stderr)
+        self.assertIn("python -m project_hooks check", missing.stderr)
         self.hooks("install")
         self.assertTrue(database.exists())
+        overview = self.hooks().stdout
+        self.assertIn("项目行动概览", overview)
+        self.assertIn("状态：", overview)
+        self.assertIn("活动任务：", overview)
+        self.assertIn("当前阻塞：", overview)
+        self.assertIn("下一步：", overview)
+        self.assertIn("Git 同步：", overview)
         output = self.hooks("context", "--format", "markdown").stdout
         self.assertIn("# 动态维护上下文", output)
         self.assertIn("## 工作断点", output)
@@ -769,8 +782,60 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertNotEqual(invalid.returncode, 0)
         self.assertIn("必须大于或等于 0", invalid.stderr)
 
+    def test_root_help_separates_daily_and_advanced_commands(self) -> None:
+        basic = self.hooks("--help").stdout
+        self.assertIn("context", basic)
+        self.assertIn("start", basic)
+        self.assertIn("end", basic)
+        self.assertIn("dashboard", basic)
+        self.assertNotIn("prepare-pr", basic)
+        self.assertNotIn("pre-commit", basic)
+        advanced = self.hooks("--help-all").stdout
+        self.assertIn("prepare-pr", advanced)
+        self.assertIn("archive-attempt", advanced)
+        self.assertIn("db", advanced)
+        self.assertNotIn("pre-commit", advanced)
+
 
 class DashboardPresentationTests(unittest.TestCase):
+    def test_action_overview_is_shared_and_action_first(self) -> None:
+        context = {
+            "branch": "main",
+            "overview_state": {
+                "status": "进行中",
+                "main_goal_version": "v9",
+                "goal": "  精简\n维护体验  ",
+                "judgment": "不应出现在默认概览",
+                "breakpoint": "不应出现在默认概览",
+                "blocker": "",
+                "next_steps": ["完成代码", "运行测试"],
+            },
+            "active_task": {"task_id": "task-1", "branch": "main"},
+            "git_state": {
+                "branch": "main",
+                "head": "1234567890",
+                "upstream_ref": "origin/main",
+                "upstream_head": "abcdef1234",
+                "relation": "synced",
+            },
+            "recent_handoffs": [{
+                "occurred_at": "2026-07-23 10:00:00",
+                "task": "上一个任务",
+                "result": "完成",
+            }],
+        }
+        text = action_overview_text(context)
+        self.assertLess(text.index("状态："), text.index("当前目标："))
+        self.assertIn("活动任务：task-1（main）", text)
+        self.assertIn("当前阻塞：无。", text)
+        self.assertIn("1. 完成代码", text)
+        self.assertIn("Git 同步：main 12345678 与 origin/main abcdef12：同步", text)
+        self.assertIn("当前目标：精简 维护体验", text)
+        self.assertIn("最近完成：2026-07-23 10:00:00｜上一个任务｜完成", text)
+        self.assertNotIn("判断", text)
+        self.assertNotIn("断点", text)
+        self.assertEqual(DashboardApp.overview_text({"context": context}), text.rstrip())
+
     def test_publication_classifiers_are_conservative(self) -> None:
         self.assertTrue(is_publication_step("提交已验证改动"))
         self.assertTrue(is_publication_step("push main and verify remote"))

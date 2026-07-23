@@ -3,5 +3,10 @@
 <!-- project-maintenance-hooks:begin -->
 ## 项目维护生命周期
 
-本项目使用 `.codex/project-maintenance-workflow.json`、`project_hooks`、SQLite 和版本控制内的 `.githooks/` 管理任务、探索、决策、交接与 Git 门禁，不依赖全局 Hook 或插件。新 clone 或 worktree 首次写入前运行 `python -m project_hooks install`。每次任务先运行 `python -m project_hooks context --format markdown` 获取动态上下文，再按 `core_read_order` 阅读静态规范；首次写入前运行 `python -m project_hooks start`。稳定维护使用 `--track stable` 并只在 `main` 进行；新理论、算法、实验和不确定改动使用 `--track research|experiment|sandbox --topic <slug>`。任务中通过 `state update` 更新状态，或在 `end` 中直接提供最终状态参数完成一步收尾；路线变化通过 `decision add` 记录，探索证据通过 `attempt update` 记录。只有 `validated` 尝试可准备 Squash PR，且必须等待用户明确确认才能合并。唯一无需新生命周期的写操作是用户明确要求的纯 Git 发布：当前在 `main`、没有活动任务、不再编辑文件、所有改动均属于已结束且验证通过的任务时，可直接检查、暂存、提交和推送；修复检查、修改内容、PR、合并和探索不适用。禁止手工修改既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态、绕过活动任务的 `end`、直接在 `main` 试改或自动合并。
+- 新 clone 或 worktree 首次写入前运行 `python -m project_hooks install`。
+- 每次任务先运行 `python -m project_hooks context --format markdown`，再按 `core_read_order` 阅读静态规范；首次写入前必须运行 `start`。
+- 稳定维护只在 `main` 使用 `--track stable`；新理论、算法、实验和不确定改动使用 `--track research|experiment|sandbox --topic <slug>`。
+- 通过 `state update` 更新进度、`decision add` 记录路线变化、`attempt update` 保存探索证据，最后必须运行 `end`。只有 `validated` 尝试可准备 Squash PR，合并必须等待用户明确确认。
+- 仅当用户明确要求纯 Git 发布，且 `main` 没有活动任务、不再编辑、改动已经结束并验证通过时，才可直接检查、暂存、提交和推送。
+- 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态、绕过 `end`、在 `main` 试改、自动合并。
 <!-- project-maintenance-hooks:end -->

@@ -10,7 +10,7 @@ from typing import Callable
 from .read_model import (
     MaintenanceReadModel,
     ReadModelError,
-    git_state_summary,
+    action_overview_text,
     is_auxiliary_task_id,
 )
 
@@ -1225,27 +1225,7 @@ class DashboardApp:
 
     @staticmethod
     def overview_text(snapshot: dict) -> str:
-        context = snapshot["context"]
-        state = context.get("overview_state") or context.get("state") or {}
-        active = context.get("active_task")
-        lines = [
-            "项目状态",
-            f"状态：{state.get('status') or '未设置'}　目标版本：{state.get('main_goal_version') or '未设置'}",
-            f"活动任务：{active.get('task_id')}（{active.get('branch')}）" if active else "活动任务：无", "",
-            "当前目标", state.get("goal") or "未设置", "", "当前判决", state.get("judgment") or "未设置", "",
-            "工作断点", state.get("breakpoint") or "未设置", "",
-            "真实断点", git_state_summary(context.get("git_state") or {}), "", "接下来三步",
-        ]
-        steps = state.get("next_steps", [])
-        lines.extend(f"{index}. {item}" for index, item in enumerate(steps, 1))
-        if not steps:
-            lines.append("无。")
-        lines += ["", "当前阻塞", state.get("blocker") or "无。", "", "最近交接"]
-        for handoff in context.get("recent_handoffs", []):
-            lines.append(f"- {handoff['occurred_at']}｜{handoff['task']}｜{handoff['result']}｜{handoff['main_goal_change']}")
-        if not context.get("recent_handoffs"):
-            lines.append("无。")
-        return "\n".join(lines)
+        return action_overview_text(snapshot["context"]).rstrip()
 
     def copy_overview(self) -> None:
         if not self.snapshot:

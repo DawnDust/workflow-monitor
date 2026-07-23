@@ -17,7 +17,12 @@ from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 from .dashboard import DashboardDataProvider, DashboardError, launch_dashboard
-from .read_model import MaintenanceReadModel, ReadModelError, git_state_summary
+from .read_model import (
+    MaintenanceReadModel,
+    ReadModelError,
+    action_overview_text,
+    git_state_summary,
+)
 from .store import (
     SCHEMA_VERSION,
     StoreError,
@@ -59,6 +64,44 @@ ATTEMPT_STATES = ("active", "validated", "negative", "inconclusive", "paused")
 STATE_ARGUMENTS = (
     "goal", "judgment", "breakpoint", "blocker", "status", "main_goal_version",
 )
+DAILY_HELP = """\
+usage: project-hooks [-h] [--help-all] {context,start,end,dashboard} ...
+
+项目内维护入口。无参数运行时显示行动概览。
+
+日常命令:
+  context     读取完整动态上下文
+  start       开始任务生命周期
+  end         完成任务生命周期
+  dashboard   打开只读管理窗口
+
+首次使用:
+  python -m project_hooks install
+  python -m project_hooks check
+
+使用 --help-all 查看全部高级命令；使用 <命令> --help 查看参数。
+"""
+FULL_HELP = """\
+usage: project-hooks [-h] [--help-all] <command> ...
+
+日常命令:
+  context, start, end, dashboard
+
+仓库维护:
+  install, check, status, branch-status
+
+状态与记录:
+  state, history, decisions, decision, explorations
+
+探索流程:
+  attempt, exploration, prepare-pr, archive-attempt
+
+数据维护:
+  db
+
+内部 Git Hook 命令不显示；所有既有公开命令保持兼容。
+使用 <命令> --help 查看详细参数。
+"""
 
 
 class WorkflowError(RuntimeError):
@@ -922,8 +965,10 @@ def add_state_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="project-hooks")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(prog="project-hooks", add_help=False)
+    parser.add_argument("-h", "--help", action="store_true", dest="basic_help")
+    parser.add_argument("--help-all", action="store_true")
+    sub = parser.add_subparsers(dest="command")
     start = sub.add_parser("start")
     start.add_argument("task_id")
     start.add_argument("--kind", required=True, choices=("code", "docs", "review", "governance", "analysis", "design", "test", "other"))
@@ -998,7 +1043,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if args.command == "start": output = start_task(args)
+        if args.basic_help:
+            output = DAILY_HELP
+        elif args.help_all:
+            output = FULL_HELP
+        elif args.command is None:
+            configured = run_git(["config", "--local", "--get", "core.hooksPath"], check=False).stdout.strip()
+            if configured != TRACKED_HOOKS_DIR:
+                raise WorkflowError(
+                    "项目维护尚未安装。请先运行 `python -m project_hooks install`，"
+                    "再运行 `python -m project_hooks check`。"
+                )
+            output = action_overview_text(context_data())
+        elif args.command == "start": output = start_task(args)
         elif args.command == "status": output = task_status()
         elif args.command == "branch-status": output = branch_status()
         elif args.command == "prepare-pr": output = prepare_pr()
