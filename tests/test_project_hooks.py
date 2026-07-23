@@ -28,7 +28,13 @@ from project_hooks.dashboard import (
     sort_records,
     timeline_layout,
 )
-from project_hooks.read_model import MaintenanceReadModel, ReadModelError, git_state_summary
+from project_hooks.read_model import (
+    MaintenanceReadModel,
+    ReadModelError,
+    git_state_summary,
+    is_auxiliary_task_id,
+    is_publication_step,
+)
 from project_hooks.store import append_events
 
 
@@ -179,6 +185,142 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             lambda: "main",
         ).dashboard_snapshot()["task_details"][task_id]
         self.assertEqual(unknown["publication_status"], "未知")
+
+    def test_synced_publication_derives_completed_overview_without_mutating_state(self) -> None:
+        task_id = "20260723_synced_overview_001"
+        self.start(task_id)
+        self.hooks(
+            "state", "update",
+            "--status", "已验证，准备发布",
+            "--judgment", "改动可提交",
+            "--breakpoint", "测试通过，待提交推送",
+            "--next", "提交已验证改动",
+            "--next", "推送 main 并核对远端哈希",
+        )
+        self.end(task_id)
+        self.commit_all("publish completed task")
+        commit_hash = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("update-ref", "refs/remotes/origin/main", commit_hash)
+
+        context = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).context()
+        self.assertEqual(context["state"]["status"], "已验证，准备发布")
+        self.assertEqual(context["state"]["next_steps"], ["提交已验证改动", "推送 main 并核对远端哈希"])
+        self.assertEqual(context["overview_state"]["status"], "已完成并发布")
+        self.assertEqual(context["overview_state"]["next_steps"], [])
+        self.assertIn(commit_hash[:8], context["overview_state"]["breakpoint"])
+        self.assertEqual(context["completed_next_steps"], context["state"]["next_steps"])
+        self.assertTrue(context["publication_completed"])
+
+    def test_overview_keeps_business_steps_and_unpublished_task_state(self) -> None:
+        base_context = {
+            "branch": "main",
+            "state": {
+                "task_id": "task-1",
+                "status": "准备发布",
+                "judgment": "ready",
+                "breakpoint": "tested",
+                "next_steps": ["推送 main", "分析下一批数据"],
+            },
+            "git_state": {
+                "relation": "synced",
+                "upstream_ref": "origin/main",
+                "upstream_head": "a" * 40,
+            },
+            "active_task": None,
+        }
+        details = {
+            "task-1": {
+                "task_id": "task-1",
+                "goal": "implement feature",
+                "conclusion": "feature complete",
+                "publication_status": "已发布",
+                "parent_task_id": None,
+            },
+        }
+        mixed = MaintenanceReadModel._apply_overview_state(dict(base_context), details)
+        self.assertEqual(mixed["visible_next_steps"], ["分析下一批数据"])
+        self.assertEqual(mixed["overview_state"]["status"], "准备发布")
+        self.assertFalse(mixed["publication_completed"])
+
+        unpublished_context = dict(base_context)
+        unpublished_context["state"] = dict(base_context["state"], next_steps=["推送 main"])
+        unpublished_details = {"task-1": dict(details["task-1"], publication_status="仅记录")}
+        unpublished = MaintenanceReadModel._apply_overview_state(unpublished_context, unpublished_details)
+        self.assertEqual(unpublished["visible_next_steps"], ["推送 main"])
+        self.assertFalse(unpublished["publication_completed"])
+
+    def test_auxiliary_publication_tasks_fold_into_primary_details(self) -> None:
+        primary_id = "20260723_primary_feature_001"
+        publish_id = "20260723_publish_primary_feature_001"
+        record_id = "20260723_record_primary_feature_publication_001"
+
+        self.start(primary_id)
+        self.update_state("feature complete")
+        self.end(primary_id)
+        self.start(publish_id)
+        self.update_state("ready to publish")
+        self.end(publish_id)
+        self.commit_all("feature and publication preparation")
+
+        self.start(record_id)
+        self.update_state("publication recorded")
+        self.end(record_id)
+        self.commit_all("record publication")
+
+        snapshot = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).dashboard_snapshot()
+        details = snapshot["task_details"]
+        self.assertEqual(details[publish_id]["parent_task_id"], primary_id)
+        self.assertEqual(details[record_id]["parent_task_id"], primary_id)
+        self.assertEqual(
+            [item["task_id"] for item in details[primary_id]["auxiliary_tasks"]],
+            [publish_id, record_id],
+        )
+        self.assertNotIn(publish_id, dashboard_presets(snapshot)["recent"])
+        self.assertNotIn(record_id, dashboard_presets(snapshot)["recent"])
+        self.assertNotIn(publish_id, [item.get("task_id") for item in snapshot["context"]["recent_handoffs"]])
+        self.assertTrue(any(publish_id in item["task_ids"] for item in snapshot["search_index"]))
+
+    def test_end_can_update_final_state_in_one_step_with_auto_commit(self) -> None:
+        self.hooks("install")
+        task_id = "20260723_one_step_end_001"
+        self.start(task_id, commit="always")
+        (self.root / "one-step.txt").write_text("one step\n", encoding="utf-8")
+        result = json.loads(self.hooks(
+            "end", task_id,
+            "--result", "completed",
+            "--route", "unchanged",
+            "--methods-action", "updated",
+            "--main-goal", "unchanged",
+            "--note", "one-step completion",
+            "--evidence", "unit test",
+            "--status", "已完成",
+            "--judgment", "一步收尾可用",
+            "--breakpoint", "自动提交通过",
+            "--next", "继续维护",
+        ).stdout)
+        self.assertEqual(result["git"]["status"], "committed")
+        context = json.loads(self.hooks("context", "--format", "json").stdout)
+        self.assertEqual(context["state"]["status"], "已完成")
+        events = [
+            item for item in MaintenanceReadModel(
+                self.root / ".project_hooks/maintenance.sqlite3",
+                self.root / "maintenance/events.jsonl",
+                lambda: "main",
+            ).records("events", 20)
+            if item["task_id"] == task_id
+        ]
+        self.assertEqual(
+            sorted(item["event_type"] for item in events),
+            ["project_state.updated", "task.finished", "task.started"],
+        )
 
     def test_finish_uses_one_event_and_recent_handoffs_deduplicate_legacy(self) -> None:
         task_id = "20260723_single_finish_001"
@@ -629,6 +771,13 @@ class ProjectHooksSqliteTests(unittest.TestCase):
 
 
 class DashboardPresentationTests(unittest.TestCase):
+    def test_publication_classifiers_are_conservative(self) -> None:
+        self.assertTrue(is_publication_step("提交已验证改动"))
+        self.assertTrue(is_publication_step("push main and verify remote"))
+        self.assertTrue(is_auxiliary_task_id("20260723_record_dashboard_publication_001"))
+        self.assertFalse(is_publication_step("提交研究申请"))
+        self.assertFalse(is_auxiliary_task_id("20260723_record_simplification_001"))
+
     def test_result_labels_are_presentational_only(self) -> None:
         self.assertEqual(result_label("completed"), "完成")
         self.assertEqual(result_label("indeterminate"), "待判定")

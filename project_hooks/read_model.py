@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -23,6 +24,11 @@ GIT_RELATION_LABELS = {
     "unavailable": "不可用",
 }
 
+AUXILIARY_TASK_RE = re.compile(
+    r"^\d{8}_(?:publish_.+|record_.+_publication)_\d+$",
+    re.IGNORECASE,
+)
+
 
 def git_state_summary(state: dict) -> str:
     branch = state.get("branch") or "未知分支"
@@ -31,6 +37,23 @@ def git_state_summary(state: dict) -> str:
     upstream_head = state.get("upstream_head") or "不可用"
     relation = GIT_RELATION_LABELS.get(state.get("relation"), state.get("relation") or "不可用")
     return f"本地 {branch}：{head}\n{upstream_ref}：{upstream_head}\n关系：{relation}"
+
+
+def is_auxiliary_task_id(task_id: str | None) -> bool:
+    return bool(task_id and AUXILIARY_TASK_RE.fullmatch(task_id))
+
+
+def is_publication_step(value: object) -> bool:
+    text = str(value or "").strip().casefold()
+    if not text:
+        return False
+    if any(token in text for token in ("推送", "远端哈希", "origin/")):
+        return True
+    if re.search(r"\b(?:commit|push)\b", text):
+        return True
+    return "提交" in text and any(
+        token in text for token in ("已验证", "改动", "代码", "文件", "版本", "变更")
+    )
 
 
 class MaintenanceReadModel:
@@ -387,6 +410,8 @@ class MaintenanceReadModel:
             )
         handoff_by_task: dict[str, dict] = {}
         for item in legacy_handoffs:
+            if is_auxiliary_task_id(item.get("task_id")):
+                continue
             key = item.get("task_id") or f"legacy:{item['occurred_at']}:{item['task']}"
             handoff_by_task[key] = {
                 "event_id": item["event_id"],
@@ -397,6 +422,8 @@ class MaintenanceReadModel:
                 "main_goal_change": item["main_goal_change"],
             }
         for item in archive_rows:
+            if is_auxiliary_task_id(item.get("task_id")):
+                continue
             payload = json.loads(item["payload_json"])
             key = item.get("task_id") or f"archive:{item['occurred_at']}:{item['summary']}"
             handoff_by_task[key] = {
@@ -440,7 +467,13 @@ class MaintenanceReadModel:
         branch = branch or self.branch_provider()
         connection, _ = self._connection()
         try:
-            return self._context(connection, branch)
+            context = self._context(connection, branch)
+            try:
+                timeline = self._build_timeline(connection)
+                task_details = self._task_details(connection, timeline)
+            except (OSError, ReadModelError, subprocess.SubprocessError):
+                task_details = {}
+            return self._apply_overview_state(context, task_details)
         finally:
             connection.close()
 
@@ -653,12 +686,133 @@ class MaintenanceReadModel:
                 "publication_status": publication_status,
                 "linked_commits": linked_commits,
                 "publication_commits": published_commits,
+                "is_auxiliary": is_auxiliary_task_id(task_id),
+                "parent_task_id": None,
+                "auxiliary_tasks": [],
                 "route": finish_payload.get("route") or "",
                 "conclusion": conclusion,
                 "evidence": evidence,
                 "related": related,
             }
+        commits_by_hash = {
+            commit["hash"]: commit for commit in timeline.get("commits", [])
+        }
+
+        def task_time(task_id: str) -> str:
+            item = details.get(task_id, {})
+            return item.get("finished_at") or item.get("started_at") or ""
+
+        def choose_primary(task_ids: list[str], auxiliary_time: str) -> str | None:
+            candidates = [
+                task_id for task_id in task_ids
+                if task_id in details and not details[task_id]["is_auxiliary"]
+            ]
+            before = [task_id for task_id in candidates if task_time(task_id) <= auxiliary_time]
+            pool = before or candidates
+            return max(pool, key=task_time) if pool else None
+
+        for task_id, detail in details.items():
+            if not detail["is_auxiliary"]:
+                continue
+            candidate_ids: list[str] = []
+            linked = [
+                commits_by_hash[commit_hash]
+                for commit_hash in detail["linked_commits"]
+                if commit_hash in commits_by_hash
+            ]
+            for commit in linked:
+                candidate_ids.extend(commit.get("task_ids", []))
+            parent_task_id = choose_primary(candidate_ids, detail["started_at"])
+            if parent_task_id is None:
+                pending = [
+                    parent
+                    for commit in reversed(linked)
+                    for parent in commit.get("parents", [])[:1]
+                ]
+                visited: set[str] = set()
+                while pending and parent_task_id is None:
+                    commit_hash = pending.pop(0)
+                    if commit_hash in visited:
+                        continue
+                    visited.add(commit_hash)
+                    commit = commits_by_hash.get(commit_hash)
+                    if commit is None:
+                        continue
+                    parent_task_id = choose_primary(
+                        commit.get("task_ids", []), detail["started_at"],
+                    )
+                    if parent_task_id is None:
+                        pending.extend(commit.get("parents", [])[:1])
+            detail["parent_task_id"] = parent_task_id
+            if parent_task_id:
+                details[parent_task_id]["auxiliary_tasks"].append({
+                    "task_id": task_id,
+                    "goal": detail["goal"],
+                    "started_at": detail["started_at"],
+                    "finished_at": detail["finished_at"],
+                    "result": detail["result"],
+                    "status": detail["status"],
+                    "conclusion": detail["conclusion"],
+                    "evidence": detail["evidence"],
+                    "linked_commits": detail["linked_commits"],
+                })
+        for detail in details.values():
+            detail["auxiliary_tasks"].sort(
+                key=lambda item: (item["finished_at"], item["task_id"]),
+            )
         return details
+
+    @staticmethod
+    def _apply_overview_state(context: dict, task_details: dict[str, dict]) -> dict:
+        state = context.get("state")
+        if not state:
+            context["overview_state"] = None
+            context["visible_next_steps"] = []
+            context["completed_next_steps"] = []
+            context["publication_completed"] = False
+            return context
+        overview = dict(state)
+        recorded_steps = list(state.get("next_steps", []))
+        git_state = context.get("git_state") or {}
+        source = task_details.get(state.get("task_id") or "", {})
+        parent_task_id = source.get("parent_task_id")
+        primary = task_details.get(parent_task_id, source) if parent_task_id else source
+        task_is_published = primary.get("publication_status") == "已发布"
+        if git_state.get("relation") == "synced" and task_is_published:
+            completed_steps = [
+                step for step in recorded_steps if is_publication_step(step)
+            ]
+        else:
+            completed_steps = []
+        visible_steps = [
+            step for step in recorded_steps if step not in completed_steps
+        ]
+        publication_completed = bool(
+            completed_steps
+            and not visible_steps
+            and not context.get("active_task")
+            and context.get("branch") == "main"
+            and git_state.get("relation") == "synced"
+            and task_is_published
+        )
+        overview["next_steps"] = visible_steps
+        if publication_completed:
+            task_name = primary.get("goal") or state.get("goal") or "已验证改动"
+            conclusion = primary.get("conclusion") or "任务已完成"
+            upstream_ref = git_state.get("upstream_ref") or "origin/main"
+            upstream_head = git_state.get("upstream_head") or ""
+            overview["status"] = "已完成并发布"
+            overview["judgment"] = f"{task_name}已发布到 {upstream_ref}"
+            overview["breakpoint"] = (
+                f"{conclusion}；发布提交 {upstream_head[:8]}"
+                if upstream_head else conclusion
+            )
+            overview["task_id"] = primary.get("task_id") or state.get("task_id")
+        context["overview_state"] = overview
+        context["visible_next_steps"] = visible_steps
+        context["completed_next_steps"] = completed_steps
+        context["publication_completed"] = publication_completed
+        return context
 
     def dashboard_snapshot(self, branch: str | None = None, *, limit: int = 1000) -> dict:
         branch = branch or self.branch_provider()
@@ -678,6 +832,8 @@ class MaintenanceReadModel:
             except (OSError, ReadModelError, subprocess.SubprocessError) as exc:
                 timeline = {"status": "unavailable", "lanes": [], "branches": [], "commits": [], "edges": []}
                 timeline_error = str(exc)
+            task_details = self._task_details(connection, timeline)
+            context = self._apply_overview_state(context, task_details)
             return {
                 "branch": branch,
                 "health": {
@@ -696,7 +852,7 @@ class MaintenanceReadModel:
                 "timeline": timeline,
                 "timeline_error": timeline_error,
                 "search_index": self._search_index(connection, timeline),
-                "task_details": self._task_details(connection, timeline),
+                "task_details": task_details,
             }
         finally:
             connection.close()

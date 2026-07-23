@@ -13,7 +13,7 @@ python -m project_hooks check
 
 普通 `git clone` 出于安全原因不会复制 `.git/config`，因此每个新 clone 或 worktree 需要运行一次 `install`。该命令只为当前仓库设置 `core.hooksPath=.githooks`；Hook 文件本身已在版本控制中。
 
-之后由仓库内 [AGENTS.md](./AGENTS.md) 约束 Codex：每次任务先通过 `context` 读取 SQLite 动态上下文并执行 `start`，通过结构化命令更新状态，最后执行 `end`。
+之后由仓库内 [AGENTS.md](./AGENTS.md) 约束 Codex：每次任务先通过 `context` 读取 SQLite 动态上下文并执行 `start`，通过结构化命令更新状态，最后执行 `end`。`end` 可直接携带最终状态参数完成一步收尾；纯 Git 提交推送已验证改动时不再创建发布任务。
 
 `main` 只保存稳定内容。新理论、算法、实验或不确定改动从干净的 `main` 启动探索任务；验证成功后通过 Squash PR 合并，失败、暂停或不可判决的尝试保存在 `archive/` 分支。完整规则见 [maintenance/README.md](./maintenance/README.md)。
 
@@ -44,7 +44,7 @@ python -m project_hooks dashboard
 
 动态维护数据由 `.project_hooks/maintenance.sqlite3` 查询和事务管理；Git 只跟踪追加式 `maintenance/events.jsonl`。数据库缺失、损坏或切换分支后会从事件日志重建。
 
-`context` 和 `dashboard` 将持久化进度显示为“工作断点”，并从本地 HEAD 与 `origin/main` 跟踪引用实时生成“真实断点”；不会自动联网刷新。任务发布状态同样从关联提交推导，不需要发布专用任务或事件。
+`context` 和 `dashboard` 将持久化进度显示为“工作断点”，并从本地 HEAD 与 `origin/main` 跟踪引用实时生成“真实断点”；不会自动联网刷新。Git 同步后会隐藏已完成的发布步骤，并在没有其他后续工作时派生“已完成并发布”概览。任务发布状态同样从关联提交推导，不需要发布专用任务或事件。
 
 `dashboard` 使用 Python 自带的 Tkinter 打开只读桌面窗口，日常仅保留概览、搜索、任务、时间线和记录五个分页；任务列表默认只显示时间、任务、结果与状态，完整信息位于详情。原始事件与数据库技术信息集中在独立的“高级查看”窗口。窗口可跨记录搜索和双向定位，提供最近任务、失败探索与未合并分支快捷筛选；时间线超过 50 个提交时自动折叠旧记录。窗口不会修改维护数据或执行网络操作。可使用 `--refresh-seconds 0` 关闭自动刷新，或用 `--branch <name>` 查看指定分支流。
 
