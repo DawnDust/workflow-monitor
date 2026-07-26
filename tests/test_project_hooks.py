@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,9 +19,14 @@ from project_hooks.dashboard import (
     DashboardController,
     DashboardError,
     PRIMARY_TABS,
+    RESEARCH_CONTEXT_LIMIT,
+    RESEARCH_CONTEXT_SCOPES,
+    RESEARCH_PROMPT_TEMPLATES,
     advanced_summary,
+    build_research_prompt,
     catalog_overview_text,
     copy_catalog_scan_prompt,
+    copy_research_prompt,
     dashboard_presets,
     filter_records,
     global_search,
@@ -30,6 +36,7 @@ from project_hooks.dashboard import (
     record_identity,
     record_location,
     reveal_catalog_file,
+    research_context,
     result_label,
     short,
     sort_records,
@@ -1162,8 +1169,8 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(presets["negative"], ["negative"])
         self.assertEqual(presets["unmerged"], ["research/open"])
 
-    def test_six_primary_tabs_and_normalized_records(self) -> None:
-        self.assertEqual(PRIMARY_TABS, ("概览", "搜索", "资料", "任务", "时间线", "记录"))
+    def test_seven_primary_tabs_and_normalized_records(self) -> None:
+        self.assertEqual(PRIMARY_TABS, ("概览", "搜索", "资料", "工作台", "任务", "时间线", "记录"))
         records = normalize_records(
             [{"event_id": "d1", "occurred_at": "2026-07-23 10:00:00", "branch": "main",
               "decision": "keep five pages", "decision_id": "D-1", "task_id": "task-1"}],
@@ -1173,6 +1180,95 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual([item["record_type"] for item in records], ["exploration", "decision"])
         self.assertEqual(records[0]["title"], "test layout")
         self.assertEqual(records[1]["task_id"], "task-1")
+
+    def test_research_workbench_templates_include_structure_and_safety_rules(self) -> None:
+        self.assertEqual(
+            [template["label"] for template in RESEARCH_PROMPT_TEMPLATES.values()],
+            ["文献精读", "文献比较", "研究问题与思路", "研究方法设计", "研究过程复盘", "结论与局限"],
+        )
+        self.assertEqual(RESEARCH_CONTEXT_SCOPES, ("当前资料", "当前筛选结果", "项目概览"))
+        for template_id, template in RESEARCH_PROMPT_TEMPLATES.items():
+            prompt = build_research_prompt(template_id, "项目概览", "# 项目概览上下文\n\n目标")
+            self.assertIn(template["label"], prompt)
+            self.assertIn("已有证据", prompt)
+            self.assertIn("合理推断", prompt)
+            self.assertIn("待验证建议", prompt)
+            self.assertIn("未经我在对话中明确确认", prompt)
+            self.assertIn("更新项目概览", prompt)
+            self.assertIn("建议保存的资料条目", prompt)
+            for section in template["sections"]:
+                self.assertIn(section, prompt)
+        with self.assertRaisesRegex(DashboardError, "未知的科研工作台操作"):
+            build_research_prompt("unknown", "项目概览", "context")
+
+    def test_research_context_supports_selected_filtered_and_overview_scopes(self) -> None:
+        selected = {
+            "item_id": "lit-1", "kind": "literature", "kind_label": "文献",
+            "title": "Selected Paper", "status": "active", "path": "source/paper.pdf",
+            "summary": "selected summary", "tags": ["core"], "metadata": {},
+        }
+        relations = [{
+            "relation_id": "rel-1", "source_id": "lit-1", "target_id": "theory-1",
+            "relation_type": "supports", "note": "",
+        }]
+        context, included, total = research_context(
+            "当前资料", selected=selected, visible=[], relations=relations, overview=None,
+        )
+        self.assertEqual((included, total), (1, 1))
+        self.assertIn("Selected Paper", context)
+        self.assertIn("supports", context)
+
+        visible = [
+            {
+                "item_id": f"lit-{index:02}", "kind": "literature", "kind_label": "文献",
+                "title": f"Paper {index:02}", "status": "active", "summary": "",
+                "tags": [], "metadata": {},
+            }
+            for index in range(RESEARCH_CONTEXT_LIMIT + 1)
+        ]
+        context, included, total = research_context(
+            "当前筛选结果", selected=None, visible=visible, relations=[], overview=None,
+        )
+        self.assertEqual((included, total), (RESEARCH_CONTEXT_LIMIT, RESEARCH_CONTEXT_LIMIT + 1))
+        self.assertIn("Paper 00", context)
+        self.assertIn(f"Paper {RESEARCH_CONTEXT_LIMIT - 1:02}", context)
+        self.assertNotIn(f"Paper {RESEARCH_CONTEXT_LIMIT:02}", context)
+        self.assertIn(f"共 {RESEARCH_CONTEXT_LIMIT + 1} 条", context)
+
+        context, included, total = research_context(
+            "项目概览", selected=None, visible=[], relations=[], overview="当前目标：测试工作台",
+        )
+        self.assertEqual((included, total), (1, 1))
+        self.assertIn("# 项目概览上下文", context)
+        self.assertIn("当前目标：测试工作台", context)
+
+    def test_research_context_rejects_empty_or_unknown_sources(self) -> None:
+        with self.assertRaisesRegex(DashboardError, "选择一条科研资料"):
+            research_context("当前资料", selected=None, visible=[], relations=[], overview=None)
+        with self.assertRaisesRegex(DashboardError, "筛选结果为空"):
+            research_context("当前筛选结果", selected=None, visible=[], relations=[], overview=None)
+        with self.assertRaisesRegex(DashboardError, "尚未加载"):
+            research_context("项目概览", selected=None, visible=[], relations=[], overview=" ")
+        with self.assertRaisesRegex(DashboardError, "未知的工作台上下文范围"):
+            research_context("全部", selected=None, visible=[], relations=[], overview=None)
+
+    def test_copy_research_prompt_uses_edited_text_without_mutating_templates(self) -> None:
+        class Clipboard:
+            def __init__(self):
+                self.value = ""
+
+            def clipboard_clear(self):
+                self.value = ""
+
+            def clipboard_append(self, value):
+                self.value += value
+
+        original = deepcopy(RESEARCH_PROMPT_TEMPLATES)
+        clipboard = Clipboard()
+        message = copy_research_prompt(clipboard, "临时修改后的提示词")
+        self.assertEqual(clipboard.value, "临时修改后的提示词")
+        self.assertIn("已复制", message)
+        self.assertEqual(RESEARCH_PROMPT_TEMPLATES, original)
 
     def test_catalog_detail_shows_metadata_relations_and_missing_warning(self) -> None:
         detail = CatalogPage.detail_text({

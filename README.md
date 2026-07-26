@@ -43,3 +43,5 @@ python -m project_hooks check
 也可在 Dashboard 资料页一键复制扫描提示词，再粘贴到 Codex 对话中执行扫描登记。
 使用 `catalog add|update|bulk-update|link` 补充信息，使用
 `catalog context` 直接向终端输出供 AI 使用的 Markdown 或 JSON 上下文。
+
+Dashboard 的“工作台”页提供文献精读、文献比较、研究问题与思路、研究方法设计、研究过程复盘、结论与局限六类提示词。提示词可附带当前资料、资料页当前筛选结果或项目概览，复制前可临时编辑；分析结果只有在用户明确确认后才会按维护规范记录。
