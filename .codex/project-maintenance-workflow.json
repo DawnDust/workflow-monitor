@@ -12,7 +12,7 @@
     "engine": "sqlite",
     "database": ".project_hooks/maintenance.sqlite3",
     "journal": "maintenance/events.jsonl",
-    "schema_version": 1
+    "schema_version": 2
   },
   "branch_policy": {
     "default_branch": "main",

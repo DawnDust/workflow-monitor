@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Callable
 
+from .catalog import CATALOG_KIND_LABELS, render_context_markdown
 from .read_model import (
     MaintenanceReadModel,
     ReadModelError,
@@ -21,6 +22,7 @@ CLI_FALLBACK = (
     "  python -m project_hooks history\n"
     "  python -m project_hooks decisions\n"
     "  python -m project_hooks explorations\n"
+    "  python -m project_hooks catalog list\n"
     "  python -m project_hooks db status"
 )
 
@@ -29,7 +31,7 @@ class DashboardError(RuntimeError):
     pass
 
 
-PRIMARY_TABS = ("概览", "搜索", "任务", "时间线", "记录")
+PRIMARY_TABS = ("概览", "搜索", "资料", "任务", "时间线", "记录")
 
 RESULT_LABELS = {
     "completed": "完成",
@@ -78,7 +80,7 @@ def record_location(record: dict) -> tuple[str | None, str | None]:
 def record_identity(record: dict | None) -> tuple[str, object] | None:
     if not record:
         return None
-    for key in ("record_id", "event_id", "decision_id", "hash", "task_id", "branch"):
+    for key in ("record_id", "item_id", "relation_id", "event_id", "decision_id", "hash", "task_id", "branch"):
         if record.get(key) is not None:
             return key, record[key]
     return None
@@ -414,6 +416,137 @@ class TablePage:
                 self.show_detail()
                 return True
         return False
+
+
+class CatalogPage:
+    def __init__(self, parent, tk, ttk, scrolledtext, *, refresh: Callable[[], None]):
+        self.frame = ttk.Frame(parent, padding=8)
+        self.tk = tk
+        self.items: list[dict] = []
+        self.relations: list[dict] = []
+
+        filters = ttk.Frame(self.frame)
+        filters.pack(fill="x", pady=(0, 6))
+        ttk.Label(filters, text="类型").pack(side="left")
+        self.kind = tk.StringVar(value="全部")
+        kind_values = ("全部", *CATALOG_KIND_LABELS.values())
+        kind_box = ttk.Combobox(filters, textvariable=self.kind, values=kind_values, state="readonly", width=9)
+        kind_box.pack(side="left", padx=(5, 10))
+        ttk.Label(filters, text="状态").pack(side="left")
+        self.status = tk.StringVar(value="全部")
+        status_box = ttk.Combobox(
+            filters, textvariable=self.status,
+            values=("全部", "active", "missing", "archived"), state="readonly", width=10,
+        )
+        status_box.pack(side="left", padx=(5, 10))
+        ttk.Label(filters, text="标签").pack(side="left")
+        self.tags = tk.StringVar()
+        ttk.Entry(filters, textvariable=self.tags, width=22).pack(side="left", padx=(5, 10))
+        ttk.Button(filters, text="复制路径", command=self.copy_path).pack(side="left")
+        ttk.Button(filters, text="复制 AI 上下文", command=self.copy_context).pack(side="left", padx=(6, 0))
+
+        self.table = TablePage(
+            self.frame, tk, ttk, scrolledtext,
+            columns=[
+                ("kind_label", "类型", 75), ("status", "状态", 85),
+                ("title", "标题", 300), ("path", "路径", 300), ("updated_at", "更新时间", 175),
+            ],
+            detail=self.detail_text, refresh=refresh, show_refresh=True,
+        )
+        self.table.frame.pack(fill="both", expand=True)
+        self.kind.trace_add("write", lambda *_: self.apply_filters())
+        self.status.trace_add("write", lambda *_: self.apply_filters())
+        self.tags.trace_add("write", lambda *_: self.apply_filters())
+
+    def set_data(self, items: list[dict], relations: list[dict]) -> None:
+        self.items = [dict(item) for item in items]
+        self.relations = [dict(relation) for relation in relations]
+        by_id = {item["item_id"]: item for item in self.items}
+        for item in self.items:
+            item["_relations"] = []
+        for relation in self.relations:
+            source = by_id.get(relation["source_id"])
+            target = by_id.get(relation["target_id"])
+            relation["_source_title"] = source.get("title") if source else relation["source_id"]
+            relation["_target_title"] = target.get("title") if target else relation["target_id"]
+            if source:
+                source["_relations"].append({**relation, "_direction": "out"})
+            if target:
+                target["_relations"].append({**relation, "_direction": "in"})
+        self.table.set_records(self.items)
+        self.apply_filters()
+
+    def apply_filters(self) -> None:
+        label = self.kind.get()
+        selected_kind = next(
+            (kind for kind, kind_label in CATALOG_KIND_LABELS.items() if kind_label == label),
+            None,
+        )
+        selected_status = None if self.status.get() == "全部" else self.status.get()
+        required_tags = {
+            tag.strip() for raw in self.tags.get().split(",") for tag in [raw] if tag.strip()
+        }
+
+        def predicate(item: dict) -> bool:
+            return (
+                (selected_kind is None or item.get("kind") == selected_kind)
+                and (selected_status is None or item.get("status") == selected_status)
+                and required_tags.issubset(set(item.get("tags", [])))
+            )
+
+        self.table.set_predicate(predicate)
+
+    def select_record(self, item_id: str) -> bool:
+        self.kind.set("全部")
+        self.status.set("全部")
+        self.tags.set("")
+        return self.table.select_record("item_id", item_id)
+
+    def selected_item(self) -> dict | None:
+        return self.table.selected_record()
+
+    def copy_path(self) -> None:
+        item = self.selected_item()
+        if not item or not item.get("path"):
+            return
+        self.frame.clipboard_clear()
+        self.frame.clipboard_append(item["path"])
+
+    def copy_context(self) -> None:
+        item = self.selected_item()
+        if not item:
+            return
+        self.frame.clipboard_clear()
+        self.frame.clipboard_append(render_context_markdown([item], item.get("_relations", [])))
+
+    @staticmethod
+    def detail_text(item: dict) -> str:
+        tags = ", ".join(item.get("tags", [])) or "无"
+        metadata = json.dumps(item.get("metadata", {}), ensure_ascii=False, indent=2)
+        relation_lines = []
+        for relation in item.get("_relations", []):
+            if relation["_direction"] == "out":
+                relation_lines.append(
+                    f"- {relation['relation_type']} → {relation['_target_title']} "
+                    f"({relation['target_id']})"
+                )
+            else:
+                relation_lines.append(
+                    f"- {relation['_source_title']} ({relation['source_id']}) "
+                    f"→ {relation['relation_type']}"
+                )
+            if relation.get("note"):
+                relation_lines.append(f"  {relation['note']}")
+        missing = "\n警告：项目文件当前不存在。\n" if item.get("status") == "missing" else ""
+        return (
+            f"ID：{item.get('item_id')}\n类型：{item.get('kind_label')}\n"
+            f"状态：{item.get('status')}\n路径：{item.get('path') or '无项目文件'}\n"
+            f"来源：{item.get('source') or '未记录'}\n标签：{tags}\n"
+            f"更新时间：{item.get('updated_at')}\n{missing}\n"
+            f"摘要\n{item.get('summary') or '暂无摘要。'}\n\n"
+            f"扩展信息\n{metadata}\n\n关联\n"
+            + ("\n".join(relation_lines) if relation_lines else "无")
+        )
 
 
 class TaskPage:
@@ -1022,6 +1155,11 @@ class DashboardApp:
         )
         self.notebook.add(self.search_page.frame, text="搜索")
 
+        self.catalog_page = CatalogPage(
+            self.notebook, tk, ttk, scrolledtext, refresh=self.refresh,
+        )
+        self.notebook.add(self.catalog_page.frame, text="资料")
+
         self.task_page = TaskPage(
             self.notebook, tk, ttk, scrolledtext, open_related=self.open_related_record,
         )
@@ -1076,6 +1214,10 @@ class DashboardApp:
         self.timeline_page.set_data(
             snapshot.get("timeline", {"lanes": [], "commits": [], "edges": []}),
             error=snapshot.get("timeline_error"),
+        )
+        self.catalog_page.set_data(
+            snapshot.get("catalog_items", []),
+            snapshot.get("catalog_relations", []),
         )
         self.task_page.set_tasks(snapshot.get("task_details", {}))
         exploration_records = list(snapshot["explorations"])
@@ -1176,6 +1318,10 @@ class DashboardApp:
         elif target in {"decisions", "explorations"} and record_id:
             found = self.records_page.select_record(record_id)
             self.notebook.select(self.records_page.frame)
+            return found
+        elif target == "catalog" and record_id:
+            found = self.catalog_page.select_record(record_id)
+            self.notebook.select(self.catalog_page.frame)
             return found
         elif target == "events":
             return self.open_advanced(record_id)

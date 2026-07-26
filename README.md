@@ -21,6 +21,7 @@ python -m project_hooks check
 | `python -m project_hooks start ...` | 开始任务生命周期 |
 | `python -m project_hooks end ...` | 完成任务并收尾 |
 | `python -m project_hooks dashboard` | 打开只读管理窗口 |
+| `python -m project_hooks catalog list` | 查询文献、数据、理论、模拟和输出索引 |
 
 使用 `python -m project_hooks --help-all` 查看高级命令及分类。
 
@@ -36,3 +37,7 @@ python -m project_hooks check
 | `maintenance/` | 维护规范与永久事件记录 |
 
 前五个目录按需创建，不使用占位文件。完整生命周期、分支策略、高级命令和记录模型见 [maintenance/README.md](./maintenance/README.md)。
+
+科研资料文件仍保存在上述目录，SQLite 只保存索引、简短说明、标签和关系。使用
+`catalog scan` 扫描项目文件，使用 `catalog add|update|link` 补充信息，使用
+`catalog context` 直接向终端输出供 AI 使用的 Markdown 或 JSON 上下文。
