@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
+from .catalog import decode_item
 from .store import SCHEMA_VERSION, ensure_database, journal_hash, rows
 
 
@@ -404,7 +405,14 @@ class MaintenanceReadModel:
                 probe = sqlite3.connect(self.database_path, timeout=2)
                 stored = probe.execute("SELECT value FROM meta WHERE key='journal_hash'").fetchone()
                 integrity = probe.execute("PRAGMA quick_check").fetchone()
-                rebuilt = not stored or stored[0] != journal_hash(self.journal_path) or not integrity or integrity[0] != "ok"
+                version = probe.execute("PRAGMA user_version").fetchone()[0]
+                rebuilt = (
+                    version != SCHEMA_VERSION
+                    or not stored
+                    or stored[0] != journal_hash(self.journal_path)
+                    or not integrity
+                    or integrity[0] != "ok"
+                )
             except sqlite3.DatabaseError:
                 rebuilt = True
             finally:
@@ -596,6 +604,30 @@ class MaintenanceReadModel:
                 item["goal"] or item["branch"], item["result"] or "",
                 [item["branch"], item["goal"], item["result"], item["evidence"], item["disposition_ref"], item["task_id"]],
                 [item["task_id"]] if item["task_id"] else [])
+
+        relation_values: dict[str, list[str]] = {}
+        for relation in rows(
+            connection,
+            "SELECT relation_id, source_id, target_id, relation_type, note FROM catalog_relations",
+        ):
+            text = " ".join(str(relation.get(key) or "") for key in (
+                "relation_id", "source_id", "target_id", "relation_type", "note",
+            ))
+            relation_values.setdefault(relation["source_id"], []).append(text)
+            relation_values.setdefault(relation["target_id"], []).append(text)
+        for raw in rows(connection, "SELECT * FROM catalog_items"):
+            item = decode_item(raw)
+            add(
+                "catalog", item["kind_label"], "catalog", item["item_id"],
+                item["updated_at"], item["branch"], item["title"], item["summary"],
+                [
+                    item["item_id"], item["kind"], item["kind_label"], item["title"],
+                    item["summary"], item.get("path"), item["status"], item["tags"],
+                    item["source"], item["metadata"], item["branch"], item.get("task_id"),
+                    *relation_values.get(item["item_id"], []),
+                ],
+                [item["task_id"]] if item.get("task_id") else [],
+            )
 
         for commit in timeline.get("commits", []):
             add("commit", "提交", "timeline", commit["hash"], commit["occurred_at"], commit["lane"],
@@ -886,6 +918,16 @@ class MaintenanceReadModel:
                 timeline_error = str(exc)
             task_details = self._task_details(connection, timeline)
             context = self._apply_overview_state(context, task_details)
+            catalog_items = [
+                decode_item(item) for item in rows(
+                    connection,
+                    "SELECT * FROM catalog_items ORDER BY updated_at DESC, item_id",
+                )
+            ]
+            catalog_relations = rows(
+                connection,
+                "SELECT * FROM catalog_relations ORDER BY updated_at DESC, relation_id",
+            )
             return {
                 "branch": branch,
                 "health": {
@@ -905,6 +947,8 @@ class MaintenanceReadModel:
                 "timeline_error": timeline_error,
                 "search_index": self._search_index(connection, timeline),
                 "task_details": task_details,
+                "catalog_items": catalog_items,
+                "catalog_relations": catalog_relations,
             }
         finally:
             connection.close()

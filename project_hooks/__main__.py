@@ -16,6 +16,23 @@ from pathlib import Path
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
+from .catalog import (
+    CATALOG_DIRECTORIES,
+    CATALOG_KINDS,
+    CATALOG_STATUSES,
+    CatalogError,
+    context_payload,
+    decode_item,
+    file_metadata,
+    generated_item_id,
+    generated_relation_id,
+    normalize_project_path,
+    parse_metadata,
+    parse_tags,
+    render_context_markdown,
+    validate_identifier,
+    validate_relation_type,
+)
 from .dashboard import DashboardDataProvider, DashboardError, launch_dashboard
 from .read_model import (
     MaintenanceReadModel,
@@ -91,7 +108,7 @@ usage: project-hooks [-h] [--help-all] <command> ...
   install, check, status, branch-status
 
 状态与记录:
-  state, history, decisions, decision, explorations
+  state, history, decisions, decision, explorations, catalog
 
 探索流程:
   attempt, exploration, prepare-pr, archive-attempt
@@ -293,7 +310,7 @@ def check_repository(*, raise_on_error: bool = False) -> list[str]:
     except WorkflowError as exc:
         errors.append(str(exc))
     for rel in [*STATIC_READ_ORDER, "maintenance/README.md", "maintenance/events.jsonl",
-                "project_hooks/__main__.py", "project_hooks/store.py", "project_hooks/read_model.py",
+                "project_hooks/__main__.py", "project_hooks/catalog.py", "project_hooks/store.py", "project_hooks/read_model.py",
                 "project_hooks/dashboard.py", f"{TRACKED_HOOKS_DIR}/pre-commit"]:
         if not (ROOT / rel).is_file():
             errors.append(f"缺少维护文件: {rel}")
@@ -777,6 +794,369 @@ def render_records(records: list[dict], fmt: str) -> str | list[dict]:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def catalog_write_context() -> tuple[dict, str]:
+    record = read_active()
+    return record, assert_active_branch(record)
+
+
+def catalog_item(connection: sqlite3.Connection, item_id: str) -> dict:
+    row = connection.execute("SELECT * FROM catalog_items WHERE item_id=?", (item_id,)).fetchone()
+    if row is None:
+        raise WorkflowError(f"找不到科研资料条目: {item_id}")
+    return decode_item(dict(row))
+
+
+def catalog_relations(connection: sqlite3.Connection) -> list[dict]:
+    return [
+        dict(row) for row in connection.execute(
+            "SELECT * FROM catalog_relations ORDER BY updated_at DESC, relation_id"
+        ).fetchall()
+    ]
+
+
+def catalog_item_payload(item: dict) -> dict:
+    return {
+        "item_id": item["item_id"],
+        "kind": item["kind"],
+        "title": item["title"],
+        "summary": item.get("summary", ""),
+        "path": item.get("path") or None,
+        "status": item.get("status", "active"),
+        "tags": list(item.get("tags", [])),
+        "source": item.get("source", ""),
+        "metadata": dict(item.get("metadata", {})),
+        "created_at": item.get("created_at"),
+    }
+
+
+def catalog_selected_items(
+    connection: sqlite3.Connection,
+    *,
+    ids: list[str] | None = None,
+    kind: str | None = None,
+    status: str | None = None,
+    tags: list[str] | None = None,
+    query: str | None = None,
+    related_to: str | None = None,
+) -> list[dict]:
+    values = [decode_item(dict(row)) for row in connection.execute(
+        "SELECT * FROM catalog_items ORDER BY updated_at DESC, item_id"
+    ).fetchall()]
+    id_set = set(ids or [])
+    tag_set = set(tags or [])
+    if related_to:
+        related_ids: set[str] = set()
+        for relation in catalog_relations(connection):
+            if relation["source_id"] == related_to:
+                related_ids.add(relation["target_id"])
+            if relation["target_id"] == related_to:
+                related_ids.add(relation["source_id"])
+        id_set.update(related_ids)
+    needle = (query or "").strip().casefold()
+    return [
+        item for item in values
+        if (not id_set or item["item_id"] in id_set)
+        and (not kind or item["kind"] == kind)
+        and (not status or item["status"] == status)
+        and (not tag_set or tag_set.issubset(set(item["tags"])))
+        and (not needle or needle in json.dumps(item, ensure_ascii=False, default=str).casefold())
+    ]
+
+
+def render_catalog_list(items: list[dict]) -> str:
+    if not items:
+        return "没有匹配的科研资料。\n"
+    return "\n".join(
+        f"- `{item['item_id']}` | {item['kind_label']} | {item['status']} | "
+        f"{item['title']} | {item.get('path') or '无项目文件'}"
+        for item in items
+    ) + "\n"
+
+
+def catalog_add(args: argparse.Namespace) -> dict:
+    record, branch = catalog_write_context()
+    item_path = normalize_project_path(ROOT, args.path, require_file=True) if args.path else None
+    item_id = validate_identifier(args.id) if args.id else generated_item_id(args.kind, item_path)
+    connection = database()
+    try:
+        if connection.execute("SELECT 1 FROM catalog_items WHERE item_id=?", (item_id,)).fetchone():
+            raise WorkflowError(f"科研资料条目已存在: {item_id}")
+        if item_path and connection.execute("SELECT 1 FROM catalog_items WHERE path=?", (item_path,)).fetchone():
+            raise WorkflowError(f"资料路径已经登记: {item_path}")
+    finally:
+        connection.close()
+    payload = {
+        "item_id": item_id,
+        "kind": args.kind,
+        "title": args.title.strip(),
+        "summary": args.summary or "",
+        "path": item_path,
+        "status": "active",
+        "tags": parse_tags(args.tag),
+        "source": args.source or "",
+        "metadata": parse_metadata(args.meta),
+        "created_at": timestamp(),
+    }
+    if not payload["title"]:
+        raise WorkflowError("标题不能为空")
+    persist([emit("catalog.item_upserted", branch=branch, task_id=record["task_id"], payload=payload)])
+    return payload
+
+
+def catalog_update(args: argparse.Namespace) -> dict:
+    record, branch = catalog_write_context()
+    connection = database()
+    try:
+        item = catalog_item(connection, validate_identifier(args.item_id))
+        if args.path is not None:
+            new_path = normalize_project_path(ROOT, args.path, require_file=True)
+            conflict = connection.execute(
+                "SELECT item_id FROM catalog_items WHERE path=? AND item_id<>?",
+                (new_path, item["item_id"]),
+            ).fetchone()
+            if conflict:
+                raise WorkflowError(f"资料路径已经登记: {new_path}")
+            item["path"] = new_path
+        if args.clear_path:
+            item["path"] = None
+    finally:
+        connection.close()
+    changed_fields = any(
+        value is not None for value in (
+            args.kind, args.title, args.summary, args.status, args.source, args.path,
+            args.tag, args.meta,
+        )
+    ) or args.clear_path or args.clear_summary or args.clear_source or args.clear_tags or args.clear_metadata
+    if not changed_fields:
+        raise WorkflowError("catalog update 至少提供一个更新字段")
+    if args.kind is not None:
+        item["kind"] = args.kind
+    if args.title is not None:
+        if not args.title.strip():
+            raise WorkflowError("标题不能为空")
+        item["title"] = args.title.strip()
+    if args.summary is not None:
+        item["summary"] = args.summary
+    if args.clear_summary:
+        item["summary"] = ""
+    if args.status is not None:
+        item["status"] = args.status
+    if args.source is not None:
+        item["source"] = args.source
+    if args.clear_source:
+        item["source"] = ""
+    if args.tag is not None:
+        item["tags"] = parse_tags(args.tag)
+    if args.clear_tags:
+        item["tags"] = []
+    if args.meta is not None:
+        item["metadata"] = parse_metadata(args.meta)
+    if args.clear_metadata:
+        item["metadata"] = {}
+    payload = catalog_item_payload(item)
+    persist([emit("catalog.item_upserted", branch=branch, task_id=record["task_id"], payload=payload)])
+    return payload
+
+
+def catalog_change_archive(args: argparse.Namespace, *, restore: bool) -> dict:
+    record, branch = catalog_write_context()
+    item_id = validate_identifier(args.item_id)
+    connection = database()
+    try:
+        item = catalog_item(connection, item_id)
+    finally:
+        connection.close()
+    target = "active" if restore else "archived"
+    if item["status"] == target:
+        raise WorkflowError(f"科研资料条目已经是 {target} 状态")
+    kind = "catalog.item_restored" if restore else "catalog.item_archived"
+    persist([emit(kind, branch=branch, task_id=record["task_id"], payload={"item_id": item_id})])
+    return {"item_id": item_id, "status": target}
+
+
+def catalog_link(args: argparse.Namespace) -> dict:
+    record, branch = catalog_write_context()
+    source_id = validate_identifier(args.source_id, label="来源条目 ID")
+    target_id = validate_identifier(args.target_id, label="目标条目 ID")
+    if source_id == target_id:
+        raise WorkflowError("科研资料不能关联到自身")
+    relation_type = validate_relation_type(args.relation_type)
+    connection = database()
+    try:
+        catalog_item(connection, source_id)
+        catalog_item(connection, target_id)
+    finally:
+        connection.close()
+    relation_id = generated_relation_id(source_id, relation_type, target_id)
+    payload = {
+        "relation_id": relation_id,
+        "source_id": source_id,
+        "target_id": target_id,
+        "relation_type": relation_type,
+        "note": args.note or "",
+        "created_at": timestamp(),
+    }
+    persist([emit("catalog.relation_upserted", branch=branch, task_id=record["task_id"], payload=payload)])
+    return payload
+
+
+def catalog_unlink(args: argparse.Namespace) -> dict:
+    record, branch = catalog_write_context()
+    relation_id = validate_identifier(args.relation_id, label="关系 ID")
+    connection = database()
+    try:
+        exists = connection.execute(
+            "SELECT 1 FROM catalog_relations WHERE relation_id=?", (relation_id,)
+        ).fetchone()
+    finally:
+        connection.close()
+    if not exists:
+        raise WorkflowError(f"找不到科研资料关系: {relation_id}")
+    persist([emit(
+        "catalog.relation_removed", branch=branch, task_id=record["task_id"],
+        payload={"relation_id": relation_id},
+    )])
+    return {"relation_id": relation_id, "removed": True}
+
+
+def catalog_scan(args: argparse.Namespace) -> dict:
+    record, branch = catalog_write_context()
+    if bool(args.root) != bool(args.kind):
+        raise WorkflowError("指定扫描目录时必须同时提供 --root 和 --kind")
+    roots: list[tuple[Path, str]] = []
+    if args.root:
+        relative = normalize_project_path(ROOT, args.root)
+        scan_root = ROOT / relative
+        if not scan_root.is_dir():
+            raise WorkflowError(f"扫描目录不存在: {relative}")
+        roots.append((scan_root, args.kind))
+    else:
+        roots.extend((ROOT / directory, kind) for directory, kind in CATALOG_DIRECTORIES.items())
+    connection = database()
+    try:
+        existing = {
+            item.get("path"): item
+            for item in (
+                decode_item(dict(row)) for row in connection.execute("SELECT * FROM catalog_items").fetchall()
+            )
+            if item.get("path")
+        }
+    finally:
+        connection.close()
+    ignored = {".git", ".project_hooks", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
+    discovered: dict[str, tuple[Path, str]] = {}
+    scanned_prefixes: list[str] = []
+    for scan_root, kind in roots:
+        if not scan_root.exists():
+            continue
+        scanned_prefixes.append(scan_root.relative_to(ROOT).as_posix().rstrip("/") + "/")
+        for path in scan_root.rglob("*"):
+            if path.is_file() and not any(part in ignored for part in path.relative_to(scan_root).parts):
+                relative = path.relative_to(ROOT).as_posix()
+                discovered[relative] = (path, kind)
+    actions: list[dict] = []
+    events: list[dict] = []
+    for relative, (path, kind) in sorted(discovered.items()):
+        current = existing.get(relative)
+        metadata = dict(current.get("metadata", {})) if current else {}
+        stats = file_metadata(path)
+        changed = current is None or any(metadata.get(key) != value for key, value in stats.items())
+        restored = bool(current and current.get("status") == "missing")
+        if not changed and not restored:
+            continue
+        metadata.update(stats)
+        item = current or {
+            "item_id": generated_item_id(kind, relative),
+            "kind": kind,
+            "title": path.stem,
+            "summary": "",
+            "path": relative,
+            "status": "active",
+            "tags": [],
+            "source": "",
+            "metadata": {},
+            "created_at": timestamp(),
+        }
+        item["metadata"] = metadata
+        if item.get("status") == "missing":
+            item["status"] = "active"
+        payload = catalog_item_payload(item)
+        actions.append({"action": "add" if current is None else "update", "item_id": item["item_id"], "path": relative})
+        events.append(emit("catalog.item_upserted", branch=branch, task_id=record["task_id"], payload=payload))
+    discovered_paths = set(discovered)
+    for relative, item in existing.items():
+        in_scope = any(relative.startswith(prefix) for prefix in scanned_prefixes)
+        if in_scope and relative not in discovered_paths and item.get("status") not in {"missing", "archived"}:
+            item["status"] = "missing"
+            payload = catalog_item_payload(item)
+            actions.append({"action": "missing", "item_id": item["item_id"], "path": relative})
+            events.append(emit("catalog.item_upserted", branch=branch, task_id=record["task_id"], payload=payload))
+    if events and not args.dry_run:
+        persist(events)
+    return {"dry_run": args.dry_run, "scanned_files": len(discovered), "changes": actions}
+
+
+def catalog_read(args: argparse.Namespace) -> str | dict | list[dict]:
+    connection = database()
+    try:
+        if args.catalog_command == "show":
+            item = catalog_item(connection, validate_identifier(args.item_id))
+            relations = [
+                relation for relation in catalog_relations(connection)
+                if relation["source_id"] == item["item_id"] or relation["target_id"] == item["item_id"]
+            ]
+            output = {"item": item, "relations": relations}
+            return output if args.format == "json" else render_context_markdown([item], relations)
+        items = catalog_selected_items(
+            connection,
+            ids=getattr(args, "id", None),
+            kind=getattr(args, "kind", None),
+            status=getattr(args, "status", None),
+            tags=parse_tags(getattr(args, "tag", None)),
+            query=getattr(args, "query", None),
+            related_to=getattr(args, "related_to", None),
+        )
+        relations = catalog_relations(connection)
+        if args.catalog_command == "context":
+            selected_ids = {item["item_id"] for item in items}
+            related_ids: set[str] = set()
+            for relation in relations:
+                if relation["source_id"] in selected_ids:
+                    related_ids.add(relation["target_id"])
+                if relation["target_id"] in selected_ids:
+                    related_ids.add(relation["source_id"])
+            if related_ids:
+                expanded = catalog_selected_items(connection, ids=sorted(related_ids))
+                by_id = {item["item_id"]: item for item in [*items, *expanded]}
+                items = sorted(by_id.values(), key=lambda item: (item["kind"], item["title"], item["item_id"]))
+            return (
+                context_payload(items, relations)
+                if args.format == "json"
+                else render_context_markdown(items, relations)
+            )
+        return items if args.format == "json" else render_catalog_list(items)
+    finally:
+        connection.close()
+
+
+def catalog_command(args: argparse.Namespace) -> str | dict | list[dict]:
+    if args.catalog_command == "add":
+        return catalog_add(args)
+    if args.catalog_command == "update":
+        return catalog_update(args)
+    if args.catalog_command == "archive":
+        return catalog_change_archive(args, restore=False)
+    if args.catalog_command == "restore":
+        return catalog_change_archive(args, restore=True)
+    if args.catalog_command == "link":
+        return catalog_link(args)
+    if args.catalog_command == "unlink":
+        return catalog_unlink(args)
+    if args.catalog_command == "scan":
+        return catalog_scan(args)
+    return catalog_read(args)
+
+
 def exploration_import(args: argparse.Namespace) -> dict:
     record = read_active()
     if current_branch() != "main" or record["git"]["track"] != "stable":
@@ -964,6 +1344,17 @@ def add_state_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--next", action="append")
 
 
+def add_catalog_filters(parser: argparse.ArgumentParser, *, include_ids: bool = False) -> None:
+    if include_ids:
+        parser.add_argument("--id", action="append")
+    parser.add_argument("--kind", choices=CATALOG_KINDS)
+    parser.add_argument("--status", choices=CATALOG_STATUSES)
+    parser.add_argument("--tag", action="append")
+    parser.add_argument("--query")
+    parser.add_argument("--related-to")
+    parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="project-hooks", add_help=False)
     parser.add_argument("-h", "--help", action="store_true", dest="basic_help")
@@ -1019,6 +1410,52 @@ def build_parser() -> argparse.ArgumentParser:
     exploration_sub = exploration.add_subparsers(dest="exploration_command", required=True)
     exploration_import_parser = exploration_sub.add_parser("import")
     exploration_import_parser.add_argument("archive_branch")
+    catalog = sub.add_parser("catalog", help="管理和查询科研资料索引")
+    catalog_sub = catalog.add_subparsers(dest="catalog_command", required=True)
+    catalog_add_parser = catalog_sub.add_parser("add")
+    catalog_add_parser.add_argument("--id")
+    catalog_add_parser.add_argument("--kind", required=True, choices=CATALOG_KINDS)
+    catalog_add_parser.add_argument("--title", required=True)
+    catalog_add_parser.add_argument("--summary")
+    catalog_add_parser.add_argument("--path")
+    catalog_add_parser.add_argument("--source")
+    catalog_add_parser.add_argument("--tag", action="append")
+    catalog_add_parser.add_argument("--meta", action="append")
+    catalog_update_parser = catalog_sub.add_parser("update")
+    catalog_update_parser.add_argument("item_id")
+    catalog_update_parser.add_argument("--kind", choices=CATALOG_KINDS)
+    catalog_update_parser.add_argument("--title")
+    catalog_update_parser.add_argument("--summary")
+    catalog_update_parser.add_argument("--status", choices=CATALOG_STATUSES)
+    catalog_update_parser.add_argument("--path")
+    catalog_update_parser.add_argument("--source")
+    catalog_update_parser.add_argument("--tag", action="append")
+    catalog_update_parser.add_argument("--meta", action="append")
+    catalog_update_parser.add_argument("--clear-path", action="store_true")
+    catalog_update_parser.add_argument("--clear-summary", action="store_true")
+    catalog_update_parser.add_argument("--clear-source", action="store_true")
+    catalog_update_parser.add_argument("--clear-tags", action="store_true")
+    catalog_update_parser.add_argument("--clear-metadata", action="store_true")
+    for name in ("archive", "restore"):
+        catalog_sub.add_parser(name).add_argument("item_id")
+    catalog_link_parser = catalog_sub.add_parser("link")
+    catalog_link_parser.add_argument("source_id")
+    catalog_link_parser.add_argument("relation_type")
+    catalog_link_parser.add_argument("target_id")
+    catalog_link_parser.add_argument("--note")
+    catalog_unlink_parser = catalog_sub.add_parser("unlink")
+    catalog_unlink_parser.add_argument("relation_id")
+    catalog_scan_parser = catalog_sub.add_parser("scan")
+    catalog_scan_parser.add_argument("--root")
+    catalog_scan_parser.add_argument("--kind", choices=CATALOG_KINDS)
+    catalog_scan_parser.add_argument("--dry-run", action="store_true")
+    catalog_list_parser = catalog_sub.add_parser("list")
+    add_catalog_filters(catalog_list_parser)
+    catalog_show_parser = catalog_sub.add_parser("show")
+    catalog_show_parser.add_argument("item_id")
+    catalog_show_parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    catalog_context_parser = catalog_sub.add_parser("context")
+    add_catalog_filters(catalog_context_parser, include_ids=True)
     db = sub.add_parser("db")
     db_sub = db.add_subparsers(dest="db_command", required=True)
     db_sub.add_parser("status")
@@ -1076,13 +1513,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command in {"history", "decisions", "explorations"}:
             output = render_records(query_output(args.command, args.limit), args.format)
         elif args.command == "exploration": output = exploration_import(args)
+        elif args.command == "catalog": output = catalog_command(args)
         elif args.command == "db": output = db_command(args)
         else: output = finish_task(args)
         if isinstance(output, str): print(output, end="")
         else: print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0
     except (OSError, ValueError, json.JSONDecodeError, sqlite3.DatabaseError, subprocess.SubprocessError,
-            DashboardError, ReadModelError, StoreError, WorkflowError) as exc:
+            CatalogError, DashboardError, ReadModelError, StoreError, WorkflowError) as exc:
         print(str(exc), file=os.sys.stderr)
         return 1
 

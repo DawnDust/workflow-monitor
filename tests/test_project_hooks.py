@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,7 @@ from unittest.mock import patch
 
 from project_hooks.dashboard import (
     CLI_FALLBACK,
+    CatalogPage,
     DashboardApp,
     DashboardController,
     DashboardError,
@@ -721,6 +723,138 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         verified = json.loads(checked.stdout)
         self.assertEqual(verified["status"], "passed")
 
+    def test_catalog_cli_scan_relations_context_and_rebuild(self) -> None:
+        task_id = "20260726_catalog_001"
+        self.start(task_id)
+        for directory in ("source", "data", "theory", "analysis", "outputs"):
+            (self.root / directory).mkdir()
+        paper = self.root / "source/paper.pdf"
+        dataset = self.root / "data/sample.csv"
+        paper.write_bytes(b"%PDF-test")
+        dataset.write_text("x,y\n1,2\n", encoding="utf-8")
+
+        preview = json.loads(self.hooks("catalog", "scan", "--dry-run").stdout)
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["scanned_files"], 2)
+        self.assertEqual(json.loads(self.hooks("catalog", "list", "--format", "json").stdout), [])
+
+        scanned = json.loads(self.hooks("catalog", "scan").stdout)
+        self.assertEqual(len(scanned["changes"]), 2)
+        second = json.loads(self.hooks("catalog", "scan").stdout)
+        self.assertEqual(second["changes"], [])
+        items = json.loads(self.hooks("catalog", "list", "--format", "json").stdout)
+        paper_item = next(item for item in items if item["kind"] == "literature")
+        data_item = next(item for item in items if item["kind"] == "data")
+        self.assertEqual(paper_item["path"], "source/paper.pdf")
+        self.assertEqual(paper_item["metadata"]["extension"], ".pdf")
+
+        theory = json.loads(self.hooks(
+            "catalog", "add", "--kind", "theory", "--title", "核心理论",
+            "--summary", "公式 $E=mc^2$", "--tag", "core,physics",
+            "--source", "https://example.invalid/theory", "--meta", "stage=draft",
+        ).stdout)
+        theory_id = theory["item_id"]
+        updated = json.loads(self.hooks(
+            "catalog", "update", theory_id, "--status", "active",
+            "--summary", "更新后的公式 $E=mc^2$", "--tag", "core",
+        ).stdout)
+        self.assertEqual(updated["tags"], ["core"])
+
+        linked = self.hooks(
+            "catalog", "link", paper_item["item_id"], "supports", theory_id,
+            "--note", "提供理论依据", check=False,
+        )
+        self.assertEqual(linked.returncode, 0, linked.stderr)
+        relation = json.loads(linked.stdout)
+        context = self.hooks(
+            "catalog", "context", "--id", theory_id, "--format", "markdown"
+        ).stdout
+        self.assertIn("# 科研资料上下文", context)
+        self.assertIn("核心理论", context)
+        self.assertIn("supports", context)
+        related = json.loads(self.hooks(
+            "catalog", "list", "--related-to", theory_id, "--format", "json"
+        ).stdout)
+        self.assertEqual([item["item_id"] for item in related], [paper_item["item_id"]])
+
+        archived = json.loads(self.hooks("catalog", "archive", data_item["item_id"]).stdout)
+        self.assertEqual(archived["status"], "archived")
+        restored = json.loads(self.hooks("catalog", "restore", data_item["item_id"]).stdout)
+        self.assertEqual(restored["status"], "active")
+        self.assertTrue(json.loads(self.hooks(
+            "catalog", "unlink", relation["relation_id"]
+        ).stdout)["removed"])
+
+        paper.unlink()
+        missing = json.loads(self.hooks("catalog", "scan").stdout)
+        self.assertIn("missing", [change["action"] for change in missing["changes"]])
+        missing_item = json.loads(self.hooks(
+            "catalog", "show", paper_item["item_id"], "--format", "json"
+        ).stdout)["item"]
+        self.assertEqual(missing_item["status"], "missing")
+
+        outside = Path(self.temp.name) / "outside.pdf"
+        outside.write_bytes(b"outside")
+        rejected = self.hooks(
+            "catalog", "add", "--kind", "literature", "--title", "outside",
+            "--path", str(outside), check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("项目目录内", rejected.stderr)
+
+        model = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        )
+        dashboard = model.dashboard_snapshot()
+        self.assertEqual(len(dashboard["catalog_items"]), 3)
+        self.assertTrue(any(item["kind"] == "catalog" for item in dashboard["search_index"]))
+
+        database = self.root / ".project_hooks/maintenance.sqlite3"
+        database.unlink()
+        rebuilt = json.loads(self.hooks("catalog", "list", "--format", "json").stdout)
+        self.assertEqual(len(rebuilt), 3)
+
+    def test_catalog_writes_require_active_task_and_v1_events_remain_supported(self) -> None:
+        rejected = self.hooks(
+            "catalog", "add", "--kind", "theory", "--title", "no task", check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("没有活动任务", rejected.stderr)
+
+        journal = self.root / "maintenance/events.jsonl"
+        legacy = {
+            "event_id": "legacy-v1",
+            "schema_version": 1,
+            "event_type": "project_state.updated",
+            "occurred_at": "2026-01-01 00:00:00（Asia/Shanghai）",
+            "branch": "main",
+            "task_id": None,
+            "payload": {
+                "status": "完成", "main_goal_version": "v1", "goal": "legacy",
+                "judgment": "legacy", "breakpoint": "legacy", "next_steps": [],
+                "blocker": "",
+            },
+        }
+        journal.write_text(json.dumps(legacy, ensure_ascii=False) + "\n", encoding="utf-8")
+        rebuilt = self.hooks("db", "rebuild", check=False)
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stderr)
+        database = self.root / ".project_hooks/maintenance.sqlite3"
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute("PRAGMA user_version=1")
+            connection.commit()
+        finally:
+            connection.close()
+        context = json.loads(self.hooks("context", "--format", "json").stdout)
+        self.assertEqual(context["state"]["goal"], "legacy")
+        connection = sqlite3.connect(database)
+        try:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+        finally:
+            connection.close()
+
     def test_invalid_and_conflicting_events_are_rejected(self) -> None:
         journal = self.root / "maintenance/events.jsonl"
         journal.write_text("not-json\n", encoding="utf-8")
@@ -900,8 +1034,8 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(presets["negative"], ["negative"])
         self.assertEqual(presets["unmerged"], ["research/open"])
 
-    def test_five_primary_tabs_and_normalized_records(self) -> None:
-        self.assertEqual(PRIMARY_TABS, ("概览", "搜索", "任务", "时间线", "记录"))
+    def test_six_primary_tabs_and_normalized_records(self) -> None:
+        self.assertEqual(PRIMARY_TABS, ("概览", "搜索", "资料", "任务", "时间线", "记录"))
         records = normalize_records(
             [{"event_id": "d1", "occurred_at": "2026-07-23 10:00:00", "branch": "main",
               "decision": "keep five pages", "decision_id": "D-1", "task_id": "task-1"}],
@@ -911,6 +1045,20 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual([item["record_type"] for item in records], ["exploration", "decision"])
         self.assertEqual(records[0]["title"], "test layout")
         self.assertEqual(records[1]["task_id"], "task-1")
+
+    def test_catalog_detail_shows_metadata_relations_and_missing_warning(self) -> None:
+        detail = CatalogPage.detail_text({
+            "item_id": "lit-1", "kind_label": "文献", "status": "missing",
+            "title": "Paper", "path": "source/paper.pdf", "source": "doi:10/example",
+            "tags": ["core"], "summary": "summary", "metadata": {"year": "2026"},
+            "updated_at": "2026-07-26 10:00:00", "_relations": [{
+                "relation_type": "supports", "target_id": "theory-1",
+                "_target_title": "Theory", "_direction": "out", "note": "evidence",
+            }],
+        })
+        self.assertIn("文件当前不存在", detail)
+        self.assertIn("supports → Theory", detail)
+        self.assertIn('"year": "2026"', detail)
 
     def test_advanced_summary_contains_technical_status(self) -> None:
         text = advanced_summary({

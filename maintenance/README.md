@@ -45,7 +45,7 @@ python -m project_hooks dashboard
 | 分类 | 命令 |
 |:---|:---|
 | 安装与检查 | `install`、`check`、`status`、`branch-status` |
-| 状态与记录 | `state`、`history`、`decisions`、`decision`、`explorations` |
+| 状态与记录 | `state`、`history`、`decisions`、`decision`、`explorations`、`catalog` |
 | 探索流程 | `attempt`、`exploration`、`prepare-pr`、`archive-attempt` |
 | 数据维护 | `db status`、`db verify`、`db rebuild`、`db migrate` |
 
@@ -95,7 +95,22 @@ python -m project_hooks dashboard
 
 ## 四、记录与只读 Dashboard
 
-`events.jsonl` 保存任务、状态、决策和探索的不可抹除事件。任务完成事件同时提供交接投影，旧版独立交接事件继续兼容并按任务去重。SQLite 保存事件投影、查询索引、活动任务和临时文件基线，可随时从事件日志重建。
+`events.jsonl` 保存任务、状态、决策、探索和科研资料索引的不可抹除事件。任务完成事件同时提供交接投影，旧版独立交接事件继续兼容并按任务去重。SQLite 保存事件投影、查询索引、活动任务和临时文件基线，可随时从事件日志重建。Schema v2 继续接受历史 v1 事件。
+
+### 科研资料索引
+
+科研资料索引分为 `literature`、`data`、`theory`、`simulation` 和 `output` 五类。实体文件保留在项目目录，数据库只记录项目相对路径、摘要、状态、标签、来源、扩展信息和类型化关系。所有写命令要求已有活动任务：
+
+```powershell
+python -m project_hooks catalog scan --dry-run
+python -m project_hooks catalog scan
+python -m project_hooks catalog add --kind theory --title "理论名称" --summary "简短说明"
+python -m project_hooks catalog link <source-id> supports <target-id>
+python -m project_hooks catalog list --kind literature
+python -m project_hooks catalog context --tag core --format markdown
+```
+
+默认扫描将 `source/`、`data/`、`theory/`、`analysis/`、`outputs/` 依次映射到五类资料。路径必须位于项目目录内；扫描不会删除记录，文件消失时只标记为 `missing`。条目使用 `archive` 和 `restore` 软归档，关系使用 `link` 和 `unlink` 维护。
 
 `context` 和 Dashboard 分开显示两个断点：持久化的“工作断点”说明最后完成到哪里；只读“真实断点”实时比较本地 HEAD 与本地 `origin/main` 跟踪引用，显示同步、领先、落后、分叉或不可用。该检查不执行 `fetch` 或其他网络操作。
 
@@ -103,9 +118,10 @@ python -m project_hooks dashboard
 
 运行 `python -m project_hooks dashboard` 打开 Tkinter 窗口，包含：
 
-- 五个日常分页：概览、搜索、任务、时间线和记录。
+- 六个日常分页：概览、搜索、资料、任务、时间线和记录。
 - 概览按状态、活动任务、阻塞、下一步和 Git 同步顺序显示行动信息；当前目标和最近完成记录各压缩为一行，完整判决、断点和历史仍可从其他页面查看。
-- 跨任务、决策、探索和提交的搜索，以及最近任务、失败探索和未合并分支快捷筛选。
+- 跨科研资料、任务、决策、探索和提交的搜索，以及最近任务、失败探索和未合并分支快捷筛选。
+- 资料页按类型、状态和标签筛选，显示摘要、路径、来源、扩展信息、关系和缺失文件警告，并可复制路径或 AI 上下文。
 - 任务页默认只列出时间、任务、结果和状态；历史 `publish_*` 与 `record_*_publication_*` 辅助任务折叠到主体任务详情，搜索和高级查看仍保留原始记录。
 - 记录页统一查看和筛选决策与探索；原始事件、Schema、日志哈希和刷新诊断集中在独立的只读“高级查看”窗口。
 - 任务、记录、提交与原始事件之间支持双向定位。
@@ -115,4 +131,4 @@ python -m project_hooks dashboard
 
 Git 时间线刷新失败时保留上一次成功图形，SQLite 分页继续刷新并显示警告。`--refresh-seconds <N>` 设置刷新间隔，默认 3 秒，`0` 表示关闭；`--branch <name>` 查看指定分支流。
 
-图形环境不可用时，继续使用 `context`、`history`、`decisions`、`explorations` 和 `db status`。
+图形环境不可用时，继续使用 `context`、`history`、`decisions`、`explorations`、`catalog list` 和 `db status`。

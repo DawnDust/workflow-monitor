@@ -16,7 +16,8 @@ from typing import Iterable, Iterator
 from zoneinfo import ZoneInfo
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_EVENT_SCHEMA_VERSIONS = (1, 2)
 
 
 class StoreError(RuntimeError):
@@ -60,8 +61,9 @@ def validate_event(event: object, *, line: int | None = None) -> dict:
     required = {"event_id", "schema_version", "event_type", "occurred_at", "branch", "task_id", "payload"}
     if set(event) != required:
         raise StoreError(f"{where}字段不符合事件协议")
-    if event["schema_version"] != SCHEMA_VERSION:
-        raise StoreError(f"{where} schema_version={event['schema_version']}，当前仅支持 {SCHEMA_VERSION}")
+    if event["schema_version"] not in SUPPORTED_EVENT_SCHEMA_VERSIONS:
+        supported = ", ".join(str(item) for item in SUPPORTED_EVENT_SCHEMA_VERSIONS)
+        raise StoreError(f"{where} schema_version={event['schema_version']}，当前支持 {supported}")
     if not all(isinstance(event[key], str) and event[key] for key in ("event_id", "event_type", "occurred_at", "branch")):
         raise StoreError(f"{where}包含空或非法标识字段")
     if event["task_id"] is not None and not isinstance(event["task_id"], str):
@@ -195,12 +197,28 @@ CREATE TABLE IF NOT EXISTS active_tasks (
   record_json TEXT NOT NULL, state_updated INTEGER NOT NULL DEFAULT 0,
   decisions_added INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS catalog_items (
+  item_id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL,
+  path TEXT UNIQUE, status TEXT NOT NULL, tags_json TEXT NOT NULL, source TEXT NOT NULL,
+  metadata_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  branch TEXT NOT NULL, task_id TEXT, event_id TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS catalog_relations (
+  relation_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, target_id TEXT NOT NULL,
+  relation_type TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL, branch TEXT NOT NULL, task_id TEXT, event_id TEXT NOT NULL UNIQUE,
+  FOREIGN KEY(source_id) REFERENCES catalog_items(item_id),
+  FOREIGN KEY(target_id) REFERENCES catalog_items(item_id)
+);
+CREATE INDEX IF NOT EXISTS catalog_items_kind_status ON catalog_items(kind, status);
+CREATE INDEX IF NOT EXISTS catalog_relations_source ON catalog_relations(source_id);
+CREATE INDEX IF NOT EXISTS catalog_relations_target ON catalog_relations(target_id);
 """
 
 
 PROJECTION_TABLES = (
     "events", "project_state", "handoffs", "task_archive", "decisions",
-    "attempts", "attempt_evidence", "explorations",
+    "attempts", "attempt_evidence", "explorations", "catalog_relations", "catalog_items",
 )
 
 
@@ -305,6 +323,62 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
             (event["event_id"], payload["branch"], event["occurred_at"], payload["goal"],
              payload["result"], payload["evidence"], payload["disposition_ref"]),
         )
+    elif kind == "catalog.item_upserted":
+        existing = connection.execute(
+            "SELECT created_at FROM catalog_items WHERE item_id=?",
+            (payload["item_id"],),
+        ).fetchone()
+        created_at = existing["created_at"] if existing else payload.get("created_at", event["occurred_at"])
+        connection.execute(
+            """INSERT INTO catalog_items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(item_id) DO UPDATE SET kind=excluded.kind, title=excluded.title,
+               summary=excluded.summary, path=excluded.path, status=excluded.status,
+               tags_json=excluded.tags_json, source=excluded.source,
+               metadata_json=excluded.metadata_json, updated_at=excluded.updated_at,
+               branch=excluded.branch, task_id=excluded.task_id, event_id=excluded.event_id""",
+            (
+                payload["item_id"], payload["kind"], payload["title"], payload.get("summary", ""),
+                payload.get("path") or None, payload.get("status", "active"),
+                canonical_json(payload.get("tags", [])), payload.get("source", ""),
+                canonical_json(payload.get("metadata", {})), created_at, event["occurred_at"],
+                event["branch"], event["task_id"], event["event_id"],
+            ),
+        )
+    elif kind == "catalog.item_archived":
+        connection.execute(
+            """UPDATE catalog_items SET status='archived', updated_at=?, branch=?,
+               task_id=?, event_id=? WHERE item_id=?""",
+            (event["occurred_at"], event["branch"], event["task_id"], event["event_id"], payload["item_id"]),
+        )
+    elif kind == "catalog.item_restored":
+        connection.execute(
+            """UPDATE catalog_items SET status='active', updated_at=?, branch=?,
+               task_id=?, event_id=? WHERE item_id=?""",
+            (event["occurred_at"], event["branch"], event["task_id"], event["event_id"], payload["item_id"]),
+        )
+    elif kind == "catalog.relation_upserted":
+        existing = connection.execute(
+            "SELECT created_at FROM catalog_relations WHERE relation_id=?",
+            (payload["relation_id"],),
+        ).fetchone()
+        created_at = existing["created_at"] if existing else payload.get("created_at", event["occurred_at"])
+        connection.execute(
+            """INSERT INTO catalog_relations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(relation_id) DO UPDATE SET source_id=excluded.source_id,
+               target_id=excluded.target_id, relation_type=excluded.relation_type,
+               note=excluded.note, updated_at=excluded.updated_at, branch=excluded.branch,
+               task_id=excluded.task_id, event_id=excluded.event_id""",
+            (
+                payload["relation_id"], payload["source_id"], payload["target_id"],
+                payload["relation_type"], payload.get("note", ""), created_at,
+                event["occurred_at"], event["branch"], event["task_id"], event["event_id"],
+            ),
+        )
+    elif kind == "catalog.relation_removed":
+        connection.execute(
+            "DELETE FROM catalog_relations WHERE relation_id=?",
+            (payload["relation_id"],),
+        )
 
 
 def rebuild(database: Path, journal: Path, *, preserve_active: bool = True) -> sqlite3.Connection:
@@ -325,6 +399,19 @@ def rebuild(database: Path, journal: Path, *, preserve_active: bool = True) -> s
 
 
 def ensure_database(database: Path, journal: Path) -> sqlite3.Connection:
+    previous_version = None
+    if database.exists():
+        probe = None
+        try:
+            probe = sqlite3.connect(database, timeout=2)
+            previous_version = probe.execute("PRAGMA user_version").fetchone()[0]
+        except sqlite3.DatabaseError:
+            previous_version = None
+        finally:
+            if probe is not None:
+                probe.close()
+    if previous_version not in (None, 0, SCHEMA_VERSION):
+        return rebuild(database, journal)
     try:
         connection = connect(database)
         stored = connection.execute("SELECT value FROM meta WHERE key='journal_hash'").fetchone()
