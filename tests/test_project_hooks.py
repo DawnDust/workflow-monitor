@@ -242,7 +242,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
                 "status": "准备发布",
                 "judgment": "ready",
                 "breakpoint": "tested",
-                "next_steps": ["推送 main", "分析下一批数据"],
+                "next_steps": ["检查并发布全部已验证改动", "分析下一批数据"],
             },
             "git_state": {
                 "relation": "synced",
@@ -262,8 +262,8 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         }
         mixed = MaintenanceReadModel._apply_overview_state(dict(base_context), details)
         self.assertEqual(mixed["visible_next_steps"], ["分析下一批数据"])
-        self.assertEqual(mixed["overview_state"]["status"], "准备发布")
-        self.assertFalse(mixed["publication_completed"])
+        self.assertEqual(mixed["overview_state"]["status"], "已完成并发布")
+        self.assertTrue(mixed["publication_completed"])
 
         unpublished_context = dict(base_context)
         unpublished_context["state"] = dict(base_context["state"], next_steps=["推送 main"])
@@ -1099,8 +1099,10 @@ class DashboardPresentationTests(unittest.TestCase):
     def test_publication_classifiers_are_conservative(self) -> None:
         self.assertTrue(is_publication_step("提交已验证改动"))
         self.assertTrue(is_publication_step("push main and verify remote"))
+        self.assertTrue(is_publication_step("检查并发布全部已验证改动"))
         self.assertTrue(is_auxiliary_task_id("20260723_record_dashboard_publication_001"))
         self.assertFalse(is_publication_step("提交研究申请"))
+        self.assertFalse(is_publication_step("发布研究申请"))
         self.assertFalse(is_auxiliary_task_id("20260723_record_simplification_001"))
 
     def test_result_labels_are_presentational_only(self) -> None:

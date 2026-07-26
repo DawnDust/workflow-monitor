@@ -104,9 +104,10 @@ def is_publication_step(value: object) -> bool:
         return True
     if re.search(r"\b(?:commit|push)\b", text):
         return True
-    return "提交" in text and any(
-        token in text for token in ("已验证", "改动", "代码", "文件", "版本", "变更")
-    )
+    artifact_tokens = ("已验证", "改动", "代码", "文件", "版本", "变更")
+    if "提交" in text and any(token in text for token in artifact_tokens):
+        return True
+    return "发布" in text and any(token in text for token in (*artifact_tokens, "全部"))
 
 
 class MaintenanceReadModel:
@@ -872,9 +873,7 @@ class MaintenanceReadModel:
             step for step in recorded_steps if step not in completed_steps
         ]
         publication_completed = bool(
-            completed_steps
-            and not visible_steps
-            and not context.get("active_task")
+            not context.get("active_task")
             and context.get("branch") == "main"
             and git_state.get("relation") == "synced"
             and task_is_published
