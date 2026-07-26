@@ -50,13 +50,151 @@ class DashboardError(RuntimeError):
     pass
 
 
+RESEARCH_CONTEXT_SCOPES = ("当前资料", "当前筛选结果", "项目概览")
+RESEARCH_CONTEXT_LIMIT = 20
+RESEARCH_PROMPT_TEMPLATES = {
+    "literature_review": {
+        "label": "文献精读",
+        "task": "深入阅读并评估给定文献或资料，提炼可直接服务当前研究的内容。",
+        "sections": (
+            "研究问题与背景",
+            "核心观点与理论机制",
+            "研究方法、数据与识别策略",
+            "主要发现及证据强度",
+            "贡献、局限与适用边界",
+            "对当前项目可复用的概念、方法和线索",
+        ),
+    },
+    "literature_comparison": {
+        "label": "文献比较",
+        "task": "比较给定文献或资料，找出共识、分歧、证据差异和可推进的研究缺口。",
+        "sections": (
+            "共同研究问题与比较维度",
+            "理论观点与关键假设对照",
+            "方法、数据和样本差异",
+            "结论一致处、冲突处及原因",
+            "证据质量与局限",
+            "可形成的新研究问题或综合框架",
+        ),
+    },
+    "research_ideas": {
+        "label": "研究问题与思路",
+        "task": "基于现有资料提出有依据、可验证且适合当前项目的研究问题与研究思路。",
+        "sections": (
+            "现有问题与知识缺口",
+            "候选研究问题",
+            "可能的理论机制与研究假设",
+            "创新点和与既有工作的区别",
+            "可行性、所需证据与主要风险",
+            "优先级建议与最小验证步骤",
+        ),
+    },
+    "method_design": {
+        "label": "研究方法设计",
+        "task": "为当前研究问题设计可执行、可复核的研究方法，并说明关键取舍。",
+        "sections": (
+            "目标、研究问题与可检验假设",
+            "研究设计与识别思路",
+            "数据、变量、样本或模拟设置",
+            "分析步骤与评价指标",
+            "稳健性、有效性和替代解释检验",
+            "失败条件、局限与实施顺序",
+        ),
+    },
+    "process_review": {
+        "label": "研究过程复盘",
+        "task": "复盘当前研究过程，整理已完成工作、证据、决策、问题和下一步。",
+        "sections": (
+            "当前目标与已完成工作",
+            "采用过的方法与关键过程",
+            "获得的证据和仍未解决的问题",
+            "已做决策及其依据",
+            "失败、绕路与可复用经验",
+            "下一步及优先级",
+        ),
+    },
+    "conclusion_review": {
+        "label": "结论与局限",
+        "task": "从现有证据中提炼可靠结论，同时审查局限、边界条件和替代解释。",
+        "sections": (
+            "核心结论",
+            "支持每项结论的证据",
+            "结论强度与不确定性",
+            "适用范围和边界条件",
+            "局限、偏差与替代解释",
+            "尚需验证的问题和后续研究",
+        ),
+    },
+}
+
+RESEARCH_PROMPT_COMMON_RULES = """请遵守以下规则：
+1. 只把所附上下文视为已有证据；信息不足时明确指出，不要补造事实、数据、引文或实验结果。
+2. 明确区分“已有证据”“合理推断”和“待验证建议”。
+3. 论述时尽量引用资料 ID、标题或项目相对路径，使结论可以回查。
+4. 先完成分析，再单独列出建议保存的资料条目、资料关系、项目决策或探索记录。
+5. 未经我在对话中明确确认，不得修改项目文件、数据库、事件或 Git 状态。
+6. 如果我确认记录，再先运行 `python -m project_hooks context --format markdown` 并按 core_read_order 阅读规范；复用已有活动任务且不替我结束，或按规范创建 stable 任务。只通过现有 catalog、decision、attempt 和 state 命令记录，完成后更新项目概览；仅结束由你创建的任务。
+"""
+
+
+def research_context(
+    scope: str,
+    *,
+    selected: dict | None,
+    visible: list[dict],
+    relations: list[dict],
+    overview: str | None,
+) -> tuple[str, int, int]:
+    if scope == "当前资料":
+        if selected is None:
+            raise DashboardError("请先在资料页选择一条科研资料。")
+        return render_context_markdown([selected], relations), 1, 1
+    if scope == "当前筛选结果":
+        if not visible:
+            raise DashboardError("资料页当前筛选结果为空。")
+        total = len(visible)
+        included = visible[:RESEARCH_CONTEXT_LIMIT]
+        context = render_context_markdown(included, relations)
+        if total > len(included):
+            context += (
+                f"\n> 当前筛选结果共 {total} 条，本提示词按资料页当前顺序仅包含前 "
+                f"{len(included)} 条。\n"
+            )
+        return context, len(included), total
+    if scope == "项目概览":
+        if not overview or not overview.strip():
+            raise DashboardError("项目概览尚未加载，请先刷新 Dashboard。")
+        return "# 项目概览上下文\n\n" + overview.strip() + "\n", 1, 1
+    raise DashboardError(f"未知的工作台上下文范围：{scope}")
+
+
+def build_research_prompt(template_id: str, scope: str, context: str) -> str:
+    template = RESEARCH_PROMPT_TEMPLATES.get(template_id)
+    if template is None:
+        raise DashboardError(f"未知的科研工作台操作：{template_id}")
+    sections = "\n".join(f"{index}. {label}" for index, label in enumerate(template["sections"], 1))
+    return (
+        f"请立即执行“{template['label']}”，不要只提供行动方案。\n\n"
+        f"任务目标：{template['task']}\n\n"
+        f"{RESEARCH_PROMPT_COMMON_RULES}\n"
+        f"请按以下结构输出：\n{sections}\n\n"
+        f"上下文范围：{scope}\n\n{context.rstrip()}\n"
+    )
+
+
+def copy_research_prompt(clipboard, prompt: str) -> str:
+    clipboard.clipboard_clear()
+    clipboard.clipboard_append(prompt)
+    return "科研提示词已复制，请粘贴到当前 Codex 对话框并发送。"
+
+
 def copy_catalog_scan_prompt(clipboard) -> str:
     clipboard.clipboard_clear()
     clipboard.clipboard_append(CODEX_CATALOG_SCAN_PROMPT)
     return "扫描提示词已复制，请粘贴到当前 Codex 对话框并发送。"
 
 
-PRIMARY_TABS = ("概览", "搜索", "资料", "任务", "时间线", "记录")
+PRIMARY_TABS = ("概览", "搜索", "资料", "工作台", "任务", "时间线", "记录")
 
 RESULT_LABELS = {
     "completed": "完成",
@@ -682,6 +820,95 @@ class CatalogPage:
         )
 
 
+class ResearchWorkbenchPage:
+    def __init__(
+        self,
+        parent,
+        tk,
+        ttk,
+        scrolledtext,
+        *,
+        selected_item: Callable[[], dict | None],
+        visible_items: Callable[[], list[dict]],
+        relations: Callable[[], list[dict]],
+        overview: Callable[[], str | None],
+        notify: Callable[[str], None],
+    ):
+        self.frame = ttk.Frame(parent, padding=8)
+        self.selected_item = selected_item
+        self.visible_items = visible_items
+        self.relations = relations
+        self.overview = overview
+        self.notify = notify
+
+        header = ttk.Frame(self.frame)
+        header.pack(fill="x", pady=(0, 8))
+        ttk.Label(header, text="上下文范围").pack(side="left")
+        self.scope = tk.StringVar(value=RESEARCH_CONTEXT_SCOPES[0])
+        ttk.Combobox(
+            header,
+            textvariable=self.scope,
+            values=RESEARCH_CONTEXT_SCOPES,
+            state="readonly",
+            width=14,
+        ).pack(side="left", padx=(6, 12))
+        self.context_status = ttk.Label(header, text="选择操作后生成并复制提示词")
+        self.context_status.pack(side="left")
+        ttk.Button(header, text="复制当前文本", command=self.copy_current).pack(side="right")
+
+        actions = ttk.LabelFrame(self.frame, text="常用科研操作", padding=8)
+        actions.pack(fill="x", pady=(0, 8))
+        for index, (template_id, template) in enumerate(RESEARCH_PROMPT_TEMPLATES.items()):
+            ttk.Button(
+                actions,
+                text=template["label"],
+                command=lambda selected=template_id: self.generate(selected),
+                width=18,
+            ).grid(row=index // 3, column=index % 3, padx=4, pady=4, sticky="ew")
+        for column in range(3):
+            actions.columnconfigure(column, weight=1)
+
+        ttk.Label(
+            self.frame,
+            text="提示词预览（可临时编辑；编辑内容不会保存为模板）",
+        ).pack(anchor="w", pady=(0, 4))
+        self.preview = scrolledtext.ScrolledText(self.frame, wrap="word")
+        self.preview.pack(fill="both", expand=True)
+
+    def generate(self, template_id: str) -> None:
+        scope = self.scope.get()
+        try:
+            context, included, total = research_context(
+                scope,
+                selected=self.selected_item(),
+                visible=self.visible_items(),
+                relations=self.relations(),
+                overview=self.overview(),
+            )
+            prompt = build_research_prompt(template_id, scope, context)
+        except DashboardError as exc:
+            self.notify(str(exc))
+            return
+        self.preview.delete("1.0", "end")
+        self.preview.insert("1.0", prompt)
+        message = copy_research_prompt(self.frame, prompt)
+        if scope == "当前筛选结果":
+            count_text = f"已包含 {included}/{total} 条筛选资料"
+        elif scope == "当前资料":
+            count_text = "已包含 1 条当前资料"
+        else:
+            count_text = "已包含项目概览"
+        self.context_status.configure(text=count_text)
+        self.notify(message)
+
+    def copy_current(self) -> None:
+        prompt = self.preview.get("1.0", "end-1c")
+        if not prompt.strip():
+            self.notify("当前没有可复制的科研提示词。")
+            return
+        self.notify(copy_research_prompt(self.frame, prompt))
+
+
 class TaskPage:
     def __init__(self, parent, tk, ttk, scrolledtext, *, open_related: Callable[[dict], None]):
         self.frame = ttk.Frame(parent, padding=8)
@@ -1294,6 +1521,19 @@ class DashboardApp:
             notify=self.notify,
         )
         self.notebook.add(self.catalog_page.frame, text="资料")
+
+        self.workbench_page = ResearchWorkbenchPage(
+            self.notebook,
+            tk,
+            ttk,
+            scrolledtext,
+            selected_item=self.catalog_page.selected_item,
+            visible_items=lambda: list(self.catalog_page.table.visible),
+            relations=lambda: list(self.catalog_page.relations),
+            overview=lambda: self.overview_text(self.snapshot) if self.snapshot else None,
+            notify=self.notify,
+        )
+        self.notebook.add(self.workbench_page.frame, text="工作台")
 
         self.task_page = TaskPage(
             self.notebook, tk, ttk, scrolledtext, open_related=self.open_related_record,
