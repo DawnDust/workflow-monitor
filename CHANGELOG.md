@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.3
+
+- 修复 GitHub Release 工作流中版本一致性校验的 Bash/Python 引号错误。
+- 使用可读的 heredoc 校验标签、包和 `pyproject.toml` 三处版本，避免嵌套转义。
+
 ## 1.0.2
 
 - 修复普通 CLI 在 Windows 英文系统传统代码页下输出中文时的编码失败。
