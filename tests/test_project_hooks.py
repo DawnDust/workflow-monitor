@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import shutil
 import sqlite3
@@ -19,9 +20,8 @@ from project_hooks.dashboard import (
     DashboardController,
     DashboardError,
     PRIMARY_TABS,
-    RESEARCH_CONTEXT_LIMIT,
-    RESEARCH_CONTEXT_SCOPES,
     RESEARCH_PROMPT_TEMPLATES,
+    ResearchWorkbenchPage,
     advanced_summary,
     build_research_prompt,
     catalog_overview_text,
@@ -36,7 +36,6 @@ from project_hooks.dashboard import (
     record_identity,
     record_location,
     reveal_catalog_file,
-    research_context,
     result_label,
     short,
     sort_records,
@@ -1184,73 +1183,46 @@ class DashboardPresentationTests(unittest.TestCase):
     def test_research_workbench_templates_include_structure_and_safety_rules(self) -> None:
         self.assertEqual(
             [template["label"] for template in RESEARCH_PROMPT_TEMPLATES.values()],
-            ["文献精读", "文献比较", "研究问题与思路", "研究方法设计", "研究过程复盘", "结论与局限"],
+            [
+                "文献精读", "文献比较", "研究问题与思路", "研究方法设计",
+                "研究过程复盘", "结论与局限", "下一步研究计划",
+            ],
         )
-        self.assertEqual(RESEARCH_CONTEXT_SCOPES, ("当前资料", "当前筛选结果", "项目概览"))
         for template_id, template in RESEARCH_PROMPT_TEMPLATES.items():
-            prompt = build_research_prompt(template_id, "项目概览", "# 项目概览上下文\n\n目标")
+            prompt = build_research_prompt(template_id)
             self.assertIn(template["label"], prompt)
+            self.assertIn("当前 Codex 对话中已经选择的文件", prompt)
+            self.assertIn("还需要选择或提供哪些文件", prompt)
             self.assertIn("已有证据", prompt)
             self.assertIn("合理推断", prompt)
             self.assertIn("待验证建议", prompt)
             self.assertIn("未经我在对话中明确确认", prompt)
             self.assertIn("更新项目概览", prompt)
             self.assertIn("建议保存的资料条目", prompt)
+            self.assertNotIn("上下文范围：", prompt)
             for section in template["sections"]:
                 self.assertIn(section, prompt)
         with self.assertRaisesRegex(DashboardError, "未知的科研工作台操作"):
-            build_research_prompt("unknown", "项目概览", "context")
+            build_research_prompt("unknown")
 
-    def test_research_context_supports_selected_filtered_and_overview_scopes(self) -> None:
-        selected = {
-            "item_id": "lit-1", "kind": "literature", "kind_label": "文献",
-            "title": "Selected Paper", "status": "active", "path": "source/paper.pdf",
-            "summary": "selected summary", "tags": ["core"], "metadata": {},
-        }
-        relations = [{
-            "relation_id": "rel-1", "source_id": "lit-1", "target_id": "theory-1",
-            "relation_type": "supports", "note": "",
-        }]
-        context, included, total = research_context(
-            "当前资料", selected=selected, visible=[], relations=relations, overview=None,
-        )
-        self.assertEqual((included, total), (1, 1))
-        self.assertIn("Selected Paper", context)
-        self.assertIn("supports", context)
+    def test_research_workbench_has_no_catalog_context_controls_or_callbacks(self) -> None:
+        source = inspect.getsource(ResearchWorkbenchPage)
+        parameters = inspect.signature(ResearchWorkbenchPage.__init__).parameters
+        self.assertNotIn("上下文范围", source)
+        self.assertNotIn("RESEARCH_CONTEXT", source)
+        self.assertNotIn("selected_item", parameters)
+        self.assertNotIn("visible_items", parameters)
+        self.assertNotIn("relations", parameters)
+        self.assertNotIn("overview", parameters)
 
-        visible = [
-            {
-                "item_id": f"lit-{index:02}", "kind": "literature", "kind_label": "文献",
-                "title": f"Paper {index:02}", "status": "active", "summary": "",
-                "tags": [], "metadata": {},
-            }
-            for index in range(RESEARCH_CONTEXT_LIMIT + 1)
-        ]
-        context, included, total = research_context(
-            "当前筛选结果", selected=None, visible=visible, relations=[], overview=None,
-        )
-        self.assertEqual((included, total), (RESEARCH_CONTEXT_LIMIT, RESEARCH_CONTEXT_LIMIT + 1))
-        self.assertIn("Paper 00", context)
-        self.assertIn(f"Paper {RESEARCH_CONTEXT_LIMIT - 1:02}", context)
-        self.assertNotIn(f"Paper {RESEARCH_CONTEXT_LIMIT:02}", context)
-        self.assertIn(f"共 {RESEARCH_CONTEXT_LIMIT + 1} 条", context)
-
-        context, included, total = research_context(
-            "项目概览", selected=None, visible=[], relations=[], overview="当前目标：测试工作台",
-        )
-        self.assertEqual((included, total), (1, 1))
-        self.assertIn("# 项目概览上下文", context)
-        self.assertIn("当前目标：测试工作台", context)
-
-    def test_research_context_rejects_empty_or_unknown_sources(self) -> None:
-        with self.assertRaisesRegex(DashboardError, "选择一条科研资料"):
-            research_context("当前资料", selected=None, visible=[], relations=[], overview=None)
-        with self.assertRaisesRegex(DashboardError, "筛选结果为空"):
-            research_context("当前筛选结果", selected=None, visible=[], relations=[], overview=None)
-        with self.assertRaisesRegex(DashboardError, "尚未加载"):
-            research_context("项目概览", selected=None, visible=[], relations=[], overview=" ")
-        with self.assertRaisesRegex(DashboardError, "未知的工作台上下文范围"):
-            research_context("全部", selected=None, visible=[], relations=[], overview=None)
+    def test_next_research_plan_is_actionable_and_does_not_auto_execute(self) -> None:
+        prompt = build_research_prompt("next_research_plan")
+        for text in (
+            "当前研究状态", "未解决问题", "证据缺口", "优先级", "所需输入", "方法",
+            "预期输出", "完成标准", "风险与依赖", "最小可执行第一步", "建议保存的项目记录",
+        ):
+            self.assertIn(text, prompt)
+        self.assertIn("未经我在对话中明确确认，不得修改项目", prompt)
 
     def test_copy_research_prompt_uses_edited_text_without_mutating_templates(self) -> None:
         class Clipboard:

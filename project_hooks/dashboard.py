@@ -50,8 +50,6 @@ class DashboardError(RuntimeError):
     pass
 
 
-RESEARCH_CONTEXT_SCOPES = ("当前资料", "当前筛选结果", "项目概览")
-RESEARCH_CONTEXT_LIMIT = 20
 RESEARCH_PROMPT_TEMPLATES = {
     "literature_review": {
         "label": "文献精读",
@@ -125,50 +123,32 @@ RESEARCH_PROMPT_TEMPLATES = {
             "尚需验证的问题和后续研究",
         ),
     },
+    "next_research_plan": {
+        "label": "下一步研究计划",
+        "task": "根据当前研究状态生成按优先级排列、可以立即开始执行的下一步研究计划。",
+        "sections": (
+            "当前研究状态与已完成工作",
+            "未解决问题、证据缺口和关键不确定性",
+            "按优先级排列的下一步任务",
+            "每项任务的目标、所需输入、方法、预期输出、完成标准、风险与依赖",
+            "最小可执行第一步",
+            "建议保存的项目记录",
+        ),
+    },
 }
 
 RESEARCH_PROMPT_COMMON_RULES = """请遵守以下规则：
-1. 只把所附上下文视为已有证据；信息不足时明确指出，不要补造事实、数据、引文或实验结果。
-2. 明确区分“已有证据”“合理推断”和“待验证建议”。
-3. 论述时尽量引用资料 ID、标题或项目相对路径，使结论可以回查。
-4. 先完成分析，再单独列出建议保存的资料条目、资料关系、项目决策或探索记录。
-5. 未经我在对话中明确确认，不得修改项目文件、数据库、事件或 Git 状态。
-6. 如果我确认记录，再先运行 `python -m project_hooks context --format markdown` 并按 core_read_order 阅读规范；复用已有活动任务且不替我结束，或按规范创建 stable 任务。只通过现有 catalog、decision、attempt 和 state 命令记录，完成后更新项目概览；仅结束由你创建的任务。
+1. 只使用当前 Codex 对话中已经选择的文件、已有消息和我提供的资料作为已有证据。
+2. 如果材料不足，先明确指出还需要选择或提供哪些文件；停止补造事实、数据、引文或实验结果。
+3. 明确区分“已有证据”“合理推断”和“待验证建议”。
+4. 论述时尽量引用资料 ID、标题或项目相对路径，使结论可以回查。
+5. 先完成分析，再单独列出建议保存的资料条目、资料关系、项目决策或探索记录。
+6. 未经我在对话中明确确认，不得修改项目文件、数据库、事件或 Git 状态。
+7. 如果我确认记录，再先运行 `python -m project_hooks context --format markdown` 并按 core_read_order 阅读规范；复用已有活动任务且不替我结束，或按规范创建 stable 任务。只通过现有 catalog、decision、attempt 和 state 命令记录，完成后更新项目概览；仅结束由你创建的任务。
 """
 
 
-def research_context(
-    scope: str,
-    *,
-    selected: dict | None,
-    visible: list[dict],
-    relations: list[dict],
-    overview: str | None,
-) -> tuple[str, int, int]:
-    if scope == "当前资料":
-        if selected is None:
-            raise DashboardError("请先在资料页选择一条科研资料。")
-        return render_context_markdown([selected], relations), 1, 1
-    if scope == "当前筛选结果":
-        if not visible:
-            raise DashboardError("资料页当前筛选结果为空。")
-        total = len(visible)
-        included = visible[:RESEARCH_CONTEXT_LIMIT]
-        context = render_context_markdown(included, relations)
-        if total > len(included):
-            context += (
-                f"\n> 当前筛选结果共 {total} 条，本提示词按资料页当前顺序仅包含前 "
-                f"{len(included)} 条。\n"
-            )
-        return context, len(included), total
-    if scope == "项目概览":
-        if not overview or not overview.strip():
-            raise DashboardError("项目概览尚未加载，请先刷新 Dashboard。")
-        return "# 项目概览上下文\n\n" + overview.strip() + "\n", 1, 1
-    raise DashboardError(f"未知的工作台上下文范围：{scope}")
-
-
-def build_research_prompt(template_id: str, scope: str, context: str) -> str:
+def build_research_prompt(template_id: str) -> str:
     template = RESEARCH_PROMPT_TEMPLATES.get(template_id)
     if template is None:
         raise DashboardError(f"未知的科研工作台操作：{template_id}")
@@ -177,8 +157,7 @@ def build_research_prompt(template_id: str, scope: str, context: str) -> str:
         f"请立即执行“{template['label']}”，不要只提供行动方案。\n\n"
         f"任务目标：{template['task']}\n\n"
         f"{RESEARCH_PROMPT_COMMON_RULES}\n"
-        f"请按以下结构输出：\n{sections}\n\n"
-        f"上下文范围：{scope}\n\n{context.rstrip()}\n"
+        f"请按以下结构输出：\n{sections}\n"
     )
 
 
@@ -828,32 +807,17 @@ class ResearchWorkbenchPage:
         ttk,
         scrolledtext,
         *,
-        selected_item: Callable[[], dict | None],
-        visible_items: Callable[[], list[dict]],
-        relations: Callable[[], list[dict]],
-        overview: Callable[[], str | None],
         notify: Callable[[str], None],
     ):
         self.frame = ttk.Frame(parent, padding=8)
-        self.selected_item = selected_item
-        self.visible_items = visible_items
-        self.relations = relations
-        self.overview = overview
         self.notify = notify
 
         header = ttk.Frame(self.frame)
         header.pack(fill="x", pady=(0, 8))
-        ttk.Label(header, text="上下文范围").pack(side="left")
-        self.scope = tk.StringVar(value=RESEARCH_CONTEXT_SCOPES[0])
-        ttk.Combobox(
+        ttk.Label(
             header,
-            textvariable=self.scope,
-            values=RESEARCH_CONTEXT_SCOPES,
-            state="readonly",
-            width=14,
-        ).pack(side="left", padx=(6, 12))
-        self.context_status = ttk.Label(header, text="选择操作后生成并复制提示词")
-        self.context_status.pack(side="left")
+            text="请先在 Codex 对话中选择需要的文件，再点击科研操作。",
+        ).pack(side="left")
         ttk.Button(header, text="复制当前文本", command=self.copy_current).pack(side="right")
 
         actions = ttk.LabelFrame(self.frame, text="常用科研操作", padding=8)
@@ -864,8 +828,8 @@ class ResearchWorkbenchPage:
                 text=template["label"],
                 command=lambda selected=template_id: self.generate(selected),
                 width=18,
-            ).grid(row=index // 3, column=index % 3, padx=4, pady=4, sticky="ew")
-        for column in range(3):
+            ).grid(row=index // 4, column=index % 4, padx=4, pady=4, sticky="ew")
+        for column in range(4):
             actions.columnconfigure(column, weight=1)
 
         ttk.Label(
@@ -876,29 +840,14 @@ class ResearchWorkbenchPage:
         self.preview.pack(fill="both", expand=True)
 
     def generate(self, template_id: str) -> None:
-        scope = self.scope.get()
         try:
-            context, included, total = research_context(
-                scope,
-                selected=self.selected_item(),
-                visible=self.visible_items(),
-                relations=self.relations(),
-                overview=self.overview(),
-            )
-            prompt = build_research_prompt(template_id, scope, context)
+            prompt = build_research_prompt(template_id)
         except DashboardError as exc:
             self.notify(str(exc))
             return
         self.preview.delete("1.0", "end")
         self.preview.insert("1.0", prompt)
         message = copy_research_prompt(self.frame, prompt)
-        if scope == "当前筛选结果":
-            count_text = f"已包含 {included}/{total} 条筛选资料"
-        elif scope == "当前资料":
-            count_text = "已包含 1 条当前资料"
-        else:
-            count_text = "已包含项目概览"
-        self.context_status.configure(text=count_text)
         self.notify(message)
 
     def copy_current(self) -> None:
@@ -1527,10 +1476,6 @@ class DashboardApp:
             tk,
             ttk,
             scrolledtext,
-            selected_item=self.catalog_page.selected_item,
-            visible_items=lambda: list(self.catalog_page.table.visible),
-            relations=lambda: list(self.catalog_page.relations),
-            overview=lambda: self.overview_text(self.snapshot) if self.snapshot else None,
             notify=self.notify,
         )
         self.notebook.add(self.workbench_page.frame, text="工作台")
