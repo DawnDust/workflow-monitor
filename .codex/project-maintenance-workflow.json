@@ -7,7 +7,7 @@
   "core_read_order": [
     "maintenance/README.md"
   ],
-  "context_command": "python -m project_hooks context --format markdown",
+  "context_command": "project-hooks context --format markdown",
   "maintenance_store": {
     "engine": "sqlite",
     "database": ".project_hooks/maintenance.sqlite3",

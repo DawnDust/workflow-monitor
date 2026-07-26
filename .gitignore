@@ -1,5 +1,10 @@
+# project-maintenance-hooks:begin
 .project_hooks/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+build/
+dist/
+*.egg-info/
+# project-maintenance-hooks:end
