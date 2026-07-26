@@ -32,14 +32,28 @@
 ### 日常入口
 
 ```powershell
-python -m project_hooks
-python -m project_hooks context --format markdown
-python -m project_hooks start --help
-python -m project_hooks end --help
-python -m project_hooks dashboard
+project-hooks
+project-hooks context --format markdown
+project-hooks start --help
+project-hooks end --help
+project-hooks dashboard
 ```
 
-无参数入口显示行动优先概览；`context` 保留完整的目标、判决、断点和交接信息，供生命周期与自动化读取。普通 `--help` 只列日常入口，`--help-all` 列出高级命令。新 clone 或 worktree 必须先运行一次 `install`，仅为当前仓库设置 `core.hooksPath=.githooks`。
+无参数入口显示行动优先概览；`context` 保留完整的目标、判决、断点和交接信息，供生命周期与自动化读取。普通 `--help` 只列日常入口，`--help-all` 列出高级命令。新科研仓库使用 `project-hooks init .` 初始化；新 clone 或 worktree 运行一次 `install`，为当前仓库设置 `core.hooksPath=.githooks`。`python -m project_hooks` 继续兼容。
+
+### 软件升级
+
+工作流软件由 `pipx` 全局安装，项目内只保存配置、受管规范和永久事件日志。在干净且与
+`origin/main` 同步的 `main` 分支运行：
+
+```powershell
+project-hooks update
+```
+
+命令从 GitHub Release 获取并校验版本化核心，迁移配置、保留事件日志既有内容、重建
+SQLite 并验证完整性。升级器不自动提交或推送。用户修改过的规范文件不会被覆盖，新版
+候选写入 `.project_hooks/update-conflicts/<version>/`；科研资料、项目根 README 和
+`maintenance/events.jsonl` 永不被模板替换。
 
 ### 高级命令
 
@@ -130,7 +144,7 @@ python -m project_hooks catalog context --tag core --format markdown
 - 概览显示五类资料数量、缺失与归档数量和最近新增资料；资料页可在本机文件管理器中打开文件所在位置。
 - 资料页的“复制 Codex 扫描提示词”会显示完整提示词并写入剪贴板；用户将其粘贴到任意合适的
   Codex 对话后，由 Codex 按提示遵循维护生命周期，Dashboard 本身不检测或启动 Codex。
-- 工作台按文献研究、研究设计、研究复盘和研究规划分类列出七项提示词；左侧可按分类、名称或任务说明筛选，选择后右侧显示可临时编辑的完整提示词，只有点击复制按钮才写入剪贴板。模板不会被修改，提示词要求只有用户明确确认后才能写入项目记录。
+- 工作台共列出十九项提示词：七项科研提示词按文献研究、研究设计、研究复盘和研究规划分类，十二项软件提示词按软件安装、软件升级、版本发布和软件诊断分类。左侧可按分类、名称或任务说明筛选，选择后右侧显示可临时编辑的完整提示词，只有点击复制按钮才写入剪贴板。模板不会被修改；科研提示词要求用户明确确认后才写入项目记录，版本发布提示词在缺少具体版本号或发布确认时必须停止危险动作。
 - 任务页默认只列出时间、任务、结果和状态；历史 `publish_*` 与 `record_*_publication_*` 辅助任务折叠到主体任务详情，搜索和高级查看仍保留原始记录。
 - 记录页使用左侧列表、右侧完整详情的分栏布局，统一查看和筛选决策与探索；原始事件、Schema、日志哈希和刷新诊断集中在独立的只读“高级查看”窗口。
 - 任务、记录、提交与原始事件之间支持双向定位。

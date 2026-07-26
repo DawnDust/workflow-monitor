@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "project-maintenance-workflow"
+version = "1.0.0"
+description = "Git-backed maintenance lifecycle and research workflow manager"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "DawnDust"}]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/DawnDust/project-maintenance-template"
+Repository = "https://github.com/DawnDust/project-maintenance-template"
+Issues = "https://github.com/DawnDust/project-maintenance-template/issues"
+
+[project.scripts]
+project-hooks = "project_hooks.launcher:main"
+
+[tool.setuptools.packages.find]
+include = ["project_hooks*"]

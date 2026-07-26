@@ -21,24 +21,24 @@ from .read_model import (
 
 CLI_FALLBACK = (
     "可改用以下只读命令：\n"
-    "  python -m project_hooks context\n"
-    "  python -m project_hooks history\n"
-    "  python -m project_hooks decisions\n"
-    "  python -m project_hooks explorations\n"
-    "  python -m project_hooks catalog list\n"
-    "  python -m project_hooks db status"
+    "  project-hooks context\n"
+    "  project-hooks history\n"
+    "  project-hooks decisions\n"
+    "  project-hooks explorations\n"
+    "  project-hooks catalog list\n"
+    "  project-hooks db status"
 )
 
 CODEX_CATALOG_SCAN_PROMPT = """请立即在当前项目执行科研资料扫描和索引登记，不要只提供方案。
 
 执行范围和约束：
-1. 先运行 `python -m project_hooks context --format markdown`，并按 core_read_order 阅读项目规范。
+1. 先运行 `project-hooks context --format markdown`，并按 core_read_order 阅读项目规范。
 2. 只扫描项目内的五个标准目录：source/、data/、theory/、analysis/、outputs/。
-3. 先运行 `python -m project_hooks catalog scan --dry-run`；存在变化时再运行实际的 `catalog scan`。
+3. 先运行 `project-hooks catalog scan --dry-run`；存在变化时再运行实际的 `catalog scan`。
 4. 扫描应新增尚未登记的文件、更新已登记文件的大小和修改时间，并将消失文件标记为 missing。
 5. 如果已有活动维护任务，复用它并且绝不替用户结束；如果没有活动任务，仅在确有变化时创建一个
    YYYYMMDD_catalog_scan_NNN stable 小任务，完成扫描、状态更新、校验和 end。
-6. 完成后运行 `python -m project_hooks db verify`。不要修改代码，不要直接编辑 SQLite 或既有事件，
+6. 完成后运行 `project-hooks db verify`。不要修改代码，不要直接编辑 SQLite 或既有事件，
    不要读取 Zotero 的随机存储目录，不要提交或推送，不要操作项目外文件。
 7. 如果当前处于 Plan Mode 或规则禁止执行，请明确说明原因，不要绕过限制。
 
@@ -144,6 +144,207 @@ RESEARCH_PROMPT_TEMPLATES = {
     },
 }
 
+SOFTWARE_PROMPT_TEMPLATES = {
+    "software_install": {
+        "category": "软件安装",
+        "label": "安装工作流软件",
+        "task": "在当前电脑通过 pipx 从正式 GitHub Release 安装工作流软件，并验证全局命令可用。",
+        "sections": (
+            "当前 Python、pipx 与已安装版本",
+            "选用的正式 Release 和安装来源",
+            "实际执行的安装命令",
+            "project-hooks version 验证结果",
+            "PATH、权限或依赖问题",
+            "下一步初始化命令",
+        ),
+        "extra_rules": (
+            "从最新稳定 GitHub Release 的 manifest 确认 wheel 文件名和摘要，再执行 `pipx install <wheel-url>`。"
+            "已有安装时先报告当前版本，不得未经确认使用 `--force` 覆盖。"
+        ),
+    },
+    "project_initialize": {
+        "category": "软件安装",
+        "label": "初始化科研项目",
+        "task": "在指定的现有 Git 科研仓库首次初始化 project-hooks，并验证项目不包含工作流软件源码副本。",
+        "sections": (
+            "目标仓库和初始化前检查",
+            "project-hooks init 执行结果",
+            "新建的配置、规范与事件文件",
+            "Git Hook 和数据库检查结果",
+            "未被覆盖的既有科研文件",
+            "建议提交的初始化文件",
+        ),
+        "extra_rules": (
+            "目标必须是已有 Git 仓库；执行 `project-hooks init .` 后运行 `project-hooks check`。"
+            "确认项目中没有新增 `project_hooks/` 软件源码目录。"
+        ),
+    },
+    "legacy_project_adopt": {
+        "category": "软件安装",
+        "label": "接管旧版项目",
+        "task": "让已使用旧模板或已有事件日志的科研项目改由全局安装的 project-hooks 管理，同时保留历史。",
+        "sections": (
+            "旧项目结构、版本和事件日志状态",
+            "备份与只读预检",
+            "project-hooks install 接管结果",
+            "安装清单、Git Hook 和配置变化",
+            "事件日志与数据库一致性验证",
+            "仍需人工处理的冲突",
+        ),
+        "extra_rules": (
+            "不得覆盖旧 `maintenance/events.jsonl`；先执行 `project-hooks install` 建立安装清单，"
+            "再按检查结果决定是否执行 `project-hooks update`。"
+        ),
+    },
+    "software_version_status": {
+        "category": "软件升级",
+        "label": "查看软件版本",
+        "task": "只读检查启动器、核心、项目模板和数据库 schema 版本，并说明是否一致。",
+        "sections": (
+            "启动器版本",
+            "当前核心版本",
+            "项目模板版本",
+            "数据库 schema 版本",
+            "版本不一致或兼容性警告",
+            "建议的下一步",
+        ),
+        "extra_rules": "执行 `project-hooks version`；本提示词只读，不运行 update。",
+    },
+    "software_update_check": {
+        "category": "软件升级",
+        "label": "检查可用更新",
+        "task": "只读查询最新稳定 GitHub Release，判断当前核心和科研项目是否需要升级，不应用修改。",
+        "sections": (
+            "当前安装与项目版本",
+            "最新稳定版本",
+            "Release 来源和校验信息",
+            "是否需要升级",
+            "预期迁移和潜在冲突",
+            "建议执行的更新命令",
+        ),
+        "extra_rules": "执行 `project-hooks update --check`；本提示词不得应用更新。",
+    },
+    "software_update_latest": {
+        "category": "软件升级",
+        "label": "更新到最新版本",
+        "task": "在满足安全前提时执行 project-hooks update，将全局核心和当前科研项目更新到最新稳定版本。",
+        "sections": (
+            "更新前分支、活动任务和 Git 同步检查",
+            "原版本与目标版本",
+            "下载和 SHA-256 校验结果",
+            "配置、受管文件和数据库迁移结果",
+            "保留的自定义内容与冲突候选",
+            "更新后 check、db verify 和待提交文件",
+        ),
+        "extra_rules": (
+            "仅在 main、无活动任务、工作树干净且与 origin/main 同步时执行 `project-hooks update`。"
+            "升级完成后运行 `project-hooks check` 和 `project-hooks db verify`，不自动提交。"
+        ),
+    },
+    "software_update_target": {
+        "category": "软件升级",
+        "label": "更新到指定版本",
+        "task": "将工作流核心和当前科研项目升级或回退到用户明确指定的兼容版本，并验证迁移结果。",
+        "sections": (
+            "当前版本和用户指定目标版本",
+            "目标 Release 与兼容范围",
+            "升级或回退前安全检查",
+            "下载、摘要校验和迁移结果",
+            "冲突、回滚或兼容性问题",
+            "最终版本与项目健康状态",
+        ),
+        "extra_rules": "如果用户没有明确提供目标版本号，停止写操作并先询问；不得自行选择回退版本。",
+    },
+    "project_health_check": {
+        "category": "软件诊断",
+        "label": "验证项目健康",
+        "task": "只读验证工作流配置、永久事件源、SQLite 投影、Git Hook 和版本兼容性。",
+        "sections": (
+            "项目根目录与配置状态",
+            "project-hooks check 结果",
+            "project-hooks db verify 结果",
+            "事件数量、schema 和日志摘要",
+            "Git Hook 与版本兼容状态",
+            "问题分级和修复建议",
+        ),
+        "extra_rules": "依次执行 `project-hooks version`、`project-hooks check` 和 `project-hooks db verify`；不应用修复。",
+    },
+    "update_failure_diagnosis": {
+        "category": "软件诊断",
+        "label": "诊断升级失败",
+        "task": "分析 project-hooks 安装或升级失败的原因，优先使用只读证据并确认项目数据未受损。",
+        "sections": (
+            "失败命令、版本和完整错误",
+            "网络、Release、摘要和权限检查",
+            "项目分支、活动任务和工作树检查",
+            "配置、事件日志和数据库完整性",
+            "是否已自动回滚及当前可用版本",
+            "最小风险修复步骤",
+        ),
+        "extra_rules": "诊断阶段不得先删除数据库或缓存；先确认事件日志完整和自动回滚状态，再提出修复。",
+    },
+    "release_commit": {
+        "category": "版本发布",
+        "label": "创建新版本提交",
+        "task": "根据已完成改动和 SemVer 规则准备版本号、变更日志、构建与测试，并创建单一版本发布提交。",
+        "sections": (
+            "当前版本和待发布改动",
+            "补丁、功能或主版本判断依据",
+            "确认后的目标版本",
+            "版本文件和 CHANGELOG 更新",
+            "全量测试与 Release 资产构建结果",
+            "创建的版本提交及尚未执行的发布动作",
+        ),
+        "extra_rules": (
+            "如果用户没有明确确认目标版本号，先给出 SemVer 建议并停止在写操作前等待确认。"
+            "确认后同步更新 `pyproject.toml`、`project_hooks/__init__.py` 和 `CHANGELOG.md`，"
+            "运行全量测试并构建 Release 资产，提交消息使用 `release: v<version>`。"
+            "只创建版本提交，不推送、不创建标签、不创建 Release。"
+        ),
+    },
+    "github_release": {
+        "category": "版本发布",
+        "label": "发布 GitHub 新版本",
+        "task": "在用户明确确认版本号和发布后，推送已验证的版本提交与同名标签，等待 GitHub Actions 创建 Release。",
+        "sections": (
+            "用户确认的版本号与发布范围",
+            "main、origin/main 和工作树状态",
+            "版本文件、CHANGELOG 与标签一致性",
+            "发布前测试和资产检查",
+            "提交推送、标签创建与标签推送结果",
+            "GitHub Actions 和 Release 最终状态",
+        ),
+        "extra_rules": (
+            "没有用户对具体版本号和本次发布的明确确认时，不得推送或创建标签。"
+            "确认版本提交已经位于 main 且测试通过后，先推送 main，再创建并推送注释标签 `v<version>`，"
+            "等待 Release workflow 结束并核对三个正式资产。"
+            "不得移动或复用既有版本标签，不得自动合并分支。"
+        ),
+    },
+    "release_install_verify": {
+        "category": "版本发布",
+        "label": "验证正式版本安装",
+        "task": "从正式 GitHub Release 在隔离环境安装指定版本，并对一个临时 Git 仓库执行初始化和核心生命周期冒烟验证。",
+        "sections": (
+            "目标版本和 Release 资产",
+            "wheel、核心 ZIP 和 manifest 摘要校验",
+            "隔离环境安装结果",
+            "临时仓库 init、version 和 check",
+            "start、state update、end 生命周期冒烟",
+            "验证结论和临时文件清理状态",
+        ),
+        "extra_rules": (
+            "只使用临时隔离环境和临时 Git 仓库，从正式 wheel 安装后验证 "
+            "`init → version → check → start → state update → end`；不得拿真实科研项目做破坏性测试。"
+        ),
+    },
+}
+
+WORKBENCH_PROMPT_TEMPLATES = {
+    **RESEARCH_PROMPT_TEMPLATES,
+    **SOFTWARE_PROMPT_TEMPLATES,
+}
+
 RESEARCH_PROMPT_COMMON_RULES = """请遵守以下规则：
 1. 只使用当前 Codex 对话中已经选择的文件、已有消息和我提供的资料作为已有证据。
 2. 如果材料不足，先明确指出还需要选择或提供哪些文件；停止补造事实、数据、引文或实验结果。
@@ -151,19 +352,37 @@ RESEARCH_PROMPT_COMMON_RULES = """请遵守以下规则：
 4. 论述时尽量引用资料 ID、标题或项目相对路径，使结论可以回查。
 5. 先完成分析，再单独列出建议保存的资料条目、资料关系、项目决策或探索记录。
 6. 未经我在对话中明确确认，不得修改项目文件、数据库、事件或 Git 状态。
-7. 如果我确认记录，再先运行 `python -m project_hooks context --format markdown` 并按 core_read_order 阅读规范；复用已有活动任务且不替我结束，或按规范创建 stable 任务。只通过现有 catalog、decision、attempt 和 state 命令记录，完成后更新项目概览；仅结束由你创建的任务。
+7. 如果我确认记录，再先运行 `project-hooks context --format markdown` 并按 core_read_order 阅读规范；复用已有活动任务且不替我结束，或按规范创建 stable 任务。只通过现有 catalog、decision、attempt 和 state 命令记录，完成后更新项目概览；仅结束由你创建的任务。
+"""
+
+SOFTWARE_PROMPT_COMMON_RULES = """请遵守以下规则：
+1. 先确认当前操作针对工作流软件开发仓库、普通科研项目还是临时测试仓库，不得混淆目标。
+2. 除首次初始化外，先运行 `project-hooks context --format markdown` 并按 core_read_order 阅读规范。
+3. 先做只读预检；任何写操作都必须遵守现有任务生命周期、分支限制、活动任务和 Git 同步要求。
+4. 不得手工改写 `maintenance/events.jsonl` 既有行、直接编辑 SQLite、删除活动状态或绕过 `end`。
+5. 只使用正式 GitHub Release；校验下载摘要，不从未发布的 main 分支替代稳定版本。
+6. 除“创建新版本提交”和“发布 GitHub 新版本”外，不得自动提交、推送或创建标签；任何操作都不得自动合并。
+7. 遇到缺少版本号、用户确认、凭据、干净工作树或同步 main 等前提时，停止危险动作并明确报告。
+8. 完成后列出实际命令、版本变化、验证结果、文件变化、冲突和仍需用户执行的步骤。
 """
 
 
 def build_research_prompt(template_id: str) -> str:
-    template = RESEARCH_PROMPT_TEMPLATES.get(template_id)
+    template = WORKBENCH_PROMPT_TEMPLATES.get(template_id)
     if template is None:
         raise DashboardError(f"未知的科研工作台操作：{template_id}")
     sections = "\n".join(f"{index}. {label}" for index, label in enumerate(template["sections"], 1))
+    rules = (
+        RESEARCH_PROMPT_COMMON_RULES
+        if template_id in RESEARCH_PROMPT_TEMPLATES
+        else SOFTWARE_PROMPT_COMMON_RULES
+    )
+    extra_rules = template.get("extra_rules")
+    extra = f"\n专项约束：{extra_rules}\n" if extra_rules else ""
     return (
         f"请立即执行“{template['label']}”，不要只提供行动方案。\n\n"
         f"任务目标：{template['task']}\n\n"
-        f"{RESEARCH_PROMPT_COMMON_RULES}\n"
+        f"{rules}{extra}\n"
         f"请按以下结构输出：\n{sections}\n"
     )
 
@@ -171,7 +390,7 @@ def build_research_prompt(template_id: str) -> str:
 def copy_research_prompt(clipboard, prompt: str) -> str:
     clipboard.clipboard_clear()
     clipboard.clipboard_append(prompt)
-    return "科研提示词已复制，请粘贴到当前 Codex 对话框并发送。"
+    return "工作台提示词已复制，请粘贴到当前 Codex 对话框并发送。"
 
 
 def copy_catalog_scan_prompt(clipboard) -> str:
@@ -211,7 +430,7 @@ def research_prompt_records(query: str = "") -> list[dict]:
             "label": template["label"],
             "task": template["task"],
         }
-        for template_id, template in RESEARCH_PROMPT_TEMPLATES.items()
+        for template_id, template in WORKBENCH_PROMPT_TEMPLATES.items()
     ]
     return filter_records(records, query)
 
@@ -859,7 +1078,7 @@ class ResearchWorkbenchPage:
         ttk.Entry(controls, textvariable=self.query, width=34).pack(side="left", padx=(6, 8))
         ttk.Label(
             controls,
-            text="请先在 Codex 对话中选择需要的文件。",
+            text="科研分析先选择文件；软件操作先确认目标仓库。",
         ).pack(side="left")
         self.query.trace_add("write", lambda *_: self.render_list())
 

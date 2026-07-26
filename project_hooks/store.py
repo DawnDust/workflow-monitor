@@ -10,10 +10,10 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone as fixed_timezone
 from pathlib import Path
 from typing import Iterable, Iterator
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 SCHEMA_VERSION = 2
@@ -22,6 +22,20 @@ SUPPORTED_EVENT_SCHEMA_VERSIONS = (1, 2)
 
 class StoreError(RuntimeError):
     pass
+
+
+def resolve_timezone(name: str):
+    """Resolve configured time zones even in minimal Windows Python installs."""
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        if name == "Asia/Shanghai":
+            return fixed_timezone(timedelta(hours=8), name)
+        if name in {"UTC", "Etc/UTC"}:
+            return fixed_timezone.utc
+        raise StoreError(
+            f"系统缺少时区数据 {name}；请安装 tzdata 或改用 Asia/Shanghai/UTC"
+        )
 
 
 def canonical_json(value: object) -> str:
@@ -42,7 +56,7 @@ def new_event(
     event_id: str | None = None,
     occurred_at: str | None = None,
 ) -> dict:
-    now = datetime.now(ZoneInfo(timezone))
+    now = datetime.now(resolve_timezone(timezone))
     return {
         "event_id": event_id or f"{now.strftime('%Y%m%d%H%M%S%f')}-{uuid.uuid4().hex}",
         "schema_version": SCHEMA_VERSION,

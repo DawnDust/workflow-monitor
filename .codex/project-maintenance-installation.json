@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "core_version": "1.0.0",
+  "template_version": 1,
+  "managed_files": {
+    ".githooks/pre-commit": {
+      "hash": "ce122717ccda3211fe2a06b748fe67ec96815321a15187ade20339185a58148f",
+      "customized": false
+    },
+    "maintenance/README.md": {
+      "hash": "1acc424d7c3d9d17a2338e39474a2a5853db834a478ddf09f6b5b2cd9773a978",
+      "customized": true
+    },
+    "AGENTS.md:block": {
+      "hash": "766b2f93d00922f2ef0f7e9155969092bf86e32feea39cc5c9c95dba14584931",
+      "customized": true
+    },
+    ".gitignore:block": {
+      "hash": "aec347ba12c51d79d47a567d3a55375030378f950b6def6084345af0e40d4f08",
+      "customized": false
+    },
+    ".gitattributes:block": {
+      "hash": "df7d84e65dda36940e02131bb80ff2761e096db2ec51474701c6a50be482c3fb",
+      "customized": true
+    }
+  }
+}

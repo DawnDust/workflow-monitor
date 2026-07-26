@@ -21,6 +21,8 @@ from project_hooks.dashboard import (
     DashboardError,
     PRIMARY_TABS,
     RESEARCH_PROMPT_TEMPLATES,
+    SOFTWARE_PROMPT_TEMPLATES,
+    WORKBENCH_PROMPT_TEMPLATES,
     ResearchWorkbenchPage,
     RecordsPage,
     TablePage,
@@ -1236,7 +1238,7 @@ class DashboardPresentationTests(unittest.TestCase):
     def test_research_prompt_list_filters_category_label_and_task_in_stable_order(self) -> None:
         self.assertEqual(
             [record["template_id"] for record in research_prompt_records()],
-            list(RESEARCH_PROMPT_TEMPLATES),
+            list(WORKBENCH_PROMPT_TEMPLATES),
         )
         self.assertEqual(
             [record["label"] for record in research_prompt_records("文献研究")],
@@ -1247,10 +1249,39 @@ class DashboardPresentationTests(unittest.TestCase):
             ["研究方法设计"],
         )
         self.assertEqual(
-            [record["label"] for record in research_prompt_records("执行")],
-            ["研究方法设计", "下一步研究计划"],
+            [record["label"] for record in research_prompt_records("可以立即开始执行")],
+            ["下一步研究计划"],
         )
         self.assertEqual(research_prompt_records("不存在的筛选词"), [])
+
+    def test_software_workbench_templates_cover_install_update_release_and_diagnostics(self) -> None:
+        self.assertEqual(
+            [template["label"] for template in SOFTWARE_PROMPT_TEMPLATES.values()],
+            [
+                "安装工作流软件", "初始化科研项目", "接管旧版项目",
+                "查看软件版本", "检查可用更新", "更新到最新版本", "更新到指定版本",
+                "验证项目健康", "诊断升级失败",
+                "创建新版本提交", "发布 GitHub 新版本", "验证正式版本安装",
+            ],
+        )
+        self.assertEqual(
+            [record["label"] for record in research_prompt_records("版本发布")],
+            ["创建新版本提交", "发布 GitHub 新版本", "验证正式版本安装"],
+        )
+        for template_id, template in SOFTWARE_PROMPT_TEMPLATES.items():
+            prompt = build_research_prompt(template_id)
+            self.assertIn(template["label"], prompt)
+            self.assertIn("先做只读预检", prompt)
+            self.assertIn("正式 GitHub Release", prompt)
+            self.assertIn("不得手工改写 `maintenance/events.jsonl`", prompt)
+            self.assertIn("实际命令", prompt)
+            for section in template["sections"]:
+                self.assertIn(section, prompt)
+        self.assertIn("没有明确提供目标版本号", build_research_prompt("software_update_target"))
+        self.assertIn("只创建版本提交，不推送", build_research_prompt("release_commit"))
+        release = build_research_prompt("github_release")
+        self.assertIn("具体版本号和本次发布的明确确认", release)
+        self.assertIn("不得移动或复用既有版本标签", release)
 
     def test_research_workbench_uses_split_list_and_selection_does_not_copy(self) -> None:
         source = inspect.getsource(ResearchWorkbenchPage)
@@ -1567,7 +1598,7 @@ class DashboardPresentationTests(unittest.TestCase):
 
     def test_tkinter_unavailable_has_cli_fallback(self) -> None:
         with patch("project_hooks.dashboard.import_tk", side_effect=DashboardError("missing\n" + CLI_FALLBACK)):
-            with self.assertRaisesRegex(DashboardError, "python -m project_hooks context"):
+            with self.assertRaisesRegex(DashboardError, "project-hooks context"):
                 launch_dashboard(object(), 0)
 
 

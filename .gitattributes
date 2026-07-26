@@ -1,3 +1,9 @@
+# project-maintenance-hooks:begin
 .githooks/* text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+AGENTS.md text eol=lf
+maintenance/*.md text eol=lf
 *.py text eol=lf
 maintenance/events.jsonl text eol=lf merge=union
+# project-maintenance-hooks:end
