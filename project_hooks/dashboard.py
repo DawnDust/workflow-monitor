@@ -52,6 +52,7 @@ class DashboardError(RuntimeError):
 
 RESEARCH_PROMPT_TEMPLATES = {
     "literature_review": {
+        "category": "文献研究",
         "label": "文献精读",
         "task": "深入阅读并评估给定文献或资料，提炼可直接服务当前研究的内容。",
         "sections": (
@@ -64,6 +65,7 @@ RESEARCH_PROMPT_TEMPLATES = {
         ),
     },
     "literature_comparison": {
+        "category": "文献研究",
         "label": "文献比较",
         "task": "比较给定文献或资料，找出共识、分歧、证据差异和可推进的研究缺口。",
         "sections": (
@@ -76,6 +78,7 @@ RESEARCH_PROMPT_TEMPLATES = {
         ),
     },
     "research_ideas": {
+        "category": "研究设计",
         "label": "研究问题与思路",
         "task": "基于现有资料提出有依据、可验证且适合当前项目的研究问题与研究思路。",
         "sections": (
@@ -88,6 +91,7 @@ RESEARCH_PROMPT_TEMPLATES = {
         ),
     },
     "method_design": {
+        "category": "研究设计",
         "label": "研究方法设计",
         "task": "为当前研究问题设计可执行、可复核的研究方法，并说明关键取舍。",
         "sections": (
@@ -100,6 +104,7 @@ RESEARCH_PROMPT_TEMPLATES = {
         ),
     },
     "process_review": {
+        "category": "研究复盘",
         "label": "研究过程复盘",
         "task": "复盘当前研究过程，整理已完成工作、证据、决策、问题和下一步。",
         "sections": (
@@ -112,6 +117,7 @@ RESEARCH_PROMPT_TEMPLATES = {
         ),
     },
     "conclusion_review": {
+        "category": "研究复盘",
         "label": "结论与局限",
         "task": "从现有证据中提炼可靠结论，同时审查局限、边界条件和替代解释。",
         "sections": (
@@ -124,6 +130,7 @@ RESEARCH_PROMPT_TEMPLATES = {
         ),
     },
     "next_research_plan": {
+        "category": "研究规划",
         "label": "下一步研究计划",
         "task": "根据当前研究状态生成按优先级排列、可以立即开始执行的下一步研究计划。",
         "sections": (
@@ -194,6 +201,19 @@ def filter_records(records: list[dict], query: str) -> list[dict]:
     if not needle:
         return list(records)
     return [record for record in records if needle in json.dumps(record, ensure_ascii=False, default=str).casefold()]
+
+
+def research_prompt_records(query: str = "") -> list[dict]:
+    records = [
+        {
+            "template_id": template_id,
+            "category": template["category"],
+            "label": template["label"],
+            "task": template["task"],
+        }
+        for template_id, template in RESEARCH_PROMPT_TEMPLATES.items()
+    ]
+    return filter_records(records, query)
 
 
 def global_search(records: list[dict], query: str) -> list[dict]:
@@ -486,10 +506,12 @@ class TablePage:
     def __init__(self, parent, tk, ttk, scrolledtext, *, columns: list[tuple[str, str, int]],
                  detail: Callable[[dict], str], refresh: Callable[[], None],
                  activate: Callable[[dict], None] | None = None, show_query: bool = True,
-                 activate_label: str = "打开记录", show_refresh: bool = False):
+                 activate_label: str = "打开记录", show_refresh: bool = False,
+                 split_detail: bool = False):
         self.tk, self.ttk = tk, ttk
         self.frame = ttk.Frame(parent, padding=8)
         self.columns = columns
+        self.split_detail = split_detail
         self.detail_formatter = detail
         self.refresh_callback = refresh
         self.activate_callback = activate
@@ -514,13 +536,27 @@ class TablePage:
         if show_refresh:
             ttk.Button(controls, text="刷新", command=refresh).pack(side="left", padx=(6, 0))
 
-        table_frame = ttk.Frame(self.frame)
-        table_frame.pack(fill="both", expand=True)
+        if split_detail:
+            self.panes = ttk.Panedwindow(self.frame, orient="horizontal")
+            self.panes.pack(fill="both", expand=True)
+            table_frame = ttk.Frame(self.panes, padding=(0, 0, 6, 0))
+            detail_frame = ttk.Frame(self.panes, padding=(6, 0, 0, 0))
+            self.panes.add(table_frame, weight=3)
+            self.panes.add(detail_frame, weight=2)
+        else:
+            self.panes = None
+            table_frame = ttk.Frame(self.frame)
+            table_frame.pack(fill="both", expand=True)
+            detail_frame = self.frame
         self.tree = ttk.Treeview(table_frame, columns=keys, show="headings", height=13)
-        scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        vertical = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        horizontal = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal.grid(row=1, column=0, sticky="ew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
         for key, label, width in columns:
             self.tree.heading(key, text=label, command=lambda selected=key: self.sort(selected))
             self.tree.column(key, width=width, minwidth=70, stretch=True)
@@ -528,9 +564,11 @@ class TablePage:
         if activate:
             self.tree.bind("<Double-1>", lambda _event: self.activate_selected())
 
-        ttk.Label(self.frame, text="详情").pack(anchor="w", pady=(8, 3))
-        self.detail = scrolledtext.ScrolledText(self.frame, height=10, wrap="word")
-        self.detail.pack(fill="both", expand=False)
+        ttk.Label(
+            detail_frame, text="详情",
+        ).pack(anchor="w", pady=((0 if split_detail else 8), 3))
+        self.detail = scrolledtext.ScrolledText(detail_frame, height=10, wrap="word")
+        self.detail.pack(fill="both", expand=split_detail)
         self.detail.configure(state="disabled")
 
     def set_records(self, records: list[dict]) -> None:
@@ -661,7 +699,7 @@ class CatalogPage:
                 ("kind_label", "类型", 75), ("status", "状态", 85),
                 ("title", "标题", 300), ("path", "路径", 300), ("updated_at", "更新时间", 175),
             ],
-            detail=self.detail_text, refresh=refresh, show_refresh=True,
+            detail=self.detail_text, refresh=refresh, show_refresh=True, split_detail=True,
         )
         self.table.frame.pack(fill="both", expand=True)
         self.kind.trace_add("write", lambda *_: self.apply_filters())
@@ -811,46 +849,115 @@ class ResearchWorkbenchPage:
     ):
         self.frame = ttk.Frame(parent, padding=8)
         self.notify = notify
+        self.visible: list[dict] = []
+        self.current_template_id: str | None = None
 
-        header = ttk.Frame(self.frame)
-        header.pack(fill="x", pady=(0, 8))
+        controls = ttk.Frame(self.frame)
+        controls.pack(fill="x", pady=(0, 6))
+        ttk.Label(controls, text="筛选提示词").pack(side="left")
+        self.query = tk.StringVar()
+        ttk.Entry(controls, textvariable=self.query, width=34).pack(side="left", padx=(6, 8))
         ttk.Label(
-            header,
-            text="请先在 Codex 对话中选择需要的文件，再点击科研操作。",
+            controls,
+            text="请先在 Codex 对话中选择需要的文件。",
         ).pack(side="left")
-        ttk.Button(header, text="复制当前文本", command=self.copy_current).pack(side="right")
+        self.query.trace_add("write", lambda *_: self.render_list())
 
-        actions = ttk.LabelFrame(self.frame, text="常用科研操作", padding=8)
-        actions.pack(fill="x", pady=(0, 8))
-        for index, (template_id, template) in enumerate(RESEARCH_PROMPT_TEMPLATES.items()):
-            ttk.Button(
-                actions,
-                text=template["label"],
-                command=lambda selected=template_id: self.generate(selected),
-                width=18,
-            ).grid(row=index // 4, column=index % 4, padx=4, pady=4, sticky="ew")
-        for column in range(4):
-            actions.columnconfigure(column, weight=1)
+        panes = ttk.Panedwindow(self.frame, orient="horizontal")
+        panes.pack(fill="both", expand=True)
+        list_frame = ttk.Frame(panes, padding=(0, 0, 6, 0))
+        detail_frame = ttk.Frame(panes, padding=(6, 0, 0, 0))
+        panes.add(list_frame, weight=2)
+        panes.add(detail_frame, weight=3)
 
-        ttk.Label(
-            self.frame,
-            text="提示词预览（可临时编辑；编辑内容不会保存为模板）",
-        ).pack(anchor="w", pady=(0, 4))
-        self.preview = scrolledtext.ScrolledText(self.frame, wrap="word")
+        self.tree = ttk.Treeview(
+            list_frame, columns=("category", "label"), show="headings", height=18,
+        )
+        for key, label, width in (
+            ("category", "类型", 105),
+            ("label", "提示词", 230),
+        ):
+            self.tree.heading(key, text=label)
+            self.tree.column(key, width=width, minwidth=80, stretch=True)
+        vertical = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vertical.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vertical.grid(row=0, column=1, sticky="ns")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        self.tree.bind("<<TreeviewSelect>>", self.select_from_tree)
+
+        detail_controls = ttk.Frame(detail_frame)
+        detail_controls.pack(fill="x", pady=(0, 4))
+        ttk.Label(detail_controls, text="完整提示词").pack(side="left")
+        ttk.Button(
+            detail_controls, text="复制提示词", command=self.copy_current,
+        ).pack(side="right")
+        self.preview = scrolledtext.ScrolledText(detail_frame, wrap="word")
         self.preview.pack(fill="both", expand=True)
+        self.render_list()
 
-    def generate(self, template_id: str) -> None:
+    def render_list(self) -> None:
+        previous = self.current_template_id
+        self.visible = research_prompt_records(self.query.get())
+        self.tree.delete(*self.tree.get_children())
+        selected_iid = None
+        for index, record in enumerate(self.visible):
+            iid = f"prompt-{index}"
+            self.tree.insert(
+                "", "end", iid=iid,
+                values=(record["category"], record["label"]),
+            )
+            if record["template_id"] == previous:
+                selected_iid = iid
+        if selected_iid is None and self.visible:
+            selected_iid = "prompt-0"
+            self.current_template_id = self.visible[0]["template_id"]
+        if selected_iid is not None:
+            self.tree.selection_set(selected_iid)
+            self.tree.focus(selected_iid)
+            self.tree.see(selected_iid)
+            self.render_detail()
+        else:
+            self.current_template_id = None
+            self._set_preview("没有匹配的提示词。")
+
+    def select_from_tree(self, _event=None) -> None:
+        selection = self.tree.selection()
+        if not selection:
+            self.current_template_id = None
+            self._set_preview("请选择左侧提示词。")
+            return
         try:
-            prompt = build_research_prompt(template_id)
+            record = self.visible[int(selection[0].split("-", 1)[1])]
+        except (IndexError, ValueError):
+            self.current_template_id = None
+            self._set_preview("请选择左侧提示词。")
+            return
+        self.current_template_id = record["template_id"]
+        self.render_detail()
+
+    def render_detail(self) -> None:
+        if self.current_template_id is None:
+            self._set_preview("请选择左侧提示词。")
+            return
+        try:
+            prompt = build_research_prompt(self.current_template_id)
         except DashboardError as exc:
+            self.current_template_id = None
+            self._set_preview(str(exc))
             self.notify(str(exc))
             return
+        self._set_preview(prompt)
+
+    def _set_preview(self, text: str) -> None:
         self.preview.delete("1.0", "end")
-        self.preview.insert("1.0", prompt)
-        message = copy_research_prompt(self.frame, prompt)
-        self.notify(message)
+        self.preview.insert("1.0", text)
 
     def copy_current(self) -> None:
+        if self.current_template_id is None:
+            self.notify("当前没有选中的科研提示词。")
+            return
         prompt = self.preview.get("1.0", "end-1c")
         if not prompt.strip():
             self.notify("当前没有可复制的科研提示词。")
@@ -1089,6 +1196,7 @@ class RecordsPage:
             columns=[("kind_label", "类型", 80), ("occurred_at", "时间", 180), ("branch", "分支", 150),
                      ("title", "标题", 390), ("result", "结果", 110)],
             detail=detail, refresh=lambda: None, activate=open_task, activate_label="打开关联任务",
+            split_detail=True,
         )
         self.table.frame.pack(fill="both", expand=True, padx=0, pady=0)
 
@@ -1460,7 +1568,7 @@ class DashboardApp:
             columns=[("kind_label", "类型", 80), ("occurred_at", "时间", 180), ("branch", "分支", 150),
                      ("title", "标题", 320), ("summary", "摘要", 250)],
             detail=self.search_result_detail, refresh=self.refresh,
-            activate=self.open_search_result, show_query=False,
+            activate=self.open_search_result, show_query=False, split_detail=True,
         )
         self.notebook.add(self.search_page.frame, text="搜索")
 

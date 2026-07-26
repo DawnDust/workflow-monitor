@@ -22,6 +22,9 @@ from project_hooks.dashboard import (
     PRIMARY_TABS,
     RESEARCH_PROMPT_TEMPLATES,
     ResearchWorkbenchPage,
+    RecordsPage,
+    TablePage,
+    AdvancedWindow,
     advanced_summary,
     build_research_prompt,
     catalog_overview_text,
@@ -36,6 +39,7 @@ from project_hooks.dashboard import (
     record_identity,
     record_location,
     reveal_catalog_file,
+    research_prompt_records,
     result_label,
     short,
     sort_records,
@@ -1180,6 +1184,16 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(records[0]["title"], "test layout")
         self.assertEqual(records[1]["task_id"], "task-1")
 
+    def test_search_catalog_and_records_use_horizontal_detail_without_changing_advanced_view(self) -> None:
+        table_source = inspect.getsource(TablePage)
+        self.assertIn("split_detail: bool = False", table_source)
+        self.assertIn("Panedwindow", table_source)
+        self.assertIn('orient="horizontal"', table_source)
+        self.assertIn("split_detail=True", inspect.getsource(CatalogPage))
+        self.assertIn("split_detail=True", inspect.getsource(RecordsPage))
+        self.assertIn("split_detail=True", inspect.getsource(DashboardApp))
+        self.assertNotIn("split_detail=True", inspect.getsource(AdvancedWindow))
+
     def test_research_workbench_templates_include_structure_and_safety_rules(self) -> None:
         self.assertEqual(
             [template["label"] for template in RESEARCH_PROMPT_TEMPLATES.values()],
@@ -1187,6 +1201,10 @@ class DashboardPresentationTests(unittest.TestCase):
                 "文献精读", "文献比较", "研究问题与思路", "研究方法设计",
                 "研究过程复盘", "结论与局限", "下一步研究计划",
             ],
+        )
+        self.assertEqual(
+            [template["category"] for template in RESEARCH_PROMPT_TEMPLATES.values()],
+            ["文献研究", "文献研究", "研究设计", "研究设计", "研究复盘", "研究复盘", "研究规划"],
         )
         for template_id, template in RESEARCH_PROMPT_TEMPLATES.items():
             prompt = build_research_prompt(template_id)
@@ -1214,6 +1232,143 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertNotIn("visible_items", parameters)
         self.assertNotIn("relations", parameters)
         self.assertNotIn("overview", parameters)
+
+    def test_research_prompt_list_filters_category_label_and_task_in_stable_order(self) -> None:
+        self.assertEqual(
+            [record["template_id"] for record in research_prompt_records()],
+            list(RESEARCH_PROMPT_TEMPLATES),
+        )
+        self.assertEqual(
+            [record["label"] for record in research_prompt_records("文献研究")],
+            ["文献精读", "文献比较"],
+        )
+        self.assertEqual(
+            [record["label"] for record in research_prompt_records("方法设计")],
+            ["研究方法设计"],
+        )
+        self.assertEqual(
+            [record["label"] for record in research_prompt_records("执行")],
+            ["研究方法设计", "下一步研究计划"],
+        )
+        self.assertEqual(research_prompt_records("不存在的筛选词"), [])
+
+    def test_research_workbench_uses_split_list_and_selection_does_not_copy(self) -> None:
+        source = inspect.getsource(ResearchWorkbenchPage)
+        self.assertIn("Panedwindow", source)
+        self.assertIn("Treeview", source)
+        self.assertIn('"category", "label"', source)
+        self.assertNotIn("LabelFrame", source)
+
+        class Tree:
+            def __init__(self):
+                self.selected = ("prompt-0",)
+
+            def selection(self):
+                return self.selected
+
+        class Preview:
+            def __init__(self):
+                self.value = ""
+
+            def delete(self, *_args):
+                self.value = ""
+
+            def insert(self, _index, value):
+                self.value = value
+
+            def get(self, *_args):
+                return self.value
+
+        class Frame:
+            def __init__(self):
+                self.copies = 0
+                self.value = ""
+
+            def clipboard_clear(self):
+                self.copies += 1
+                self.value = ""
+
+            def clipboard_append(self, value):
+                self.value += value
+
+        page = ResearchWorkbenchPage.__new__(ResearchWorkbenchPage)
+        page.visible = research_prompt_records()
+        page.current_template_id = None
+        page.tree = Tree()
+        page.preview = Preview()
+        page.frame = Frame()
+        page.notify = lambda _message: None
+        page.select_from_tree()
+        self.assertEqual(page.current_template_id, "literature_review")
+        self.assertIn("文献精读", page.preview.value)
+        self.assertEqual(page.frame.copies, 0)
+
+        original = deepcopy(RESEARCH_PROMPT_TEMPLATES)
+        page.preview.value = "临时编辑"
+        page.tree.selected = ("prompt-1",)
+        page.select_from_tree()
+        self.assertEqual(page.current_template_id, "literature_comparison")
+        self.assertEqual(page.preview.value, build_research_prompt("literature_comparison"))
+        self.assertEqual(RESEARCH_PROMPT_TEMPLATES, original)
+        page.copy_current()
+        self.assertEqual(page.frame.copies, 1)
+        self.assertEqual(page.frame.value, page.preview.value)
+
+    def test_research_workbench_defaults_to_first_prompt_and_handles_empty_filter(self) -> None:
+        class Query:
+            value = ""
+
+            def get(self):
+                return self.value
+
+        class Tree:
+            def __init__(self):
+                self.rows = []
+                self.selected = None
+
+            def get_children(self):
+                return tuple(row[0] for row in self.rows)
+
+            def delete(self, *_items):
+                self.rows = []
+
+            def insert(self, _parent, _where, *, iid, values):
+                self.rows.append((iid, values))
+
+            def selection_set(self, iid):
+                self.selected = iid
+
+            def focus(self, _iid):
+                pass
+
+            def see(self, _iid):
+                pass
+
+        class Preview:
+            def __init__(self):
+                self.value = ""
+
+            def delete(self, *_args):
+                self.value = ""
+
+            def insert(self, _index, value):
+                self.value = value
+
+        page = ResearchWorkbenchPage.__new__(ResearchWorkbenchPage)
+        page.query = Query()
+        page.tree = Tree()
+        page.preview = Preview()
+        page.current_template_id = None
+        page.notify = lambda _message: None
+        page.render_list()
+        self.assertEqual(page.current_template_id, "literature_review")
+        self.assertEqual(page.tree.selected, "prompt-0")
+        self.assertEqual(page.preview.value, build_research_prompt("literature_review"))
+
+        page.query.value = "不存在的筛选词"
+        page.render_list()
+        self.assertIsNone(page.current_template_id)
+        self.assertEqual(page.preview.value, "没有匹配的提示词。")
 
     def test_next_research_plan_is_actionable_and_does_not_auto_execute(self) -> None:
         prompt = build_research_prompt("next_research_plan")
