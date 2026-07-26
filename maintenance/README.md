@@ -26,7 +26,8 @@
 - 事件日志只追加，不手工改写既有行；SQLite 不纳入 Git，也不是唯一备份。
 - `main` 只保存稳定、可复用、已验证内容；不确定改动使用独立探索分支。
 - Hook 只管理本地状态和分支，不自动 push、创建 PR 或合并。
-- Dashboard 只读，不写数据库、不修改日志，也不执行 Git 或网络操作。
+- Dashboard 完全只读，不直接写数据库、修改日志、执行 Git 或启动 Codex；资料页可以复制固定扫描提示词，
+  由用户自行粘贴到 Codex 对话框。
 
 ### 日常入口
 
@@ -104,13 +105,17 @@ python -m project_hooks dashboard
 ```powershell
 python -m project_hooks catalog scan --dry-run
 python -m project_hooks catalog scan
+python -m project_hooks catalog ingest <文件> --kind literature
 python -m project_hooks catalog add --kind theory --title "理论名称" --summary "简短说明"
+python -m project_hooks catalog bulk-update --tag to-read --add-tag reviewed
 python -m project_hooks catalog link <source-id> supports <target-id>
 python -m project_hooks catalog list --kind literature
 python -m project_hooks catalog context --tag core --format markdown
 ```
 
 默认扫描将 `source/`、`data/`、`theory/`、`analysis/`、`outputs/` 依次映射到五类资料。路径必须位于项目目录内；扫描不会删除记录，文件消失时只标记为 `missing`。条目使用 `archive` 和 `restore` 软归档，关系使用 `link` 和 `unlink` 维护。
+
+`catalog ingest` 对标准目录内文件自动推断类型；项目外文件需要 `--kind`，并复制到对应标准目录。没有活动任务时命令自动包装一个小型生命周期，已有活动任务时只登记资料。`catalog bulk-update` 可按 ID、类型、状态、标签、关键词或关系筛选后统一补充标签、摘要和来源；批量更新全部资料必须显式使用 `--all`。
 
 `context` 和 Dashboard 分开显示两个断点：持久化的“工作断点”说明最后完成到哪里；只读“真实断点”实时比较本地 HEAD 与本地 `origin/main` 跟踪引用，显示同步、领先、落后、分叉或不可用。该检查不执行 `fetch` 或其他网络操作。
 
@@ -122,6 +127,9 @@ python -m project_hooks catalog context --tag core --format markdown
 - 概览按状态、活动任务、阻塞、下一步和 Git 同步顺序显示行动信息；当前目标和最近完成记录各压缩为一行，完整判决、断点和历史仍可从其他页面查看。
 - 跨科研资料、任务、决策、探索和提交的搜索，以及最近任务、失败探索和未合并分支快捷筛选。
 - 资料页按类型、状态和标签筛选，显示摘要、路径、来源、扩展信息、关系和缺失文件警告，并可复制路径或 AI 上下文。
+- 概览显示五类资料数量、缺失与归档数量和最近新增资料；资料页可在本机文件管理器中打开文件所在位置。
+- 资料页的“复制 Codex 扫描提示词”会显示完整提示词并写入剪贴板；用户将其粘贴到任意合适的
+  Codex 对话后，由 Codex 按提示遵循维护生命周期，Dashboard 本身不检测或启动 Codex。
 - 任务页默认只列出时间、任务、结果和状态；历史 `publish_*` 与 `record_*_publication_*` 辅助任务折叠到主体任务详情，搜索和高级查看仍保留原始记录。
 - 记录页统一查看和筛选决策与探索；原始事件、Schema、日志哈希和刷新诊断集中在独立的只读“高级查看”窗口。
 - 任务、记录、提交与原始事件之间支持双向定位。

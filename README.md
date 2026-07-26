@@ -39,5 +39,7 @@ python -m project_hooks check
 前五个目录按需创建，不使用占位文件。完整生命周期、分支策略、高级命令和记录模型见 [maintenance/README.md](./maintenance/README.md)。
 
 科研资料文件仍保存在上述目录，SQLite 只保存索引、简短说明、标签和关系。使用
-`catalog scan` 扫描项目文件，使用 `catalog add|update|link` 补充信息，使用
+`catalog ingest <文件>` 一步复制并登记单个文件，使用 `catalog scan` 扫描项目文件，
+也可在 Dashboard 资料页一键复制扫描提示词，再粘贴到 Codex 对话中执行扫描登记。
+使用 `catalog add|update|bulk-update|link` 补充信息，使用
 `catalog context` 直接向终端输出供 AI 使用的 Markdown 或 JSON 上下文。

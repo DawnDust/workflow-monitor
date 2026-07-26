@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import platform
+import subprocess
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 from typing import Callable
 
 from .catalog import CATALOG_KIND_LABELS, render_context_markdown
@@ -26,9 +29,31 @@ CLI_FALLBACK = (
     "  python -m project_hooks db status"
 )
 
+CODEX_CATALOG_SCAN_PROMPT = """请立即在当前项目执行科研资料扫描和索引登记，不要只提供方案。
+
+执行范围和约束：
+1. 先运行 `python -m project_hooks context --format markdown`，并按 core_read_order 阅读项目规范。
+2. 只扫描项目内的五个标准目录：source/、data/、theory/、analysis/、outputs/。
+3. 先运行 `python -m project_hooks catalog scan --dry-run`；存在变化时再运行实际的 `catalog scan`。
+4. 扫描应新增尚未登记的文件、更新已登记文件的大小和修改时间，并将消失文件标记为 missing。
+5. 如果已有活动维护任务，复用它并且绝不替用户结束；如果没有活动任务，仅在确有变化时创建一个
+   YYYYMMDD_catalog_scan_NNN stable 小任务，完成扫描、状态更新、校验和 end。
+6. 完成后运行 `python -m project_hooks db verify`。不要修改代码，不要直接编辑 SQLite 或既有事件，
+   不要读取 Zotero 的随机存储目录，不要提交或推送，不要操作项目外文件。
+7. 如果当前处于 Plan Mode 或规则禁止执行，请明确说明原因，不要绕过限制。
+
+完成后请简短报告新增、更新、缺失和未变化的资料数量。
+"""
+
 
 class DashboardError(RuntimeError):
     pass
+
+
+def copy_catalog_scan_prompt(clipboard) -> str:
+    clipboard.clipboard_clear()
+    clipboard.clipboard_append(CODEX_CATALOG_SCAN_PROMPT)
+    return "扫描提示词已复制，请粘贴到当前 Codex 对话框并发送。"
 
 
 PRIMARY_TABS = ("概览", "搜索", "资料", "任务", "时间线", "记录")
@@ -156,6 +181,61 @@ def sort_records(records: list[dict], key: str, descending: bool = False) -> lis
 def short(value: object, limit: int = 90) -> str:
     text = "" if value is None else str(value).replace("\n", " ")
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def catalog_overview_text(items: list[dict]) -> str:
+    counts = {kind: 0 for kind in CATALOG_KIND_LABELS}
+    for item in items:
+        if item.get("kind") in counts:
+            counts[item["kind"]] += 1
+    count_text = "　".join(
+        f"{CATALOG_KIND_LABELS[kind]} {counts[kind]}" for kind in CATALOG_KIND_LABELS
+    )
+    missing = sum(item.get("status") == "missing" for item in items)
+    archived = sum(item.get("status") == "archived" for item in items)
+    recent = sorted(
+        (item for item in items if item.get("status") != "archived"),
+        key=lambda item: (item.get("created_at", ""), item.get("item_id", "")),
+        reverse=True,
+    )[:5]
+    recent_text = "；".join(item.get("title") or item["item_id"] for item in recent) or "无"
+    return (
+        f"科研资料：共 {len(items)}　{count_text}　缺失 {missing}　归档 {archived}\n"
+        f"最近新增：{recent_text}"
+    )
+
+
+def reveal_catalog_file(
+    project_root: Path,
+    item: dict,
+    *,
+    system: str | None = None,
+    runner: Callable[[list[str]], object] | None = None,
+) -> str:
+    relative = item.get("path")
+    if not relative:
+        raise DashboardError("该资料没有项目文件路径。")
+    root = project_root.resolve()
+    target = (root / relative).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise DashboardError("资料路径超出项目目录，已拒绝打开。") from exc
+    if not target.is_file():
+        raise DashboardError(f"资料文件不存在：{relative}")
+    system = system or platform.system()
+    runner = runner or (lambda command: subprocess.Popen(command))
+    if system == "Windows":
+        command = ["explorer.exe", f"/select,{target}"]
+    elif system == "Darwin":
+        command = ["open", "-R", str(target)]
+    else:
+        command = ["xdg-open", str(target.parent)]
+    try:
+        runner(command)
+    except OSError as exc:
+        raise DashboardError(f"无法打开文件所在位置：{exc}") from exc
+    return f"已打开文件所在位置：{relative}"
 
 
 def timeline_layout(
@@ -419,11 +499,19 @@ class TablePage:
 
 
 class CatalogPage:
-    def __init__(self, parent, tk, ttk, scrolledtext, *, refresh: Callable[[], None]):
+    def __init__(
+        self, parent, tk, ttk, scrolledtext, *, refresh: Callable[[], None],
+        project_root: Path, notify: Callable[[str], None],
+    ):
         self.frame = ttk.Frame(parent, padding=8)
         self.tk = tk
+        self.ttk = ttk
+        self.scrolledtext = scrolledtext
+        self.project_root = project_root
+        self.notify = notify
         self.items: list[dict] = []
         self.relations: list[dict] = []
+        self.prompt_window = None
 
         filters = ttk.Frame(self.frame)
         filters.pack(fill="x", pady=(0, 6))
@@ -442,8 +530,13 @@ class CatalogPage:
         ttk.Label(filters, text="标签").pack(side="left")
         self.tags = tk.StringVar()
         ttk.Entry(filters, textvariable=self.tags, width=22).pack(side="left", padx=(5, 10))
+        ttk.Button(filters, text="打开所在位置", command=self.open_location).pack(side="left")
         ttk.Button(filters, text="复制路径", command=self.copy_path).pack(side="left")
         ttk.Button(filters, text="复制 AI 上下文", command=self.copy_context).pack(side="left", padx=(6, 0))
+        self.prompt_button = ttk.Button(
+            filters, text="复制 Codex 扫描提示词", command=self.show_codex_scan_prompt,
+        )
+        self.prompt_button.pack(side="left", padx=(6, 0))
 
         self.table = TablePage(
             self.frame, tk, ttk, scrolledtext,
@@ -512,12 +605,52 @@ class CatalogPage:
         self.frame.clipboard_clear()
         self.frame.clipboard_append(item["path"])
 
+    def open_location(self) -> None:
+        item = self.selected_item()
+        if not item:
+            self.notify("没有选中科研资料。")
+            return
+        try:
+            self.notify(reveal_catalog_file(self.project_root, item))
+        except DashboardError as exc:
+            self.notify(str(exc))
+
     def copy_context(self) -> None:
         item = self.selected_item()
         if not item:
             return
         self.frame.clipboard_clear()
         self.frame.clipboard_append(render_context_markdown([item], item.get("_relations", [])))
+
+    def show_codex_scan_prompt(self) -> None:
+        message = copy_catalog_scan_prompt(self.frame)
+        self.notify(message)
+        if self.prompt_window is not None and self.prompt_window.winfo_exists():
+            self.prompt_window.deiconify()
+            self.prompt_window.lift()
+            return
+        window = self.tk.Toplevel(self.frame.winfo_toplevel())
+        window.title("Codex 扫描提示词")
+        window.geometry("720x500")
+        window.transient(self.frame.winfo_toplevel())
+        self.ttk.Label(
+            window,
+            text="提示词已复制。请切换到 Codex 对话框，粘贴并发送。",
+            padding=(10, 10, 10, 4),
+        ).pack(fill="x")
+        preview = self.scrolledtext.ScrolledText(window, wrap="word")
+        preview.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        preview.insert("1.0", CODEX_CATALOG_SCAN_PROMPT)
+        preview.configure(state="disabled")
+        actions = self.ttk.Frame(window, padding=(10, 0, 10, 10))
+        actions.pack(fill="x")
+        self.ttk.Button(actions, text="关闭", command=window.destroy).pack(side="right")
+        self.ttk.Button(
+            actions,
+            text="再次复制",
+            command=lambda: self.notify(copy_catalog_scan_prompt(self.frame)),
+        ).pack(side="right", padx=(0, 6))
+        self.prompt_window = window
 
     @staticmethod
     def detail_text(item: dict) -> str:
@@ -1157,6 +1290,8 @@ class DashboardApp:
 
         self.catalog_page = CatalogPage(
             self.notebook, tk, ttk, scrolledtext, refresh=self.refresh,
+            project_root=provider.model.database_path.parent.parent,
+            notify=self.notify,
         )
         self.notebook.add(self.catalog_page.frame, text="资料")
 
@@ -1189,6 +1324,10 @@ class DashboardApp:
         finally:
             if self.refresh_seconds > 0 and self.root.winfo_exists():
                 self.root.after(max(250, int(self.refresh_seconds * 1000)), self.auto_refresh)
+
+    def notify(self, message: str) -> None:
+        if hasattr(self, "status"):
+            self.status.configure(text=message)
 
     def refresh(self) -> None:
         snapshot, error = self.controller.refresh()
@@ -1371,7 +1510,8 @@ class DashboardApp:
 
     @staticmethod
     def overview_text(snapshot: dict) -> str:
-        return action_overview_text(snapshot["context"]).rstrip()
+        base = action_overview_text(snapshot["context"]).rstrip()
+        return base + "\n\n" + catalog_overview_text(snapshot.get("catalog_items", []))
 
     def copy_overview(self) -> None:
         if not self.snapshot:
