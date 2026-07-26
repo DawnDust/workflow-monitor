@@ -3,12 +3,12 @@
 面向科研 Git 仓库的任务生命周期、探索分支、决策、交接和资料索引工具。软件通过
 `pipx` 全局安装；科研项目只保存配置、规范和追加式事件记录，不需要复制软件源码。
 
-## 安装 v1.0.0
+## 安装 v1.0.1
 
 先安装 [pipx](https://pipx.pypa.io/)，然后从 GitHub Release 安装：
 
 ```powershell
-pipx install https://github.com/DawnDust/project-maintenance-template/releases/download/v1.0.0/project_maintenance_workflow-1.0.0-py3-none-any.whl
+pipx install https://github.com/DawnDust/project-maintenance-template/releases/download/v1.0.1/project_maintenance_workflow-1.0.1-py3-none-any.whl
 ```
 
 在一个已经初始化为 Git 仓库的科研项目中运行：

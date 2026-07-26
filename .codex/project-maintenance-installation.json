@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "core_version": "1.0.0",
+  "core_version": "1.0.1",
   "template_version": 1,
   "managed_files": {
     ".githooks/pre-commit": {
