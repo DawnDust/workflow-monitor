@@ -12,12 +12,15 @@ from unittest.mock import patch
 
 from project_hooks.dashboard import (
     CLI_FALLBACK,
+    CODEX_CATALOG_SCAN_PROMPT,
     CatalogPage,
     DashboardApp,
     DashboardController,
     DashboardError,
     PRIMARY_TABS,
     advanced_summary,
+    catalog_overview_text,
+    copy_catalog_scan_prompt,
     dashboard_presets,
     filter_records,
     global_search,
@@ -26,6 +29,7 @@ from project_hooks.dashboard import (
     normalize_records,
     record_identity,
     record_location,
+    reveal_catalog_file,
     result_label,
     short,
     sort_records,
@@ -855,6 +859,126 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_catalog_ingest_auto_lifecycle_copy_dry_run_idempotency_and_failure_cleanup(self) -> None:
+        outside = Path(self.temp.name) / "paper.pdf"
+        outside.write_bytes(b"%PDF-ingest")
+        preview = json.loads(self.hooks(
+            "catalog", "ingest", str(outside), "--kind", "literature",
+            "--tag", "core", "--dry-run",
+        ).stdout)
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["target_path"], "source/paper.pdf")
+        self.assertFalse((self.root / "source/paper.pdf").exists())
+        self.assertFalse(json.loads(self.hooks("status").stdout)["active"])
+
+        ingested = json.loads(self.hooks(
+            "catalog", "ingest", str(outside), "--kind", "literature",
+            "--summary", "first summary", "--tag", "core",
+        ).stdout)
+        self.assertTrue(ingested["copied"])
+        self.assertEqual(ingested["item"]["kind"], "literature")
+        self.assertTrue((self.root / "source/paper.pdf").is_file())
+        self.assertTrue(outside.is_file())
+        self.assertFalse(json.loads(self.hooks("status").stdout)["active"])
+
+        updated = json.loads(self.hooks(
+            "catalog", "ingest", "source/paper.pdf",
+            "--summary", "updated summary", "--tag", "reviewed",
+        ).stdout)
+        self.assertEqual(updated["action"], "update")
+        self.assertFalse(updated["copied"])
+        self.assertEqual(updated["item"]["summary"], "updated summary")
+        self.assertEqual(updated["item"]["tags"], ["core", "reviewed"])
+
+        other = Path(self.temp.name) / "other" / "paper.pdf"
+        other.parent.mkdir()
+        other.write_bytes(b"collision")
+        collision = self.hooks(
+            "catalog", "ingest", str(other), "--kind", "literature", check=False,
+        )
+        self.assertNotEqual(collision.returncode, 0)
+        self.assertIn("拒绝覆盖", collision.stderr)
+        renamed = json.loads(self.hooks(
+            "catalog", "ingest", str(other), "--kind", "literature",
+            "--name", "paper-2.pdf",
+        ).stdout)
+        self.assertEqual(renamed["target_path"], "source/paper-2.pdf")
+
+        failing = Path(self.temp.name) / "invalid.pdf"
+        failing.write_bytes(b"invalid")
+        failed = self.hooks(
+            "catalog", "ingest", str(failing), "--kind", "literature",
+            "--title", " ", check=False,
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertFalse((self.root / "source/invalid.pdf").exists())
+        self.assertFalse(json.loads(self.hooks("status").stdout)["active"])
+
+        wrong_location = self.root / "loose.pdf"
+        wrong_location.write_bytes(b"loose")
+        rejected = self.hooks(
+            "catalog", "ingest", "loose.pdf", "--kind", "literature",
+            "--dry-run", check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("必须先移动", rejected.stderr)
+
+    def test_catalog_ingest_reuses_active_task_and_bulk_update_is_safe(self) -> None:
+        task_id = "20260726_catalogbulk_001"
+        self.start(task_id)
+        (self.root / "data").mkdir()
+        first = self.root / "data/first.csv"
+        second = self.root / "data/second.csv"
+        first.write_text("x\n1\n", encoding="utf-8")
+        second.write_text("x\n2\n", encoding="utf-8")
+        one = json.loads(self.hooks("catalog", "ingest", "data/first.csv", "--tag", "batch").stdout)
+        two = json.loads(self.hooks("catalog", "ingest", "data/second.csv", "--tag", "batch").stdout)
+        self.assertIsNone(one["task"])
+        self.assertIsNone(two["task"])
+        self.assertTrue(json.loads(self.hooks("status").stdout)["active"])
+
+        unsafe = self.hooks(
+            "catalog", "bulk-update", "--add-tag", "reviewed", check=False,
+        )
+        self.assertNotEqual(unsafe.returncode, 0)
+        self.assertIn("--all", unsafe.stderr)
+        conflict = self.hooks(
+            "catalog", "bulk-update", "--tag", "batch",
+            "--add-tag", "same", "--remove-tag", "same", check=False,
+        )
+        self.assertNotEqual(conflict.returncode, 0)
+        preview = json.loads(self.hooks(
+            "catalog", "bulk-update", "--tag", "batch",
+            "--add-tag", "reviewed", "--summary", "shared", "--dry-run",
+        ).stdout)
+        self.assertEqual(preview["matched"], 2)
+        self.assertEqual(preview["changed"], 2)
+        unchanged = json.loads(self.hooks(
+            "catalog", "list", "--tag", "reviewed", "--format", "json"
+        ).stdout)
+        self.assertEqual(unchanged, [])
+
+        applied = json.loads(self.hooks(
+            "catalog", "bulk-update", "--kind", "data", "--tag", "batch",
+            "--add-tag", "reviewed", "--summary", "shared",
+            "--source", "project import",
+        ).stdout)
+        self.assertEqual(applied["changed"], 2)
+        records = json.loads(self.hooks(
+            "catalog", "list", "--tag", "reviewed", "--format", "json"
+        ).stdout)
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(item["summary"] == "shared" for item in records))
+        self.assertTrue(all(item["source"] == "project import" for item in records))
+
+        cleared = json.loads(self.hooks(
+            "catalog", "bulk-update", "--id", one["item"]["item_id"],
+            "--remove-tag", "reviewed", "--clear-summary", "--clear-source",
+        ).stdout)
+        self.assertEqual(cleared["changed"], 1)
+        self.update_state()
+        self.end(task_id)
+
     def test_invalid_and_conflicting_events_are_rejected(self) -> None:
         journal = self.root / "maintenance/events.jsonl"
         journal.write_text("not-json\n", encoding="utf-8")
@@ -968,7 +1092,9 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertIn("最近完成：2026-07-23 10:00:00｜上一个任务｜完成", text)
         self.assertNotIn("判断", text)
         self.assertNotIn("断点", text)
-        self.assertEqual(DashboardApp.overview_text({"context": context}), text.rstrip())
+        dashboard_text = DashboardApp.overview_text({"context": context, "catalog_items": []})
+        self.assertTrue(dashboard_text.startswith(text.rstrip()))
+        self.assertIn("科研资料：共 0", dashboard_text)
 
     def test_publication_classifiers_are_conservative(self) -> None:
         self.assertTrue(is_publication_step("提交已验证改动"))
@@ -1059,6 +1185,62 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertIn("文件当前不存在", detail)
         self.assertIn("supports → Theory", detail)
         self.assertIn('"year": "2026"', detail)
+
+    def test_catalog_overview_and_cross_platform_file_reveal(self) -> None:
+        items = [
+            {"item_id": "lit-1", "kind": "literature", "title": "Paper",
+             "status": "active", "created_at": "2026-07-26 10:00:00"},
+            {"item_id": "data-1", "kind": "data", "title": "Dataset",
+             "status": "missing", "created_at": "2026-07-26 11:00:00"},
+            {"item_id": "out-1", "kind": "output", "title": "Old output",
+             "status": "archived", "created_at": "2026-07-26 12:00:00"},
+        ]
+        overview = catalog_overview_text(items)
+        self.assertIn("共 3", overview)
+        self.assertIn("文献 1", overview)
+        self.assertIn("数据 1", overview)
+        self.assertIn("缺失 1", overview)
+        self.assertIn("归档 1", overview)
+        self.assertIn("Dataset；Paper", overview)
+        self.assertNotIn("Old output", overview.splitlines()[1])
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            target = root / "source/paper.pdf"
+            target.parent.mkdir()
+            target.write_bytes(b"pdf")
+            commands = []
+            item = {"path": "source/paper.pdf"}
+            reveal_catalog_file(root, item, system="Windows", runner=commands.append)
+            reveal_catalog_file(root, item, system="Darwin", runner=commands.append)
+            reveal_catalog_file(root, item, system="Linux", runner=commands.append)
+            self.assertEqual(commands[0][0], "explorer.exe")
+            self.assertEqual(commands[1][:2], ["open", "-R"])
+            self.assertEqual(commands[2], ["xdg-open", str(target.parent)])
+            with self.assertRaisesRegex(DashboardError, "没有项目文件路径"):
+                reveal_catalog_file(root, {}, runner=commands.append)
+            target.unlink()
+            with self.assertRaisesRegex(DashboardError, "文件不存在"):
+                reveal_catalog_file(root, item, runner=commands.append)
+
+    def test_catalog_scan_prompt_copies_without_codex_detection(self) -> None:
+        class Clipboard:
+            def __init__(self):
+                self.value = ""
+
+            def clipboard_clear(self):
+                self.value = ""
+
+            def clipboard_append(self, value):
+                self.value += value
+
+        clipboard = Clipboard()
+        message = copy_catalog_scan_prompt(clipboard)
+        self.assertEqual(clipboard.value, CODEX_CATALOG_SCAN_PROMPT)
+        self.assertIn("catalog scan --dry-run", clipboard.value)
+        self.assertIn("不要提交或推送", clipboard.value)
+        self.assertNotIn("CODEX_THREAD_ID", clipboard.value)
+        self.assertIn("粘贴到当前 Codex 对话框", message)
 
     def test_advanced_summary_contains_technical_status(self) -> None:
         text = advanced_summary({
