@@ -14,6 +14,14 @@ from . import __version__
 ACTIVE_ENV = "PROJECT_HOOKS_CORE_ACTIVE"
 
 
+def configure_utf8_stdio() -> None:
+    """Keep CLI output deterministic on Windows legacy code pages."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8")
+
+
 def cache_root() -> Path:
     base = os.environ.get("LOCALAPPDATA")
     if base:
@@ -42,6 +50,7 @@ def selected_core() -> Path | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_utf8_stdio()
     args = list(sys.argv[1:] if argv is None else argv)
     core = None if os.environ.get(ACTIVE_ENV) else selected_core()
     if core is not None:
