@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -85,7 +86,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
 
     def hooks(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, "-m", "project_hooks", *args], cwd=self.root,
-                              text=True, capture_output=True, check=check)
+                              text=True, encoding="utf-8", capture_output=True, check=check)
 
     def start(self, task_id: str, *extra: str, commit: str = "never", check: bool = True) -> subprocess.CompletedProcess[str]:
         return self.hooks("start", task_id, "--kind", "analysis", "--scope", "test database workflow",
@@ -1051,6 +1052,19 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         invalid = self.hooks("dashboard", "--refresh-seconds", "-1", check=False)
         self.assertNotEqual(invalid.returncode, 0)
         self.assertIn("必须大于或等于 0", invalid.stderr)
+        legacy_env = os.environ.copy()
+        legacy_env["PYTHONUTF8"] = "0"
+        legacy_env["PYTHONIOENCODING"] = "cp1252"
+        legacy = subprocess.run(
+            [sys.executable, "-m", "project_hooks", "dashboard", "--refresh-seconds", "-1"],
+            cwd=self.root,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+            env=legacy_env,
+        )
+        self.assertIn("必须大于或等于 0", legacy.stderr)
 
     def test_root_help_separates_daily_and_advanced_commands(self) -> None:
         basic = self.hooks("--help").stdout
@@ -1472,7 +1486,7 @@ class DashboardPresentationTests(unittest.TestCase):
             reveal_catalog_file(root, item, system="Linux", runner=commands.append)
             self.assertEqual(commands[0][0], "explorer.exe")
             self.assertEqual(commands[1][:2], ["open", "-R"])
-            self.assertEqual(commands[2], ["xdg-open", str(target.parent)])
+            self.assertEqual(commands[2], ["xdg-open", str(target.resolve().parent)])
             with self.assertRaisesRegex(DashboardError, "没有项目文件路径"):
                 reveal_catalog_file(root, {}, runner=commands.append)
             target.unlink()
