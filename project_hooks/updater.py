@@ -211,6 +211,8 @@ def run_update(
     else:
         env = os.environ.copy()
         env[ACTIVE_ENV] = "1"
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         existing = env.get("PYTHONPATH")
         env["PYTHONPATH"] = str(core) + (os.pathsep + existing if existing else "")
         completed = subprocess.run(
@@ -226,6 +228,7 @@ def run_update(
             ],
             env=env,
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )

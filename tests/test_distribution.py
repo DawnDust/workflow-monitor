@@ -12,6 +12,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+from project_hooks import __version__ as CURRENT_VERSION
 from project_hooks.cli import discover_project_root
 from project_hooks.project_manager import (
     ProjectManagerError,
@@ -49,21 +50,21 @@ class DistributionTests(unittest.TestCase):
         self.git("add", ".")
         self.git("-c", "core.hooksPath=.git/no-hooks", "commit", "-m", message)
 
-    def init(self, version: str = "1.0.0") -> None:
+    def init(self, version: str = CURRENT_VERSION) -> None:
         initialize_project(self.root, version)
 
     def core_release(self, *, digest_override: str | None = None) -> Path:
         release = Path(self.temp.name) / "release"
         release.mkdir(exist_ok=True)
-        core = release / "project-hooks-core-1.0.0.zip"
+        core = release / f"project-hooks-core-{CURRENT_VERSION}.zip"
         with zipfile.ZipFile(core, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted((SOURCE_ROOT / "project_hooks").rglob("*.py")):
                 if "__pycache__" not in path.parts:
                     archive.write(path, path.relative_to(SOURCE_ROOT).as_posix())
-        wheel = release / "project_maintenance_workflow-1.0.0-py3-none-any.whl"
+        wheel = release / f"project_maintenance_workflow-{CURRENT_VERSION}-py3-none-any.whl"
         wheel.write_bytes(b"test wheel")
         manifest = {
-            "version": "1.0.0",
+            "version": CURRENT_VERSION,
             "launcher_min_version": "1.0.0",
             "event_schema": {"minimum": 1, "maximum": 2},
             "core": {
@@ -82,7 +83,7 @@ class DistributionTests(unittest.TestCase):
         return manifest_path
 
     def test_init_creates_project_without_copying_software_source(self) -> None:
-        result = initialize_project(self.root, "1.0.0")
+        result = initialize_project(self.root, CURRENT_VERSION)
         self.assertEqual(result["status"], "initialized")
         self.assertFalse((self.root / "project_hooks").exists())
         self.assertTrue((self.root / ".codex/project-maintenance-workflow.json").is_file())
@@ -93,7 +94,7 @@ class DistributionTests(unittest.TestCase):
             ".githooks",
         )
         with self.assertRaises(ProjectManagerError):
-            initialize_project(self.root, "1.0.0")
+            initialize_project(self.root, CURRENT_VERSION)
 
     def test_project_root_is_discovered_from_descendant(self) -> None:
         self.init()
@@ -107,7 +108,11 @@ class DistributionTests(unittest.TestCase):
         before = (self.root / "maintenance/events.jsonl").read_bytes()
         manifest = self.core_release()
         cache = Path(self.temp.name) / "cache"
-        with patch.dict(os.environ, {"LOCALAPPDATA": str(cache)}):
+        with patch.dict(os.environ, {
+            "LOCALAPPDATA": str(cache),
+            "PYTHONUTF8": "0",
+            "PYTHONIOENCODING": "cp1252",
+        }):
             result = run_update(self.root, manifest_url=manifest.as_uri())
         after = (self.root / "maintenance/events.jsonl").read_bytes()
         self.assertTrue(after.startswith(before))
@@ -122,14 +127,14 @@ class DistributionTests(unittest.TestCase):
         readme.write_text(readme.read_text(encoding="utf-8") + "\n项目自定义内容。\n", encoding="utf-8")
         customized = readme.read_bytes()
         self.commit()
-        result = apply_project_update(self.root, "1.0.0")
+        result = apply_project_update(self.root, CURRENT_VERSION)
         self.assertEqual(readme.read_bytes(), customized)
         self.assertIn("maintenance/README.md", result["conflicts"])
         self.assertTrue(
-            (self.root / ".project_hooks/update-conflicts/1.0.0/maintenance/README.md").is_file()
+            (self.root / f".project_hooks/update-conflicts/{CURRENT_VERSION}/maintenance/README.md").is_file()
         )
         self.commit("record customized template")
-        repeated = apply_project_update(self.root, "1.0.0")
+        repeated = apply_project_update(self.root, CURRENT_VERSION)
         self.assertEqual(readme.read_bytes(), customized)
         self.assertIn("maintenance/README.md", repeated["conflicts"])
 
@@ -142,7 +147,7 @@ class DistributionTests(unittest.TestCase):
         journal.write_text("{broken\n", encoding="utf-8")
         self.commit("corrupt fixture")
         with self.assertRaises(Exception):
-            apply_project_update(self.root, "1.0.0")
+            apply_project_update(self.root, CURRENT_VERSION)
         self.assertEqual(hook.read_bytes(), before)
         self.assertEqual(journal.read_text(encoding="utf-8"), "{broken\n")
 
