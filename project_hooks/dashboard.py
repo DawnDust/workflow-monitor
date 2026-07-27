@@ -344,6 +344,10 @@ WORKBENCH_PROMPT_TEMPLATES = {
     **RESEARCH_PROMPT_TEMPLATES,
     **SOFTWARE_PROMPT_TEMPLATES,
 }
+WORKBENCH_PROMPT_CATEGORIES = (
+    "全部",
+    *dict.fromkeys(template["category"] for template in WORKBENCH_PROMPT_TEMPLATES.values()),
+)
 
 RESEARCH_PROMPT_COMMON_RULES = """请遵守以下规则：
 1. 只使用当前 Codex 对话中已经选择的文件、已有消息和我提供的资料作为已有证据。
@@ -422,7 +426,7 @@ def filter_records(records: list[dict], query: str) -> list[dict]:
     return [record for record in records if needle in json.dumps(record, ensure_ascii=False, default=str).casefold()]
 
 
-def research_prompt_records(query: str = "") -> list[dict]:
+def research_prompt_records(query: str = "", category: str = "全部") -> list[dict]:
     records = [
         {
             "template_id": template_id,
@@ -432,6 +436,8 @@ def research_prompt_records(query: str = "") -> list[dict]:
         }
         for template_id, template in WORKBENCH_PROMPT_TEMPLATES.items()
     ]
+    if category and category != "全部":
+        records = [record for record in records if record["category"] == category]
     return filter_records(records, query)
 
 
@@ -1073,6 +1079,15 @@ class ResearchWorkbenchPage:
 
         controls = ttk.Frame(self.frame)
         controls.pack(fill="x", pady=(0, 6))
+        ttk.Label(controls, text="类型").pack(side="left")
+        self.category = tk.StringVar(value="全部")
+        ttk.Combobox(
+            controls,
+            textvariable=self.category,
+            values=WORKBENCH_PROMPT_CATEGORIES,
+            state="readonly",
+            width=10,
+        ).pack(side="left", padx=(6, 12))
         ttk.Label(controls, text="筛选提示词").pack(side="left")
         self.query = tk.StringVar()
         ttk.Entry(controls, textvariable=self.query, width=34).pack(side="left", padx=(6, 8))
@@ -1080,6 +1095,7 @@ class ResearchWorkbenchPage:
             controls,
             text="科研分析先选择文件；软件操作先确认目标仓库。",
         ).pack(side="left")
+        self.category.trace_add("write", lambda *_: self.render_list())
         self.query.trace_add("write", lambda *_: self.render_list())
 
         panes = ttk.Panedwindow(self.frame, orient="horizontal")
@@ -1118,7 +1134,7 @@ class ResearchWorkbenchPage:
 
     def render_list(self) -> None:
         previous = self.current_template_id
-        self.visible = research_prompt_records(self.query.get())
+        self.visible = research_prompt_records(self.query.get(), self.category.get())
         self.tree.delete(*self.tree.get_children())
         selected_iid = None
         for index, record in enumerate(self.visible):

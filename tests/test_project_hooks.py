@@ -23,6 +23,7 @@ from project_hooks.dashboard import (
     PRIMARY_TABS,
     RESEARCH_PROMPT_TEMPLATES,
     SOFTWARE_PROMPT_TEMPLATES,
+    WORKBENCH_PROMPT_CATEGORIES,
     WORKBENCH_PROMPT_TEMPLATES,
     ResearchWorkbenchPage,
     RecordsPage,
@@ -1251,6 +1252,13 @@ class DashboardPresentationTests(unittest.TestCase):
 
     def test_research_prompt_list_filters_category_label_and_task_in_stable_order(self) -> None:
         self.assertEqual(
+            WORKBENCH_PROMPT_CATEGORIES,
+            (
+                "全部", "文献研究", "研究设计", "研究复盘", "研究规划",
+                "软件安装", "软件升级", "软件诊断", "版本发布",
+            ),
+        )
+        self.assertEqual(
             [record["template_id"] for record in research_prompt_records()],
             list(WORKBENCH_PROMPT_TEMPLATES),
         )
@@ -1265,6 +1273,14 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(
             [record["label"] for record in research_prompt_records("可以立即开始执行")],
             ["下一步研究计划"],
+        )
+        self.assertEqual(
+            [record["label"] for record in research_prompt_records(category="软件安装")],
+            ["安装工作流软件", "初始化科研项目", "接管旧版项目"],
+        )
+        self.assertEqual(
+            [record["label"] for record in research_prompt_records("正式版本", "版本发布")],
+            ["验证正式版本安装"],
         )
         self.assertEqual(research_prompt_records("不存在的筛选词"), [])
 
@@ -1301,6 +1317,9 @@ class DashboardPresentationTests(unittest.TestCase):
         source = inspect.getsource(ResearchWorkbenchPage)
         self.assertIn("Panedwindow", source)
         self.assertIn("Treeview", source)
+        self.assertIn("Combobox", source)
+        self.assertIn('state="readonly"', source)
+        self.assertIn("WORKBENCH_PROMPT_CATEGORIES", source)
         self.assertIn('"category", "label"', source)
         self.assertNotIn("LabelFrame", source)
 
@@ -1401,6 +1420,8 @@ class DashboardPresentationTests(unittest.TestCase):
 
         page = ResearchWorkbenchPage.__new__(ResearchWorkbenchPage)
         page.query = Query()
+        page.category = Query()
+        page.category.value = "全部"
         page.tree = Tree()
         page.preview = Preview()
         page.current_template_id = None
@@ -1409,6 +1430,12 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(page.current_template_id, "literature_review")
         self.assertEqual(page.tree.selected, "prompt-0")
         self.assertEqual(page.preview.value, build_research_prompt("literature_review"))
+
+        page.query.value = ""
+        page.category.value = "软件诊断"
+        page.render_list()
+        self.assertEqual(page.current_template_id, "project_health_check")
+        self.assertEqual([row[1][0] for row in page.tree.rows], ["软件诊断", "软件诊断"])
 
         page.query.value = "不存在的筛选词"
         page.render_list()
