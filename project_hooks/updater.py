@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -91,6 +92,18 @@ def verify_digest(content: bytes, expected: str) -> None:
         raise UpdateError(f"下载摘要不匹配：期望 {expected}，实际 {actual}")
 
 
+def replace_directory(source: Path, target: Path) -> None:
+    """Retry short-lived Windows directory locks without hiding persistent failures."""
+    for attempt in range(5):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 def safe_extract_core(content: bytes, version: str) -> Path:
     cores = cache_root() / "cores"
     target = cores / version
@@ -117,7 +130,7 @@ def safe_extract_core(content: bytes, version: str) -> Path:
         (staging / ".core-sha256").write_text(content_digest + "\n", encoding="ascii")
         if target.exists():
             shutil.rmtree(target)
-        os.replace(staging, target)
+        replace_directory(staging, target)
         return target
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)

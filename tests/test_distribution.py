@@ -19,7 +19,7 @@ from project_hooks.project_manager import (
     apply_project_update,
     initialize_project,
 )
-from project_hooks.updater import UpdateError, run_update, verify_digest
+from project_hooks.updater import UpdateError, replace_directory, run_update, verify_digest
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +33,14 @@ class DistributionTests(unittest.TestCase):
         self.git("init", "-b", "main")
         self.git("config", "user.name", "Project Hooks Test")
         self.git("config", "user.email", "hooks@example.invalid")
+
+    def test_windows_directory_replace_retries_temporary_lock(self) -> None:
+        source, target = self.root / "source", self.root / "target"
+        with patch("project_hooks.updater.os.replace", side_effect=[PermissionError(), None]) as replace:
+            with patch("project_hooks.updater.time.sleep") as sleep:
+                replace_directory(source, target)
+        self.assertEqual(replace.call_count, 2)
+        sleep.assert_called_once()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -184,7 +192,7 @@ class DistributionTests(unittest.TestCase):
             run_update(self.root, manifest_url=missing)
         manifest = self.core_release()
         with self.assertRaises(UpdateError):
-            run_update(self.root, target_version="1.1.0", manifest_url=manifest.as_uri())
+            run_update(self.root, target_version="999.0.0", manifest_url=manifest.as_uri())
         self.assertEqual((self.root / "maintenance/events.jsonl").read_bytes(), before)
 
 
