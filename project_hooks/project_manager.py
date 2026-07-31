@@ -34,18 +34,20 @@ GITATTRIBUTES_END = "# project-maintenance-hooks:end"
 
 HOOK_TEMPLATE = """#!/bin/sh
 # project-maintenance-hooks managed
-if command -v project-hooks >/dev/null 2>&1; then
-  project-hooks pre-commit
+if [ -x "./project-hooks.exe" ]; then
+  ./project-hooks.exe pre-commit
 else
-  python -m project_hooks pre-commit
+  echo "缺少项目根目录的 project-hooks.exe，无法执行提交检查" >&2
+  exit 1
 fi
 """
 
 AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 ## 项目维护生命周期
 
-- 新 clone 或 worktree 首次使用时运行 `project-hooks install`。
-- 每次任务先运行 `project-hooks context --format markdown`，按 `core_read_order` 阅读规范，首次写入前运行 `start`。
+- 所有命令使用仓库根目录的 `.\\project-hooks.exe`。
+- 新 clone 或 worktree 首次使用时，将 `project-hooks.exe` 放到仓库根目录并运行 `.\\project-hooks.exe install`。
+- 每次任务先运行 `.\\project-hooks.exe context --format markdown`，按 `core_read_order` 阅读规范，首次写入前运行 `start`。
 - 稳定维护只在 `main` 使用 `--track stable`；研究和实验使用独立探索分支。
 - 使用 `state update`、`decision add` 和 `attempt update` 保存进展，最后必须运行 `end`。
 - 只有 `validated` 尝试可准备 Squash PR；推送和合并必须由用户明确确认。
@@ -60,7 +62,7 @@ __pycache__/
 .venv/
 build/
 dist/
-*.egg-info/
+/project-hooks.exe
 # project-maintenance-hooks:end"""
 
 GITATTRIBUTES_BLOCK = """# project-maintenance-hooks:begin
@@ -80,10 +82,12 @@ MAINTENANCE_README = """# 项目维护规范
 
 ## 日常流程
 
-1. 运行 `project-hooks context --format markdown`。
-2. 首次写入前运行 `project-hooks start ...`。
-3. 使用 `state update` 更新断点；路线变化使用 `decision add`；探索证据使用 `attempt update`。
-4. 最后运行 `project-hooks end ...`，不得删除活动状态或绕过收尾。
+所有命令使用仓库根目录的 `.\\project-hooks.exe`。
+
+1. 运行 `.\\project-hooks.exe context --format markdown`。
+2. 首次写入前运行 `.\\project-hooks.exe start ...`。
+3. 使用 `.\\project-hooks.exe state update` 更新断点；路线变化使用 `decision add`；探索证据使用 `attempt update`。
+4. 最后运行 `.\\project-hooks.exe end ...`，不得删除活动状态或绕过收尾。
 
 稳定维护只在 `main` 使用 `--track stable`。新理论、算法、实验和不确定改动使用
 `--track research|experiment|sandbox --topic <slug>`。只有 `validated` 尝试可以准备
@@ -124,7 +128,7 @@ def default_config() -> dict:
         "state_dir": ".project_hooks",
         "backend": "project_hooks",
         "core_read_order": ["maintenance/README.md"],
-        "context_command": "project-hooks context --format markdown",
+        "context_command": ".\\project-hooks.exe context --format markdown",
         "maintenance_store": {
             "engine": "sqlite",
             "database": ".project_hooks/maintenance.sqlite3",
@@ -188,10 +192,10 @@ def managed_hashes(root: Path) -> dict[str, dict[str, object]]:
     return result
 
 
-def installation_record(root: Path, core_version: str) -> dict:
+def installation_record(root: Path, application_version: str) -> dict:
     return {
         "format": 1,
-        "core_version": core_version,
+        "application_version": application_version,
         "template_version": TEMPLATE_VERSION,
         "managed_files": managed_hashes(root),
     }
@@ -211,12 +215,12 @@ def require_git_repository(root: Path) -> None:
         raise ProjectManagerError("目标目录必须已经是 Git 仓库")
 
 
-def initialize_project(root: Path, core_version: str) -> dict:
+def initialize_project(root: Path, application_version: str) -> dict:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     require_git_repository(root)
     if (root / CONFIG_PATH).exists():
-        raise ProjectManagerError("项目已经初始化；请使用 project-hooks update")
+        raise ProjectManagerError("项目已经初始化；请使用 .\\project-hooks.exe update")
     for relative, content in template_files().items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -254,11 +258,11 @@ def initialize_project(root: Path, core_version: str) -> dict:
         "workflow.initialized",
         branch=git(root, "branch", "--show-current").stdout.strip() or "main",
         task_id=None,
-        payload={"core_version": core_version, "template_version": TEMPLATE_VERSION},
+        payload={"application_version": application_version, "template_version": TEMPLATE_VERSION},
         timezone="Asia/Shanghai",
     )
     append_events(journal, root / ".project_hooks", [event])
-    write_json(root / INSTALLATION_PATH, installation_record(root, core_version))
+    write_json(root / INSTALLATION_PATH, installation_record(root, application_version))
     connection = ensure_database(root / ".project_hooks/maintenance.sqlite3", journal)
     connection.close()
     hook = root / ".githooks/pre-commit"
@@ -269,14 +273,14 @@ def initialize_project(root: Path, core_version: str) -> dict:
     configured = git(root, "config", "--local", "core.hooksPath", ".githooks")
     if configured.returncode != 0:
         raise ProjectManagerError(configured.stderr.strip() or "无法配置 Git hooksPath")
-    return {"status": "initialized", "project": str(root), "core_version": core_version}
+    return {"status": "initialized", "project": str(root), "application_version": application_version}
 
 
 def preflight_update(root: Path) -> None:
     require_git_repository(root)
     installation = root / INSTALLATION_PATH
     if not installation.is_file():
-        raise ProjectManagerError("缺少安装清单；请先使用当前版本执行 project-hooks install 进行接管")
+        raise ProjectManagerError("缺少安装清单；请先使用当前 EXE执行 .\\project-hooks.exe install 进行接管")
     branch = git(root, "branch", "--show-current").stdout.strip()
     if branch != "main":
         raise ProjectManagerError(f"升级只能在 main 执行，当前分支为 {branch or '未知'}")
@@ -389,7 +393,7 @@ def apply_project_update(root: Path, target_version: str) -> dict:
     preflight_update(root)
     install_path = root / INSTALLATION_PATH
     installation = json.loads(install_path.read_text(encoding="utf-8"))
-    old_version = installation.get("core_version")
+    old_version = installation.get("application_version", installation.get("core_version"))
     old_records = installation.get("managed_files", {})
     database = root / ".project_hooks/maintenance.sqlite3"
     paths = [root / CONFIG_PATH, install_path, root / "maintenance/events.jsonl",
@@ -471,7 +475,7 @@ def apply_project_update(root: Path, target_version: str) -> dict:
         return {
             "status": "updated",
             "project": str(root),
-            "core_version": target_version,
+            "application_version": target_version,
             "changed": sorted(set(changed)),
             "conflicts": conflicts,
             "commit": "请检查变更后自行执行 git add、git commit 和 git push",

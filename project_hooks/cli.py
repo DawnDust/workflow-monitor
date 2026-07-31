@@ -44,6 +44,7 @@ from .store import (
     validate_event,
 )
 from .project_manager import (
+    HOOK_TEMPLATE,
     INSTALLATION_PATH,
     ProjectManagerError,
     apply_project_update,
@@ -94,11 +95,11 @@ usage: project-hooks [-h] [--help-all] [--project PATH] {context,start,end,dashb
   dashboard   打开只读管理窗口
 
 首次使用:
-  project-hooks init .
-  project-hooks check
+  .\\project-hooks.exe init .
+  .\\project-hooks.exe check
 
 软件升级:
-  project-hooks update
+  .\\project-hooks.exe update
 
 使用 --help-all 查看全部高级命令；使用 <命令> --help 查看参数。
 """
@@ -154,7 +155,7 @@ def config() -> dict:
     data.setdefault("timezone", "Asia/Shanghai")
     data.setdefault("state_dir", ".project_hooks")
     data.setdefault("core_read_order", STATIC_READ_ORDER)
-    data.setdefault("context_command", "python -m project_hooks context --format markdown")
+    data.setdefault("context_command", ".\\project-hooks.exe context --format markdown")
     data.setdefault("maintenance_store", DEFAULT_STORE)
     data.setdefault("git_auto_commit", {"enabled": True, "eligible_task_sizes": ["large"]})
     data.setdefault("branch_policy", DEFAULT_BRANCH_POLICY)
@@ -166,7 +167,9 @@ def installed_project_version() -> str | None:
     if not path.is_file():
         return None
     try:
-        return str(json.loads(path.read_text(encoding="utf-8")).get("core_version"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        value = data.get("application_version") or data.get("core_version")
+        return str(value) if value else None
     except (OSError, ValueError):
         return None
 
@@ -189,8 +192,8 @@ def assert_project_version_compatible(args: argparse.Namespace) -> None:
     if (installed and installed != __version__ and args.command != "_apply-update"
             and not command_is_read_only(args)):
         raise WorkflowError(
-            f"项目模板版本为 {installed}，当前核心为 {__version__}；"
-            "写操作前请运行 `project-hooks update`"
+            f"项目模板版本为 {installed}，当前 EXE 为 {__version__}；"
+            "写操作前请运行 `.\\project-hooks.exe update`"
         )
 
 
@@ -363,7 +366,7 @@ def check_repository(*, raise_on_error: bool = False) -> list[str]:
         errors.append("maintenance_store 与 SQLite 工作流不一致")
     installed = installed_project_version()
     if installed and installed != __version__:
-        errors.append(f"项目模板版本 {installed} 与当前核心 {__version__} 不一致；请运行 project-hooks update")
+        errors.append(f"项目模板版本 {installed} 与当前 EXE {__version__} 不一致；请运行 .\\project-hooks.exe update")
     try:
         branch_policy()
     except WorkflowError as exc:
@@ -618,14 +621,7 @@ def install_git_hook(force: bool = False) -> str:
     if configured and configured != TRACKED_HOOKS_DIR and not force:
         raise WorkflowError(f"本仓库已有 core.hooksPath={configured}；使用 --force 前请先人工合并")
     hook = ROOT / TRACKED_HOOKS_DIR / "pre-commit"
-    content = (
-        f"#!/bin/sh\n{MANAGED_HOOK_MARKER}\n"
-        "if command -v project-hooks >/dev/null 2>&1; then\n"
-        "  project-hooks pre-commit\n"
-        "else\n"
-        "  python -m project_hooks pre-commit\n"
-        "fi\n"
-    )
+    content = HOOK_TEMPLATE
     if hook.exists():
         old = hook.read_text(encoding="utf-8", errors="replace")
         if old != content and MANAGED_HOOK_MARKER not in old and not force:
@@ -671,7 +667,11 @@ def auto_commit(record: dict, paths: list[str], result: str, message: str | None
         if not staged:
             return {"status": "skipped", "reason": "任务路径没有可提交差异"}
         commit_message = message or f"maint({declaration['kind']}): {record['task_id']}"
-        completed = run_git(["commit", "-m", commit_message], env=env, check=False)
+        pre_commit_check()
+        completed = run_git(
+            ["-c", "core.hooksPath=.git/no-hooks", "commit", "-m", commit_message],
+            env=env, check=False,
+        )
         if completed.returncode != 0:
             raise WorkflowError("自动提交失败: " + (completed.stderr or completed.stdout).strip())
         run_git(["reset", "--quiet", "HEAD", "--", *staged])
@@ -1236,7 +1236,7 @@ def main(argv: list[str] | None = None) -> int:
             output = initialize_project(ROOT, __version__)
         elif root is None:
             raise WorkflowError(
-                "当前目录不在 project-hooks 科研项目中；请先运行 `project-hooks init .`，"
+                "当前目录不在 project-hooks 科研项目中；请先运行 `.\\project-hooks.exe init .`，"
                 "或使用 `--project <path>`"
             )
         elif args.command == "update":
@@ -1256,8 +1256,8 @@ def main(argv: list[str] | None = None) -> int:
             configured = run_git(["config", "--local", "--get", "core.hooksPath"], check=False).stdout.strip()
             if configured != TRACKED_HOOKS_DIR:
                 raise WorkflowError(
-                    "项目维护尚未安装。请先运行 `python -m project_hooks install`，"
-                    "再运行 `python -m project_hooks check`。"
+                    "项目维护尚未安装。请先运行 `.\\project-hooks.exe install`，"
+                    "再运行 `.\\project-hooks.exe check`。"
                 )
             output = action_overview_text(context_data())
         elif args.command == "start": output = start_task(args)

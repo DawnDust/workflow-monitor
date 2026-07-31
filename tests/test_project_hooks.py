@@ -48,6 +48,8 @@ from project_hooks.dashboard import (
     short,
     sort_records,
     timeline_layout,
+    update_status_text,
+    version_status_text,
 )
 from project_hooks.read_model import (
     MaintenanceReadModel,
@@ -116,8 +118,8 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertFalse(database.exists())
         missing = self.hooks(check=False)
         self.assertNotEqual(missing.returncode, 0)
-        self.assertIn("python -m project_hooks install", missing.stderr)
-        self.assertIn("python -m project_hooks check", missing.stderr)
+        self.assertIn(".\\project-hooks.exe install", missing.stderr)
+        self.assertIn(".\\project-hooks.exe check", missing.stderr)
         self.hooks("install")
         self.assertTrue(database.exists())
         overview = self.hooks().stdout
@@ -1255,7 +1257,7 @@ class DashboardPresentationTests(unittest.TestCase):
             WORKBENCH_PROMPT_CATEGORIES,
             (
                 "全部", "文献研究", "研究设计", "研究复盘", "研究规划",
-                "软件安装", "软件升级", "软件诊断", "版本发布",
+                "软件升级", "软件诊断", "版本发布",
             ),
         )
         self.assertEqual(
@@ -1274,10 +1276,7 @@ class DashboardPresentationTests(unittest.TestCase):
             [record["label"] for record in research_prompt_records("可以立即开始执行")],
             ["下一步研究计划"],
         )
-        self.assertEqual(
-            [record["label"] for record in research_prompt_records(category="软件安装")],
-            ["安装工作流软件", "初始化科研项目", "接管旧版项目"],
-        )
+        self.assertEqual(research_prompt_records(category="软件安装"), [])
         self.assertEqual(
             [record["label"] for record in research_prompt_records("正式版本", "版本发布")],
             ["验证正式版本安装"],
@@ -1288,8 +1287,7 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(
             [template["label"] for template in SOFTWARE_PROMPT_TEMPLATES.values()],
             [
-                "安装工作流软件", "初始化科研项目", "接管旧版项目",
-                "查看软件版本", "检查可用更新", "更新到最新版本", "更新到指定版本",
+                "更新到最新版本", "更新到指定版本",
                 "验证项目健康", "诊断升级失败",
                 "创建新版本提交", "发布 GitHub 新版本", "验证正式版本安装",
             ],
@@ -1312,6 +1310,28 @@ class DashboardPresentationTests(unittest.TestCase):
         release = build_research_prompt("github_release")
         self.assertIn("具体版本号和本次发布的明确确认", release)
         self.assertIn("不得移动或复用既有版本标签", release)
+
+    def test_dashboard_version_and_update_status_text(self) -> None:
+        self.assertEqual(
+            version_status_text({"application_version": "1.2.0", "project_version": "1.1.0"}),
+            "版本：EXE 1.2.0 / 项目 1.1.0",
+        )
+        self.assertEqual(
+            version_status_text({"application_version": "1.2.0", "project_version": None}),
+            "版本：EXE 1.2.0 / 项目 未初始化",
+        )
+        self.assertEqual(update_status_text({"status": "current", "latest_version": "1.2.0"}), "更新：已是最新版")
+        self.assertEqual(
+            update_status_text({"status": "update-available", "latest_version": "1.3.0"}),
+            "更新：发现 1.3.0",
+        )
+        self.assertEqual(update_status_text(error="离线"), "更新：检查失败")
+
+    def test_dashboard_update_check_runs_in_background(self) -> None:
+        source = inspect.getsource(DashboardApp.check_for_updates)
+        self.assertIn("threading.Thread", source)
+        self.assertIn('state="disabled"', source)
+        self.assertIn("self.root.after", source)
 
     def test_research_workbench_uses_split_list_and_selection_does_not_copy(self) -> None:
         source = inspect.getsource(ResearchWorkbenchPage)
@@ -1639,7 +1659,7 @@ class DashboardPresentationTests(unittest.TestCase):
 
     def test_tkinter_unavailable_has_cli_fallback(self) -> None:
         with patch("project_hooks.dashboard.import_tk", side_effect=DashboardError("missing\n" + CLI_FALLBACK)):
-            with self.assertRaisesRegex(DashboardError, "project-hooks context"):
+            with self.assertRaisesRegex(DashboardError, r"project-hooks\.exe context"):
                 launch_dashboard(object(), 0)
 
 

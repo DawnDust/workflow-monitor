@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+## 1.2.0
+
+- Dashboard 顶部新增当前 EXE/项目版本显示和非阻塞“检查更新”按钮，并移除已由原生流程覆盖的五项软件提示词。
+- 收敛为项目目录内 Windows EXE-only，不再发布或支持 pipx、wheel 和 core ZIP。
+- 将升级运行时移入项目自身的 `.project_hooks/runtime/`，Release 仅包含 EXE 和自动读取的 manifest。
+- 新增 Windows x64 单文件 `project-hooks.exe`，支持空文件夹首次双击自动建仓、初始化并打开 Dashboard。
+- 同一 EXE 保留完整 CLI 和 Git Hook 能力，并通过校验后的版本化 EXE 缓存完成便携升级。
+- GitHub Release 同时发布 Windows EXE，并在 manifest 中记录下载地址和 SHA-256。
+
 ## 1.1.0
 
 - 提升 Windows 升级可靠性：替换版本化核心目录遇到短暂文件占用时进行有限重试。

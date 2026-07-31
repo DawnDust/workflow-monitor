@@ -9,61 +9,34 @@ permissions:
   contents: write
 
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-        python: ["3.11", "3.12", "3.13"]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-      - run: python -m unittest tests.test_distribution
-      - if: runner.os == 'Windows' && matrix.python == '3.12'
-        run: python -m unittest tests.test_project_hooks
-
   release:
-    needs: test
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Validate version
-        shell: bash
+      - name: Test
+        run: python -m unittest tests.test_distribution tests.test_project_hooks
+      - name: Build executable
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          python - "$VERSION" <<'PY'
-          import sys
-          import tomllib
-
-          import project_hooks
-
-          expected = sys.argv[1]
-          with open("pyproject.toml", "rb") as stream:
-              project_version = tomllib.load(stream)["project"]["version"]
-          versions = {
-              "tag": expected,
-              "package": project_hooks.__version__,
-              "pyproject": project_version,
-          }
-          if len(set(versions.values())) != 1:
-              raise SystemExit(f"release version mismatch: {versions}")
-          print(f"validated release version {expected}")
-          PY
-      - run: python -m pip install build
-      - run: python -m build
-      - run: python scripts/build_release.py --version "${GITHUB_REF_NAME#v}"
-        shell: bash
+          python -m pip install pyinstaller==6.21.0
+          python scripts/build_windows_exe.py
+      - name: Build release manifest
+        shell: powershell
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          python scripts/build_release.py --version $version
+      - name: Smoke test executable
+        shell: powershell
+        run: |
+          $output = & .\dist\project-hooks.exe version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $output | Select-String 'application_version'
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.whl
-            dist/project-hooks-core-*.zip
+            dist/project-hooks.exe
             dist/release-manifest.json
           generate_release_notes: true

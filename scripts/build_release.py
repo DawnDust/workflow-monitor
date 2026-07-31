@@ -1,12 +1,17 @@
-"""Build the versioned core archive and release manifest after wheel creation."""
+"""Build the EXE-only GitHub Release manifest."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import zipfile
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from project_hooks import __version__
 
 
 def digest(path: Path) -> str:
@@ -18,21 +23,14 @@ def main() -> int:
     parser.add_argument("--dist", type=Path, default=Path("dist"))
     parser.add_argument("--version", required=True)
     args = parser.parse_args()
-    root = Path(__file__).resolve().parents[1]
+    if args.version != __version__:
+        raise SystemExit(
+            f"release version mismatch: tag={args.version}, application={__version__}"
+        )
     dist = args.dist.resolve()
-    dist.mkdir(parents=True, exist_ok=True)
-    wheels = sorted(dist.glob(f"project_maintenance_workflow-{args.version}-*.whl"))
-    if len(wheels) != 1:
-        raise SystemExit(f"expected one wheel for {args.version}, found {len(wheels)}")
-    core = dist / f"project-hooks-core-{args.version}.zip"
-    with zipfile.ZipFile(core, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted((root / "project_hooks").rglob("*.py")):
-            if "__pycache__" not in path.parts:
-                info = zipfile.ZipInfo(path.relative_to(root).as_posix())
-                info.date_time = (1980, 1, 1, 0, 0, 0)
-                info.external_attr = 0o644 << 16
-                archive.writestr(info, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED)
-    wheel = wheels[0]
+    executable = dist / "project-hooks.exe"
+    if not executable.is_file():
+        raise SystemExit(f"missing Windows executable: {executable}")
     base = (
         "https://github.com/DawnDust/project-maintenance-template/"
         f"releases/download/v{args.version}/"
@@ -41,15 +39,10 @@ def main() -> int:
         "version": args.version,
         "launcher_min_version": "1.0.0",
         "event_schema": {"minimum": 1, "maximum": 2},
-        "core": {
-            "file": core.name,
-            "url": base + core.name,
-            "sha256": digest(core),
-        },
-        "wheel": {
-            "file": wheel.name,
-            "url": base + wheel.name,
-            "sha256": digest(wheel),
+        "windows_exe": {
+            "file": executable.name,
+            "url": base + executable.name,
+            "sha256": digest(executable),
         },
     }
     (dist / "release-manifest.json").write_text(
