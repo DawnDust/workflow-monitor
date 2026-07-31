@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import platform
 import subprocess
+import threading
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -17,21 +18,23 @@ from .read_model import (
     action_overview_text,
     is_auxiliary_task_id,
 )
+from .updater import check_latest_update, version_report
 
 
 CLI_FALLBACK = (
     "可改用以下只读命令：\n"
-    "  project-hooks context\n"
-    "  project-hooks history\n"
-    "  project-hooks decisions\n"
-    "  project-hooks explorations\n"
-    "  project-hooks catalog list\n"
-    "  project-hooks db status"
+    "  .\\project-hooks.exe context\n"
+    "  .\\project-hooks.exe history\n"
+    "  .\\project-hooks.exe decisions\n"
+    "  .\\project-hooks.exe explorations\n"
+    "  .\\project-hooks.exe catalog list\n"
+    "  .\\project-hooks.exe db status"
 )
 
 CODEX_CATALOG_SCAN_PROMPT = """请立即在当前项目执行科研资料扫描和索引登记，不要只提供方案。
 
 执行范围和约束：
+0. 以下所有 `project-hooks` 命令均使用项目根目录的 `.\\project-hooks.exe` 执行。
 1. 先运行 `project-hooks context --format markdown`，并按 core_read_order 阅读项目规范。
 2. 只扫描项目内的五个标准目录：source/、data/、theory/、analysis/、outputs/。
 3. 先运行 `project-hooks catalog scan --dry-run`；存在变化时再运行实际的 `catalog scan`。
@@ -145,89 +148,10 @@ RESEARCH_PROMPT_TEMPLATES = {
 }
 
 SOFTWARE_PROMPT_TEMPLATES = {
-    "software_install": {
-        "category": "软件安装",
-        "label": "安装工作流软件",
-        "task": "在当前电脑通过 pipx 从正式 GitHub Release 安装工作流软件，并验证全局命令可用。",
-        "sections": (
-            "当前 Python、pipx 与已安装版本",
-            "选用的正式 Release 和安装来源",
-            "实际执行的安装命令",
-            "project-hooks version 验证结果",
-            "PATH、权限或依赖问题",
-            "下一步初始化命令",
-        ),
-        "extra_rules": (
-            "从最新稳定 GitHub Release 的 manifest 确认 wheel 文件名和摘要，再执行 `pipx install <wheel-url>`。"
-            "已有安装时先报告当前版本，不得未经确认使用 `--force` 覆盖。"
-        ),
-    },
-    "project_initialize": {
-        "category": "软件安装",
-        "label": "初始化科研项目",
-        "task": "在指定的现有 Git 科研仓库首次初始化 project-hooks，并验证项目不包含工作流软件源码副本。",
-        "sections": (
-            "目标仓库和初始化前检查",
-            "project-hooks init 执行结果",
-            "新建的配置、规范与事件文件",
-            "Git Hook 和数据库检查结果",
-            "未被覆盖的既有科研文件",
-            "建议提交的初始化文件",
-        ),
-        "extra_rules": (
-            "目标必须是已有 Git 仓库；执行 `project-hooks init .` 后运行 `project-hooks check`。"
-            "确认项目中没有新增 `project_hooks/` 软件源码目录。"
-        ),
-    },
-    "legacy_project_adopt": {
-        "category": "软件安装",
-        "label": "接管旧版项目",
-        "task": "让已使用旧模板或已有事件日志的科研项目改由全局安装的 project-hooks 管理，同时保留历史。",
-        "sections": (
-            "旧项目结构、版本和事件日志状态",
-            "备份与只读预检",
-            "project-hooks install 接管结果",
-            "安装清单、Git Hook 和配置变化",
-            "事件日志与数据库一致性验证",
-            "仍需人工处理的冲突",
-        ),
-        "extra_rules": (
-            "不得覆盖旧 `maintenance/events.jsonl`；先执行 `project-hooks install` 建立安装清单，"
-            "再按检查结果决定是否执行 `project-hooks update`。"
-        ),
-    },
-    "software_version_status": {
-        "category": "软件升级",
-        "label": "查看软件版本",
-        "task": "只读检查启动器、核心、项目模板和数据库 schema 版本，并说明是否一致。",
-        "sections": (
-            "启动器版本",
-            "当前核心版本",
-            "项目模板版本",
-            "数据库 schema 版本",
-            "版本不一致或兼容性警告",
-            "建议的下一步",
-        ),
-        "extra_rules": "执行 `project-hooks version`；本提示词只读，不运行 update。",
-    },
-    "software_update_check": {
-        "category": "软件升级",
-        "label": "检查可用更新",
-        "task": "只读查询最新稳定 GitHub Release，判断当前核心和科研项目是否需要升级，不应用修改。",
-        "sections": (
-            "当前安装与项目版本",
-            "最新稳定版本",
-            "Release 来源和校验信息",
-            "是否需要升级",
-            "预期迁移和潜在冲突",
-            "建议执行的更新命令",
-        ),
-        "extra_rules": "执行 `project-hooks update --check`；本提示词不得应用更新。",
-    },
     "software_update_latest": {
         "category": "软件升级",
         "label": "更新到最新版本",
-        "task": "在满足安全前提时执行 project-hooks update，将全局核心和当前科研项目更新到最新稳定版本。",
+        "task": "在满足安全前提时执行本地 EXE update，将项目运行时和当前科研项目更新到最新稳定版本。",
         "sections": (
             "更新前分支、活动任务和 Git 同步检查",
             "原版本与目标版本",
@@ -244,7 +168,7 @@ SOFTWARE_PROMPT_TEMPLATES = {
     "software_update_target": {
         "category": "软件升级",
         "label": "更新到指定版本",
-        "task": "将工作流核心和当前科研项目升级或回退到用户明确指定的兼容版本，并验证迁移结果。",
+        "task": "将项目内 EXE运行时和当前科研项目升级或回退到用户明确指定的兼容版本，并验证迁移结果。",
         "sections": (
             "当前版本和用户指定目标版本",
             "目标 Release 与兼容范围",
@@ -297,7 +221,7 @@ SOFTWARE_PROMPT_TEMPLATES = {
         ),
         "extra_rules": (
             "如果用户没有明确确认目标版本号，先给出 SemVer 建议并停止在写操作前等待确认。"
-            "确认后同步更新 `pyproject.toml`、`project_hooks/__init__.py` 和 `CHANGELOG.md`，"
+            "确认后同步更新 `project_hooks/__init__.py` 和 `CHANGELOG.md`，"
             "运行全量测试并构建 Release 资产，提交消息使用 `release: v<version>`。"
             "只创建版本提交，不推送、不创建标签、不创建 Release。"
         ),
@@ -317,24 +241,24 @@ SOFTWARE_PROMPT_TEMPLATES = {
         "extra_rules": (
             "没有用户对具体版本号和本次发布的明确确认时，不得推送或创建标签。"
             "确认版本提交已经位于 main 且测试通过后，先推送 main，再创建并推送注释标签 `v<version>`，"
-            "等待 Release workflow 结束并核对三个正式资产。"
+            "等待 Release workflow 结束并核对 EXE 和 manifest 两个正式资产。"
             "不得移动或复用既有版本标签，不得自动合并分支。"
         ),
     },
     "release_install_verify": {
         "category": "版本发布",
         "label": "验证正式版本安装",
-        "task": "从正式 GitHub Release 在隔离环境安装指定版本，并对一个临时 Git 仓库执行初始化和核心生命周期冒烟验证。",
+        "task": "从正式 GitHub Release 下载指定版本 EXE，并在临时项目文件夹执行初始化和生命周期冒烟验证。",
         "sections": (
             "目标版本和 Release 资产",
-            "wheel、核心 ZIP 和 manifest 摘要校验",
-            "隔离环境安装结果",
+            "EXE 和 manifest 摘要校验",
+            "临时文件夹下载结果",
             "临时仓库 init、version 和 check",
             "start、state update、end 生命周期冒烟",
             "验证结论和临时文件清理状态",
         ),
         "extra_rules": (
-            "只使用临时隔离环境和临时 Git 仓库，从正式 wheel 安装后验证 "
+            "只使用临时文件夹和临时 Git 仓库，从正式 Release 下载 EXE后验证 "
             "`init → version → check → start → state update → end`；不得拿真实科研项目做破坏性测试。"
         ),
     },
@@ -350,6 +274,7 @@ WORKBENCH_PROMPT_CATEGORIES = (
 )
 
 RESEARCH_PROMPT_COMMON_RULES = """请遵守以下规则：
+0. 以下所有 `project-hooks` 命令均使用项目根目录的 `.\\project-hooks.exe` 执行。
 1. 只使用当前 Codex 对话中已经选择的文件、已有消息和我提供的资料作为已有证据。
 2. 如果材料不足，先明确指出还需要选择或提供哪些文件；停止补造事实、数据、引文或实验结果。
 3. 明确区分“已有证据”“合理推断”和“待验证建议”。
@@ -360,6 +285,7 @@ RESEARCH_PROMPT_COMMON_RULES = """请遵守以下规则：
 """
 
 SOFTWARE_PROMPT_COMMON_RULES = """请遵守以下规则：
+0. 以下所有 `project-hooks` 命令均使用项目根目录的 `.\\project-hooks.exe` 执行。
 1. 先确认当前操作针对工作流软件开发仓库、普通科研项目还是临时测试仓库，不得混淆目标。
 2. 除首次初始化外，先运行 `project-hooks context --format markdown` 并按 core_read_order 阅读规范。
 3. 先做只读预检；任何写操作都必须遵守现有任务生命周期、分支限制、活动任务和 Git 同步要求。
@@ -699,6 +625,29 @@ class DashboardDataProvider:
         snapshot = self.model.dashboard_snapshot(self.branch)
         snapshot["classification"] = self.classifier(snapshot["branch"])
         return snapshot
+
+    @property
+    def project_root(self) -> Path:
+        return self.model.database_path.parent.parent
+
+    def version_info(self) -> dict:
+        return version_report(self.project_root)
+
+    def check_for_updates(self) -> dict:
+        return check_latest_update(self.project_root)
+
+
+def version_status_text(report: dict) -> str:
+    project = report.get("project_version") or "未初始化"
+    return f"版本：EXE {report['application_version']} / 项目 {project}"
+
+
+def update_status_text(result: dict | None = None, error: str | None = None) -> str:
+    if error:
+        return "更新：检查失败"
+    if result and result.get("status") == "update-available":
+        return f"更新：发现 {result['latest_version']}"
+    return "更新：已是最新版"
 
 
 class DashboardController:
@@ -1753,6 +1702,7 @@ class DashboardApp:
         self.root, self.tk, self.ttk = root, tk, ttk
         self.scrolledtext = scrolledtext
         self.controller = DashboardController(provider)
+        self.provider = provider
         self.refresh_seconds = refresh_seconds
         self.snapshot: dict | None = None
         self.active_preset: str | None = None
@@ -1767,8 +1717,14 @@ class DashboardApp:
         self.branch_label.pack(side="left")
         self.health_label = ttk.Label(toolbar, text="数据库：加载中")
         self.health_label.pack(side="left", padx=(18, 0))
+        self.version_label = ttk.Label(toolbar, text=version_status_text(provider.version_info()))
+        self.version_label.pack(side="left", padx=(18, 0))
         ttk.Button(toolbar, text="刷新", command=self.refresh).pack(side="right")
         ttk.Button(toolbar, text="高级查看", command=self.open_advanced).pack(side="right", padx=(0, 6))
+        self.update_button = ttk.Button(toolbar, text="检查更新", command=self.check_for_updates)
+        self.update_button.pack(side="right", padx=(0, 6))
+        self.update_label = ttk.Label(toolbar, text="")
+        self.update_label.pack(side="right", padx=(0, 8))
 
         search_toolbar = ttk.Frame(root, padding=(10, 0, 10, 8))
         search_toolbar.pack(fill="x")
@@ -1857,6 +1813,31 @@ class DashboardApp:
         if hasattr(self, "status"):
             self.status.configure(text=message)
 
+    def check_for_updates(self) -> None:
+        self.update_button.configure(state="disabled")
+        self.update_label.configure(text="更新：检查中…")
+
+        def worker() -> None:
+            detail = ""
+            try:
+                result = self.provider.check_for_updates()
+                message = update_status_text(result)
+            except Exception as exc:
+                message = update_status_text(error=str(exc))
+                detail = f"{message}：{exc}"
+
+            def finish() -> None:
+                self.update_label.configure(text=message)
+                self.update_button.configure(state="normal")
+                self.status.configure(text=detail or message)
+
+            try:
+                self.root.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def refresh(self) -> None:
         snapshot, error = self.controller.refresh()
         if error is None and snapshot is not None:
@@ -1873,6 +1854,7 @@ class DashboardApp:
         health = snapshot["health"]
         self.branch_label.configure(text=f"分支：{snapshot['branch']}（{branch_type}）")
         self.health_label.configure(text=f"数据库：{health['status']}")
+        self.version_label.configure(text=version_status_text(self.provider.version_info()))
         overview = self.overview_text(snapshot)
         self.overview.configure(state="normal")
         self.overview.delete("1.0", "end")

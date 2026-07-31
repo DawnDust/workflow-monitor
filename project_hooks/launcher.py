@@ -1,4 +1,4 @@
-"""Stable launcher for selecting an installed, versioned project-hooks core."""
+"""Stable launcher for the project-local Windows executable runtime."""
 
 from __future__ import annotations
 
@@ -11,7 +11,12 @@ from pathlib import Path
 from . import __version__
 
 
-ACTIVE_ENV = "PROJECT_HOOKS_CORE_ACTIVE"
+ACTIVE_ENV = "PROJECT_HOOKS_EXE_ACTIVE"
+PORTABLE_ROOT_ENV = "PROJECT_HOOKS_PORTABLE_ROOT"
+
+
+def is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
 
 
 def configure_utf8_stdio() -> None:
@@ -22,49 +27,53 @@ def configure_utf8_stdio() -> None:
             reconfigure(encoding="utf-8")
 
 
-def cache_root() -> Path:
-    base = os.environ.get("LOCALAPPDATA")
-    if base:
-        return Path(base) / "project-maintenance-workflow"
-    return Path.home() / ".cache" / "project-maintenance-workflow"
+def runtime_root(project_root: Path) -> Path:
+    return project_root.resolve() / ".project_hooks" / "runtime"
 
 
-def selected_core() -> Path | None:
-    pointer = cache_root() / "current.json"
+def selected_executable(project_root: Path) -> Path | None:
+    """Return the selected project-local executable when it is usable."""
+    runtime = runtime_root(project_root)
+    pointer = runtime / "current.json"
     if not pointer.is_file():
         return None
     try:
         data = json.loads(pointer.read_text(encoding="utf-8"))
         selected = str(data["version"])
-        core = cache_root() / "cores" / selected
-    except (KeyError, OSError, ValueError, TypeError):
-        return None
-    try:
+        executable = Path(str(data.get("executable") or (
+            runtime / "executables" / selected / "project-hooks.exe"
+        ))).resolve()
         selected_key = tuple(int(part) for part in selected.split("."))
         bundled_key = tuple(int(part) for part in __version__.split("."))
-        if selected_key < bundled_key:
-            return None
-    except ValueError:
+    except (KeyError, OSError, ValueError, TypeError):
         return None
-    return core if (core / "project_hooks" / "__init__.py").is_file() else None
+    if selected_key < bundled_key or not executable.is_file():
+        return None
+    try:
+        if executable.samefile(Path(sys.executable)):
+            return None
+    except OSError:
+        pass
+    return executable
+
+
+def run_selected_executable(args: list[str], *, portable_root: Path) -> int | None:
+    """Delegate the stable project EXE to its selected project-local version."""
+    if not is_frozen() or os.environ.get(ACTIVE_ENV):
+        return None
+    executable = selected_executable(portable_root)
+    if executable is None:
+        return None
+    env = os.environ.copy()
+    env[ACTIVE_ENV] = "1"
+    env[PORTABLE_ROOT_ENV] = str(portable_root.resolve())
+    completed = subprocess.run([str(executable), *args], env=env, check=False)
+    return completed.returncode
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Source-tree development entrypoint; releases use windows_entry.main."""
     configure_utf8_stdio()
-    args = list(sys.argv[1:] if argv is None else argv)
-    core = None if os.environ.get(ACTIVE_ENV) else selected_core()
-    if core is not None:
-        env = os.environ.copy()
-        env[ACTIVE_ENV] = "1"
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
-        existing = env.get("PYTHONPATH")
-        env["PYTHONPATH"] = str(core) + (os.pathsep + existing if existing else "")
-        completed = subprocess.run(
-            [sys.executable, "-m", "project_hooks", *args],
-            env=env,
-            check=False,
-        )
-        return completed.returncode
     from .cli import main as cli_main
-    return cli_main(args)
+
+    return cli_main(list(sys.argv[1:] if argv is None else argv))

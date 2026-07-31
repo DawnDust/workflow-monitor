@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,8 +16,8 @@ from project_hooks.project_manager import (
     apply_project_update,
     initialize_project,
 )
-from project_hooks.updater import UpdateError, replace_directory, run_update, verify_digest
-
+from project_hooks.updater import UpdateError, check_latest_update, run_update, verify_digest
+from project_hooks.windows_entry import PortableBootstrapError, prepare_portable_project
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,14 +30,6 @@ class DistributionTests(unittest.TestCase):
         self.git("init", "-b", "main")
         self.git("config", "user.name", "Project Hooks Test")
         self.git("config", "user.email", "hooks@example.invalid")
-
-    def test_windows_directory_replace_retries_temporary_lock(self) -> None:
-        source, target = self.root / "source", self.root / "target"
-        with patch("project_hooks.updater.os.replace", side_effect=[PermissionError(), None]) as replace:
-            with patch("project_hooks.updater.time.sleep") as sleep:
-                replace_directory(source, target)
-        self.assertEqual(replace.call_count, 2)
-        sleep.assert_called_once()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -61,29 +50,19 @@ class DistributionTests(unittest.TestCase):
     def init(self, version: str = CURRENT_VERSION) -> None:
         initialize_project(self.root, version)
 
-    def core_release(self, *, digest_override: str | None = None) -> Path:
+    def exe_release(self, *, digest_override: str | None = None) -> Path:
         release = Path(self.temp.name) / "release"
         release.mkdir(exist_ok=True)
-        core = release / f"project-hooks-core-{CURRENT_VERSION}.zip"
-        with zipfile.ZipFile(core, "w", zipfile.ZIP_DEFLATED) as archive:
-            for path in sorted((SOURCE_ROOT / "project_hooks").rglob("*.py")):
-                if "__pycache__" not in path.parts:
-                    archive.write(path, path.relative_to(SOURCE_ROOT).as_posix())
-        wheel = release / f"project_maintenance_workflow-{CURRENT_VERSION}-py3-none-any.whl"
-        wheel.write_bytes(b"test wheel")
+        windows_exe = release / "project-hooks.exe"
+        windows_exe.write_bytes(b"test executable")
         manifest = {
             "version": CURRENT_VERSION,
             "launcher_min_version": "1.0.0",
             "event_schema": {"minimum": 1, "maximum": 2},
-            "core": {
-                "file": core.name,
-                "url": core.as_uri(),
-                "sha256": digest_override or hashlib.sha256(core.read_bytes()).hexdigest(),
-            },
-            "wheel": {
-                "file": wheel.name,
-                "url": wheel.as_uri(),
-                "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+            "windows_exe": {
+                "file": windows_exe.name,
+                "url": windows_exe.as_uri(),
+                "sha256": digest_override or hashlib.sha256(windows_exe.read_bytes()).hexdigest(),
             },
         }
         manifest_path = release / "release-manifest.json"
@@ -104,29 +83,126 @@ class DistributionTests(unittest.TestCase):
         with self.assertRaises(ProjectManagerError):
             initialize_project(self.root, CURRENT_VERSION)
 
+    def test_release_manifest_contains_only_executable_asset(self) -> None:
+        dist = Path(self.temp.name) / "dist"
+        dist.mkdir()
+        executable = dist / "project-hooks.exe"
+        executable.write_bytes(b"release executable")
+
+        subprocess.run(
+            [
+                sys.executable, str(SOURCE_ROOT / "scripts/build_release.py"),
+                "--version", CURRENT_VERSION, "--dist", str(dist),
+            ],
+            cwd=SOURCE_ROOT, check=True, capture_output=True,
+        )
+
+        manifest = json.loads((dist / "release-manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(manifest),
+            {"version", "launcher_min_version", "event_schema", "windows_exe"},
+        )
+        self.assertEqual(manifest["windows_exe"]["file"], "project-hooks.exe")
+
     def test_project_root_is_discovered_from_descendant(self) -> None:
         self.init()
         nested = self.root / "analysis/deep"
         nested.mkdir(parents=True)
         self.assertEqual(discover_project_root(nested), self.root.resolve())
 
-    def test_update_preserves_existing_journal_bytes_and_rebuilds_database(self) -> None:
+    def test_portable_bootstrap_initializes_empty_folder_and_local_hook(self) -> None:
+        portable = Path(self.temp.name) / "portable"
+        portable.mkdir()
+        executable = portable / "project-hooks.exe"
+        executable.write_bytes(b"placeholder")
+
+        initialized = prepare_portable_project(portable, executable)
+
+        self.assertTrue(initialized)
+        self.assertTrue((portable / ".git").is_dir())
+        self.assertTrue((portable / ".codex/project-maintenance-workflow.json").is_file())
+        self.assertIn("./project-hooks.exe pre-commit", (
+            portable / ".githooks/pre-commit"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("/project-hooks.exe", (portable / ".gitignore").read_text(encoding="utf-8"))
+        self.assertFalse(prepare_portable_project(portable, executable))
+
+    def test_portable_bootstrap_rejects_nonempty_uninitialized_folder(self) -> None:
+        portable = Path(self.temp.name) / "occupied"
+        portable.mkdir()
+        executable = portable / "project-hooks.exe"
+        executable.write_bytes(b"placeholder")
+        (portable / "research.txt").write_text("keep", encoding="utf-8")
+
+        with self.assertRaisesRegex(PortableBootstrapError, "不是空文件夹"):
+            prepare_portable_project(portable, executable)
+
+        self.assertEqual((portable / "research.txt").read_text(encoding="utf-8"), "keep")
+        self.assertFalse((portable / ".git").exists())
+
+    def test_portable_bootstrap_accepts_existing_empty_git_repository(self) -> None:
+        portable = Path(self.temp.name) / "empty-git"
+        portable.mkdir()
+        subprocess.run(["git", "init", "-b", "main"], cwd=portable, check=True, capture_output=True)
+        executable = portable / "project-hooks.exe"
+        executable.write_bytes(b"placeholder")
+
+        self.assertTrue(prepare_portable_project(portable, executable))
+        self.assertEqual(
+            subprocess.run(
+                ["git", "branch", "--show-current"], cwd=portable,
+                text=True, encoding="utf-8", capture_output=True, check=True,
+            ).stdout.strip(),
+            "main",
+        )
+
+    def test_portable_bootstrap_reports_missing_git_without_writing(self) -> None:
+        portable = Path(self.temp.name) / "missing-git"
+        portable.mkdir()
+        executable = portable / "project-hooks.exe"
+        executable.write_bytes(b"placeholder")
+
+        with patch("project_hooks.windows_entry._git_available", return_value=False):
+            with self.assertRaisesRegex(PortableBootstrapError, "未找到 Git"):
+                prepare_portable_project(portable, executable)
+
+        self.assertEqual(sorted(path.name for path in portable.iterdir()), ["project-hooks.exe"])
+
+    def test_portable_bootstrap_requires_canonical_executable_name(self) -> None:
+        portable = Path(self.temp.name) / "renamed-exe"
+        portable.mkdir()
+        executable = portable / "project-hooks (1).exe"
+        executable.write_bytes(b"placeholder")
+
+        with self.assertRaisesRegex(PortableBootstrapError, "必须命名为 project-hooks.exe"):
+            prepare_portable_project(portable, executable)
+
+    def test_portable_bootstrap_rolls_back_files_created_during_failure(self) -> None:
+        portable = Path(self.temp.name) / "failed-portable"
+        portable.mkdir()
+        executable = portable / "project-hooks.exe"
+        executable.write_bytes(b"placeholder")
+
+        def fail_after_partial_write(root: Path, version: str) -> None:
+            (root / ".codex").mkdir()
+            (root / ".codex/partial.json").write_text(version, encoding="utf-8")
+            raise ProjectManagerError("injected failure")
+
+        with patch("project_hooks.windows_entry.initialize_project", side_effect=fail_after_partial_write):
+            with self.assertRaisesRegex(ProjectManagerError, "injected failure"):
+                prepare_portable_project(portable, executable)
+
+        self.assertEqual(sorted(path.name for path in portable.iterdir()), ["project-hooks.exe"])
+
+    def test_project_update_preserves_existing_journal_bytes_and_rebuilds_database(self) -> None:
         self.init("0.9.0")
         self.commit()
         before = (self.root / "maintenance/events.jsonl").read_bytes()
-        manifest = self.core_release()
-        cache = Path(self.temp.name) / "cache"
-        with patch.dict(os.environ, {
-            "LOCALAPPDATA": str(cache),
-            "PYTHONUTF8": "0",
-            "PYTHONIOENCODING": "cp1252",
-        }):
-            result = run_update(self.root, manifest_url=manifest.as_uri())
+        result = apply_project_update(self.root, CURRENT_VERSION)
         after = (self.root / "maintenance/events.jsonl").read_bytes()
         self.assertTrue(after.startswith(before))
         self.assertIn(b"workflow.upgraded", after[len(before):])
         self.assertEqual(result["status"], "updated")
-        self.assertTrue((cache / "project-maintenance-workflow/current.json").is_file())
         self.assertTrue((self.root / ".project_hooks/maintenance.sqlite3").is_file())
 
     def test_customized_managed_file_is_preserved_and_reported(self) -> None:
@@ -166,22 +242,69 @@ class DistributionTests(unittest.TestCase):
         self.commit()
         journal = self.root / "maintenance/events.jsonl"
         before = journal.read_bytes()
-        manifest = self.core_release(digest_override="0" * 64)
-        cache = Path(self.temp.name) / "bad-cache"
-        with patch.dict(os.environ, {"LOCALAPPDATA": str(cache)}):
+        manifest = self.exe_release(digest_override="0" * 64)
+        with patch("project_hooks.updater.is_frozen", return_value=True):
             with self.assertRaises(UpdateError):
                 run_update(self.root, manifest_url=manifest.as_uri())
         self.assertEqual(journal.read_bytes(), before)
-        self.assertFalse((cache / "project-maintenance-workflow/current.json").exists())
+        self.assertFalse((self.root / ".project_hooks/runtime/current.json").exists())
 
     def test_check_only_does_not_change_project(self) -> None:
         self.init()
         self.commit()
-        manifest = self.core_release()
+        manifest = self.exe_release()
         before = self.git("status", "--porcelain").stdout
         result = run_update(self.root, check_only=True, manifest_url=manifest.as_uri())
         self.assertEqual(result["status"], "current")
         self.assertEqual(self.git("status", "--porcelain").stdout, before)
+
+    def test_dashboard_update_check_is_read_only_without_update_preflight(self) -> None:
+        self.init()
+        manifest = self.exe_release()
+        (self.root / "uncommitted.txt").write_text("dirty", encoding="utf-8")
+        before = (self.root / "maintenance/events.jsonl").read_bytes()
+        result = check_latest_update(self.root, manifest.as_uri())
+        self.assertEqual(result["status"], "current")
+        self.assertEqual((self.root / "maintenance/events.jsonl").read_bytes(), before)
+
+    def test_frozen_update_caches_versioned_executable_and_writes_pointer(self) -> None:
+        self.init("0.9.0")
+        self.commit()
+        manifest = self.exe_release()
+        migration = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=json.dumps({"status": "updated", "changed": [], "conflicts": []}),
+            stderr="",
+        )
+        real_run = subprocess.run
+
+        def run_portable(command, *args, **kwargs):
+            if str(command[0]).endswith("project-hooks.exe"):
+                return migration
+            return real_run(command, *args, **kwargs)
+
+        with patch("project_hooks.updater.is_frozen", return_value=True):
+            with patch("project_hooks.updater.subprocess.run", side_effect=run_portable) as run:
+                result = run_update(self.root, manifest_url=manifest.as_uri())
+
+        pointer = json.loads((
+            self.root / ".project_hooks/runtime/current.json"
+        ).read_text(encoding="utf-8"))
+        selected = Path(pointer["executable"])
+        self.assertEqual(result["status"], "updated")
+        self.assertTrue(selected.is_file())
+        self.assertEqual(selected.read_bytes(), b"test executable")
+        self.assertTrue(selected.is_relative_to(self.root / ".project_hooks/runtime"))
+        self.assertEqual(run.call_args.args[0][0], str(selected))
+
+    def test_non_frozen_update_refuses_to_install_executable(self) -> None:
+        self.init("0.9.0")
+        self.commit()
+        manifest = self.exe_release()
+
+        with patch("project_hooks.updater.is_frozen", return_value=False):
+            with self.assertRaisesRegex(UpdateError, "只能通过项目根目录"):
+                run_update(self.root, manifest_url=manifest.as_uri())
 
     def test_offline_and_requested_version_mismatch_do_not_change_project(self) -> None:
         self.init("0.9.0")
@@ -190,7 +313,7 @@ class DistributionTests(unittest.TestCase):
         missing = (Path(self.temp.name) / "missing-manifest.json").as_uri()
         with self.assertRaises(UpdateError):
             run_update(self.root, manifest_url=missing)
-        manifest = self.core_release()
+        manifest = self.exe_release()
         with self.assertRaises(UpdateError):
             run_update(self.root, target_version="999.0.0", manifest_url=manifest.as_uri())
         self.assertEqual((self.root / "maintenance/events.jsonl").read_bytes(), before)

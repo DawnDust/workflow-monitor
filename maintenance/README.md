@@ -31,26 +31,28 @@
 
 ### 日常入口
 
+所有命令使用仓库根目录的 `.\project-hooks.exe`，不依赖全局命令或 Python 环境。
+
 ```powershell
-project-hooks
-project-hooks context --format markdown
-project-hooks start --help
-project-hooks end --help
-project-hooks dashboard
+.\project-hooks.exe
+.\project-hooks.exe context --format markdown
+.\project-hooks.exe start --help
+.\project-hooks.exe end --help
+.\project-hooks.exe dashboard
 ```
 
-无参数入口显示行动优先概览；`context` 保留完整的目标、判决、断点和交接信息，供生命周期与自动化读取。普通 `--help` 只列日常入口，`--help-all` 列出高级命令。新科研仓库使用 `project-hooks init .` 初始化；新 clone 或 worktree 运行一次 `install`，为当前仓库设置 `core.hooksPath=.githooks`。`python -m project_hooks` 继续兼容。
+无参数入口打开 Dashboard；`context` 保留完整的目标、判决、断点和交接信息。普通 `--help` 只列日常入口，`--help-all` 列出高级命令。空文件夹首次双击自动初始化；新 clone 或 worktree 将 EXE放到根目录后运行 `.\project-hooks.exe install`，为当前仓库设置 `core.hooksPath=.githooks`。
 
 ### 软件升级
 
-工作流软件由 `pipx` 全局安装，项目内只保存配置、受管规范和永久事件日志。在干净且与
+工作流软件只使用项目根目录的 Windows EXE。在干净且与
 `origin/main` 同步的 `main` 分支运行：
 
 ```powershell
-project-hooks update
+.\project-hooks.exe update
 ```
 
-命令从 GitHub Release 获取并校验版本化核心，迁移配置、保留事件日志既有内容、重建
+命令从 GitHub Release 获取并校验新版 EXE，在 `.project_hooks/runtime/` 保存项目内版本化运行时，迁移配置、保留事件日志既有内容、重建
 SQLite 并验证完整性。升级器不自动提交或推送。用户修改过的规范文件不会被覆盖，新版
 候选写入 `.project_hooks/update-conflicts/<version>/`；科研资料、项目根 README 和
 `maintenance/events.jsonl` 永不被模板替换。
@@ -64,16 +66,16 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 | 探索流程 | `attempt`、`exploration`、`prepare-pr`、`archive-attempt` |
 | 数据维护 | `db status`、`db verify`、`db rebuild`、`db migrate` |
 
-使用 `python -m project_hooks <命令> --help` 查看具体参数。`pre-commit` 是仓库 Hook 的内部入口，不属于用户命令。
+使用 `.\project-hooks.exe <命令> --help` 查看具体参数。`pre-commit` 是仓库 Hook 的内部入口，不属于用户命令。
 
 ## 二、任务生命周期
 
 每次任务固定按以下顺序执行：
 
-1. 运行 `python -m project_hooks context --format markdown`，再读取本规范。
-2. 首次写入前运行 `python -m project_hooks start <task_id> ...`。
+1. 运行 `.\project-hooks.exe context --format markdown`，再读取本规范。
+2. 首次写入前运行 `.\project-hooks.exe start <task_id> ...`。
 3. 使用 `state update` 更新当前状态；路线改变时使用 `decision add`；探索任务使用 `attempt update` 记录假设、证据和结论。
-4. 运行 `python -m project_hooks end <task_id> ...`，由 Hook 写入单一完成事件；也可直接在 `end` 中提供状态、判决、断点和下一步等参数，一步完成最终状态更新与任务结束。
+4. 运行 `.\project-hooks.exe end <task_id> ...`，由 Hook 写入单一完成事件；也可直接在 `end` 中提供状态、判决、断点和下一步等参数，一步完成最终状态更新与任务结束。
 
 稳定维护使用 `--track stable`。探索使用 `--track research|experiment|sandbox --topic <slug>`，由命令保存基线并安全创建或复用分支。
 
@@ -117,14 +119,14 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 科研资料索引分为 `literature`、`data`、`theory`、`simulation` 和 `output` 五类。实体文件保留在项目目录，数据库只记录项目相对路径、摘要、状态、标签、来源、扩展信息和类型化关系。所有写命令要求已有活动任务：
 
 ```powershell
-python -m project_hooks catalog scan --dry-run
-python -m project_hooks catalog scan
-python -m project_hooks catalog ingest <文件> --kind literature
-python -m project_hooks catalog add --kind theory --title "理论名称" --summary "简短说明"
-python -m project_hooks catalog bulk-update --tag to-read --add-tag reviewed
-python -m project_hooks catalog link <source-id> supports <target-id>
-python -m project_hooks catalog list --kind literature
-python -m project_hooks catalog context --tag core --format markdown
+.\project-hooks.exe catalog scan --dry-run
+.\project-hooks.exe catalog scan
+.\project-hooks.exe catalog ingest <文件> --kind literature
+.\project-hooks.exe catalog add --kind theory --title "理论名称" --summary "简短说明"
+.\project-hooks.exe catalog bulk-update --tag to-read --add-tag reviewed
+.\project-hooks.exe catalog link <source-id> supports <target-id>
+.\project-hooks.exe catalog list --kind literature
+.\project-hooks.exe catalog context --tag core --format markdown
 ```
 
 默认扫描将 `source/`、`data/`、`theory/`、`analysis/`、`outputs/` 依次映射到五类资料。路径必须位于项目目录内；扫描不会删除记录，文件消失时只标记为 `missing`。条目使用 `archive` 和 `restore` 软归档，关系使用 `link` 和 `unlink` 维护。
@@ -135,16 +137,17 @@ python -m project_hooks catalog context --tag core --format markdown
 
 任务的发布状态不单独写事件，而是根据任务关联提交与 `origin/main` 的祖先关系实时推导为已发布、部分发布、待发布、仅记录或未知。Git 同步且当前任务已发布后，概览会隐藏已完成的提交、发布、推送和远端核对步骤，并只读派生“已完成并发布”状态；普通后续事项继续保留，不修改原始事件。发布后不再创建“记录已发布”专用任务。
 
-运行 `python -m project_hooks dashboard` 打开 Tkinter 窗口，包含：
+双击 `.\project-hooks.exe` 打开 Tkinter Dashboard，包含：
 
 - 七个日常分页：概览、搜索、资料、工作台、任务、时间线和记录。
+- 顶部显示当前 EXE 与项目版本；“检查更新”在后台只读查询最新正式版本，不应用更新。
 - 概览按状态、活动任务、阻塞、下一步和 Git 同步顺序显示行动信息；当前目标和最近完成记录各压缩为一行，完整判决、断点和历史仍可从其他页面查看。
 - 跨科研资料、任务、决策、探索和提交的搜索，以及最近任务、失败探索和未合并分支快捷筛选；搜索结果使用左侧列表、右侧完整详情的分栏布局。
 - 资料页按类型、状态和标签筛选，使用左侧列表、右侧完整详情的分栏布局，显示摘要、路径、来源、扩展信息、关系和缺失文件警告，并可复制路径或 AI 上下文。
 - 概览显示五类资料数量、缺失与归档数量和最近新增资料；资料页可在本机文件管理器中打开文件所在位置。
 - 资料页的“复制 Codex 扫描提示词”会显示完整提示词并写入剪贴板；用户将其粘贴到任意合适的
   Codex 对话后，由 Codex 按提示遵循维护生命周期，Dashboard 本身不检测或启动 Codex。
-- 工作台共列出十九项提示词：七项科研提示词按文献研究、研究设计、研究复盘和研究规划分类，十二项软件提示词按软件安装、软件升级、版本发布和软件诊断分类。顶部“类型”下拉框默认显示“全部”，可按提示词分类筛选，并可与名称或任务说明的文本筛选组合使用；选择后右侧显示可临时编辑的完整提示词，只有点击复制按钮才写入剪贴板。模板不会被修改；科研提示词要求用户明确确认后才写入项目记录，版本发布提示词在缺少具体版本号或发布确认时必须停止危险动作。
+- 工作台共列出十四项提示词：七项科研提示词按文献研究、研究设计、研究复盘和研究规划分类，七项软件提示词按软件升级、版本发布和软件诊断分类。下载、初始化、接管、查看版本和检查更新已由 EXE 启动流程及 Dashboard 原生控件覆盖，不再重复列为提示词。顶部“类型”下拉框默认显示“全部”，可按提示词分类筛选，并可与名称或任务说明的文本筛选组合使用；选择后右侧显示可临时编辑的完整提示词，只有点击复制按钮才写入剪贴板。模板不会被修改；科研提示词要求用户明确确认后才写入项目记录，版本发布提示词在缺少具体版本号或发布确认时必须停止危险动作。
 - 任务页默认只列出时间、任务、结果和状态；历史 `publish_*` 与 `record_*_publication_*` 辅助任务折叠到主体任务详情，搜索和高级查看仍保留原始记录。
 - 记录页使用左侧列表、右侧完整详情的分栏布局，统一查看和筛选决策与探索；原始事件、Schema、日志哈希和刷新诊断集中在独立的只读“高级查看”窗口。
 - 任务、记录、提交与原始事件之间支持双向定位。

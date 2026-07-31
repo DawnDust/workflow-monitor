@@ -1,29 +1,20 @@
-"""GitHub Release client and atomic versioned-core updater."""
+"""GitHub Release client for the project-local Windows executable."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import shutil
 import subprocess
-import sys
 import tempfile
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from . import __version__
-from .launcher import ACTIVE_ENV, cache_root
-from .project_manager import (
-    INSTALLATION_PATH,
-    ProjectManagerError,
-    apply_project_update,
-    preflight_update,
-)
+from .launcher import ACTIVE_ENV, is_frozen, runtime_root
+from .project_manager import INSTALLATION_PATH, apply_project_update, preflight_update
 from .store import load_events
 
 
@@ -63,20 +54,19 @@ def load_manifest(url: str) -> dict:
         manifest = json.loads(fetch_bytes(url).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise UpdateError("Release manifest 不是合法 UTF-8 JSON") from exc
-    required = {"version", "launcher_min_version", "core", "wheel"}
+    required = {"version", "launcher_min_version", "windows_exe"}
     if not isinstance(manifest, dict) or not required.issubset(manifest):
         raise UpdateError("Release manifest 缺少必要字段")
     version_key(str(manifest["version"]))
+    executable = manifest["windows_exe"]
+    if not isinstance(executable, dict) or not executable.get("file") or not executable.get("sha256"):
+        raise UpdateError("Release manifest 的 Windows EXE 资产信息不完整")
     if version_key(LAUNCHER_VERSION) < version_key(str(manifest["launcher_min_version"])):
-        wheel = manifest["wheel"].get("url") or manifest["wheel"].get("file")
+        download = executable.get("url") or executable.get("file")
         raise UpdateError(
-            "当前稳定启动器过旧；请执行 "
-            f"`pipx install --force {wheel}` 后重试"
+            "当前稳定启动 EXE 过旧；请从 GitHub Release 下载新版 "
+            f"{download} 并替换项目根目录的 project-hooks.exe"
         )
-    for name in ("core", "wheel"):
-        asset = manifest[name]
-        if not isinstance(asset, dict) or not asset.get("file") or not asset.get("sha256"):
-            raise UpdateError(f"Release manifest 的 {name} 资产信息不完整")
     return manifest
 
 
@@ -92,59 +82,41 @@ def verify_digest(content: bytes, expected: str) -> None:
         raise UpdateError(f"下载摘要不匹配：期望 {expected}，实际 {actual}")
 
 
-def replace_directory(source: Path, target: Path) -> None:
-    """Retry short-lived Windows directory locks without hiding persistent failures."""
-    for attempt in range(5):
-        try:
-            os.replace(source, target)
-            return
-        except PermissionError:
-            if attempt == 4:
-                raise
-            time.sleep(0.05 * (attempt + 1))
-
-
-def safe_extract_core(content: bytes, version: str) -> Path:
-    cores = cache_root() / "cores"
-    target = cores / version
+def cache_executable(content: bytes, version: str, project_root: Path) -> Path:
+    """Store a verified executable inside the project's ignored runtime directory."""
+    folder = runtime_root(project_root) / "executables" / version
+    target = folder / "project-hooks.exe"
     content_digest = hashlib.sha256(content).hexdigest()
-    digest_file = target / ".core-sha256"
-    if ((target / "project_hooks/__init__.py").is_file()
-            and digest_file.is_file()
+    digest_file = folder / ".exe-sha256"
+    if (target.is_file() and digest_file.is_file()
             and digest_file.read_text(encoding="ascii").strip() == content_digest):
         return target
-    cores.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f"{version}-", dir=cores))
-    archive = staging / "core.zip"
-    archive.write_bytes(content)
+    folder.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix="project-hooks-", suffix=".exe", dir=folder)
     try:
-        with zipfile.ZipFile(archive) as bundle:
-            for member in bundle.infolist():
-                path = PurePosixPath(member.filename)
-                if path.is_absolute() or ".." in path.parts:
-                    raise UpdateError(f"核心包包含不安全路径: {member.filename}")
-            bundle.extractall(staging)
-        archive.unlink()
-        if not (staging / "project_hooks/__init__.py").is_file():
-            raise UpdateError("核心包缺少 project_hooks/__init__.py")
-        (staging / ".core-sha256").write_text(content_digest + "\n", encoding="ascii")
-        if target.exists():
-            shutil.rmtree(target)
-        replace_directory(staging, target)
-        return target
-    except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, target)
+        digest_file.write_text(content_digest + "\n", encoding="ascii")
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+    return target
 
 
-def write_pointer(version: str) -> None:
-    root = cache_root()
-    root.mkdir(parents=True, exist_ok=True)
-    pointer = root / "current.json"
-    descriptor, name = tempfile.mkstemp(prefix="current-", suffix=".json", dir=root)
+def write_pointer(version: str, project_root: Path, executable: Path) -> None:
+    runtime = runtime_root(project_root)
+    runtime.mkdir(parents=True, exist_ok=True)
+    pointer = runtime / "current.json"
+    descriptor, name = tempfile.mkstemp(prefix="current-", suffix=".json", dir=runtime)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump({"version": version}, handle, ensure_ascii=False, indent=2)
+            json.dump(
+                {"version": version, "executable": str(executable.resolve())},
+                handle, ensure_ascii=False, indent=2,
+            )
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -159,7 +131,9 @@ def project_version(root: Path) -> str | None:
     if not path.is_file():
         return None
     try:
-        return str(json.loads(path.read_text(encoding="utf-8")).get("core_version"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        value = data.get("application_version") or data.get("core_version")
+        return str(value) if value else None
     except (OSError, ValueError):
         return None
 
@@ -169,10 +143,16 @@ def check_update(root: Path, manifest: dict) -> dict:
     target = str(manifest["version"])
     return {
         "status": "update-available" if current != target or __version__ != target else "current",
-        "installed_core": __version__,
-        "project_core": current,
-        "latest_core": target,
+        "application_version": __version__,
+        "project_version": current,
+        "latest_version": target,
     }
+
+
+def check_latest_update(root: Path, manifest_url: str | None = None) -> dict:
+    """Read the latest release metadata without running update preflight or changing the project."""
+    manifest = load_manifest(manifest_url or LATEST_MANIFEST)
+    return check_update(root.resolve(), manifest)
 
 
 def run_update(
@@ -210,56 +190,41 @@ def run_update(
         return {
             "status": "current",
             "project": str(root),
-            "core_version": target,
+            "application_version": target,
             "launcher_version": LAUNCHER_VERSION,
             "changed": [],
             "conflicts": [],
         }
-    core_asset = manifest["core"]
-    content = fetch_bytes(asset_url(url, core_asset))
-    verify_digest(content, str(core_asset["sha256"]))
-    core = safe_extract_core(content, target)
-    if target == __version__ and Path(__file__).resolve().is_relative_to(core):
-        result = apply_project_update(root, target)
-    else:
-        env = os.environ.copy()
-        env[ACTIVE_ENV] = "1"
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
-        existing = env.get("PYTHONPATH")
-        env["PYTHONPATH"] = str(core) + (os.pathsep + existing if existing else "")
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "project_hooks",
-                "--project",
-                str(root),
-                "_apply-update",
-                "--target-version",
-                target,
-            ],
-            env=env,
-            text=True,
-            encoding="utf-8",
-            capture_output=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise UpdateError(completed.stderr.strip() or completed.stdout.strip() or "项目迁移失败")
-        try:
-            result = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise UpdateError("新版核心返回了无效迁移结果") from exc
-    write_pointer(target)
+    if not is_frozen():
+        raise UpdateError("更新只能通过项目根目录的 project-hooks.exe 执行")
+    executable_asset = manifest["windows_exe"]
+    content = fetch_bytes(asset_url(url, executable_asset))
+    verify_digest(content, str(executable_asset["sha256"]))
+    selected = cache_executable(content, target, root)
+    env = os.environ.copy()
+    env[ACTIVE_ENV] = "1"
+    completed = subprocess.run(
+        [
+            str(selected), "--project", str(root), "_apply-update",
+            "--target-version", target,
+        ],
+        env=env, text=True, encoding="utf-8", capture_output=True, check=False,
+    )
+    if completed.returncode != 0:
+        raise UpdateError(completed.stderr.strip() or completed.stdout.strip() or "新版 EXE 迁移失败")
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise UpdateError("新版 EXE 返回了无效迁移结果") from exc
+    write_pointer(target, root, selected)
+    result["application_version"] = target
     result["launcher_version"] = LAUNCHER_VERSION
     return result
 
 
 def version_report(root: Path | None) -> dict:
     return {
-        "launcher_version": LAUNCHER_VERSION,
-        "core_version": __version__,
+        "application_version": __version__,
         "project_version": project_version(root) if root else None,
         "schema_version": 2,
     }

@@ -1,22 +1,22 @@
 {
   "format": 1,
-  "core_version": "1.1.0",
+  "application_version": "1.2.0",
   "template_version": 1,
   "managed_files": {
     ".githooks/pre-commit": {
-      "hash": "ce122717ccda3211fe2a06b748fe67ec96815321a15187ade20339185a58148f",
+      "hash": "2d9776d503e44c6251de0b0d218f521ab85c5d21eb0a3cc2581a7f8d2c45989b",
       "customized": false
     },
     "maintenance/README.md": {
-      "hash": "1acc424d7c3d9d17a2338e39474a2a5853db834a478ddf09f6b5b2cd9773a978",
+      "hash": "a1a51a13ee9ef54622b44b749aa779899237b6544fcfa7169d3b6eef4718058b",
       "customized": true
     },
     "AGENTS.md:block": {
-      "hash": "766b2f93d00922f2ef0f7e9155969092bf86e32feea39cc5c9c95dba14584931",
+      "hash": "b8cecd481f7dae58a6e861cd363e2548fa8a8a4c8aa1c8c7b0e9c13b4f9b04a7",
       "customized": true
     },
     ".gitignore:block": {
-      "hash": "aec347ba12c51d79d47a567d3a55375030378f950b6def6084345af0e40d4f08",
+      "hash": "e9d3521aa479c86f800290703df447741e8eb221104c1ff70e0daf5ded333aef",
       "customized": false
     },
     ".gitattributes:block": {
