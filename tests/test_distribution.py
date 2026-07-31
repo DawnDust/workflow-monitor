@@ -294,7 +294,7 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(result["status"], "updated")
         self.assertTrue(selected.is_file())
         self.assertEqual(selected.read_bytes(), b"test executable")
-        self.assertTrue(selected.is_relative_to(self.root / ".project_hooks/runtime"))
+        self.assertTrue(selected.is_relative_to((self.root / ".project_hooks/runtime").resolve()))
         self.assertEqual(run.call_args.args[0][0], str(selected))
 
     def test_non_frozen_update_refuses_to_install_executable(self) -> None:
