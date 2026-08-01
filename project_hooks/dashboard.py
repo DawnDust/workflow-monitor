@@ -10,7 +10,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from . import __version__
 from .catalog import CATALOG_KIND_LABELS, render_context_markdown
+from .diagnostics import (
+    execution_mode,
+    record_failure,
+)
+from .dashboard_actions import export_bundle, report_bug as open_dashboard_bug
 from .read_model import (
     MaintenanceReadModel,
     ReadModelError,
@@ -18,6 +24,7 @@ from .read_model import (
     is_auxiliary_task_id,
 )
 from .updater import check_latest_update, version_report
+from .store import SCHEMA_VERSION
 
 
 CLI_FALLBACK = (
@@ -554,6 +561,9 @@ class DashboardDataProvider:
     def load(self) -> dict:
         snapshot = self.model.dashboard_snapshot(self.branch)
         snapshot["classification"] = self.classifier(snapshot["branch"])
+        snapshot["active_task_warning"] = active_task_warning(
+            snapshot.get("context", {}).get("active_task")
+        )
         return snapshot
 
     @property
@@ -569,7 +579,26 @@ class DashboardDataProvider:
 
 def version_status_text(report: dict) -> str:
     project = report.get("project_version") or "未初始化"
-    return f"版本：EXE {report['application_version']} / 项目 {project}"
+    build_id = (report.get("build_identity") or {}).get("build_id")
+    warning = " ⚠ 构建不一致" if report.get("build_warning") else ""
+    build_text = f" ({build_id[:12]})" if build_id else ""
+    return f"版本：EXE {report['application_version']}{build_text} / 项目 {project}{warning}"
+
+
+def active_task_warning(active: dict | None, now: datetime | None = None) -> dict | None:
+    if not active or not active.get("started_at"):
+        return None
+    clean = str(active["started_at"]).split("（", 1)[0].split("(", 1)[0].strip()
+    try:
+        started = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    age_hours = max(0.0, ((now or datetime.now()) - started).total_seconds() / 3600)
+    if age_hours >= 24 * 7:
+        return {"level": "red", "age_hours": round(age_hours, 1), "message": "活动任务已超过 7 天，请恢复或明确放弃"}
+    if age_hours >= 24:
+        return {"level": "yellow", "age_hours": round(age_hours, 1), "message": "活动任务已超过 24 小时，请确认是否继续"}
+    return None
 
 
 def update_status_text(result: dict | None = None, error: str | None = None) -> str:
@@ -577,6 +606,8 @@ def update_status_text(result: dict | None = None, error: str | None = None) -> 
         return "更新：检查失败"
     if result and result.get("status") == "update-available":
         return f"更新：发现 {result['latest_version']}"
+    if result and result.get("status") == "different-build":
+        return "更新：同版本构建不一致"
     return "更新：已是最新版"
 
 
@@ -1393,7 +1424,11 @@ class StagePage:
         self.stage_detail.configure(state="disabled")
 
     @staticmethod
-    def stage_text(stage: dict | None, attempts: list[dict] | None = None) -> str:
+    def stage_text(
+        stage: dict | None,
+        attempts: list[dict] | None = None,
+        freshness_warning: dict | None = None,
+    ) -> str:
         if not stage:
             return "当前没有 active 阶段。\n请在 main 的 stable 活动任务中运行 stage start。"
         acceptance = "\n".join(f"- {item}" for item in stage.get("acceptance", [])) or "- 未设置"
@@ -1403,13 +1438,18 @@ class StagePage:
             f"- {item['branch']}｜{item['state']}｜{item.get('current_step') or '未记录当前步骤'}"
             for item in related
         ) or "- 无"
+        warning_text = (
+            f"\n\n提醒\n- {freshness_warning['message']}\n"
+            f"- 阶段最后更新：{freshness_warning.get('stage_updated_at') or '未知'}"
+            if freshness_warning else ""
+        )
         return (
             f"{stage.get('sequence')}. {stage.get('title')}（{stage.get('status')}）\n"
             f"目标：{stage.get('goal')}\n进展：{stage.get('summary') or '未设置'}\n"
             f"当前步骤：{stage.get('current_step') or '未设置'}\n"
             f"下一步：{stage.get('next_step') or '未设置'}\n"
             f"阻塞：{stage.get('blocker') or '无。'}\n\n验收条件\n{acceptance}\n\n"
-            f"证据\n{evidence}\n\n关联探索\n{branches}"
+            f"证据\n{evidence}\n\n关联探索\n{branches}{warning_text}"
         )
 
     def set_data(self, context: dict) -> None:
@@ -1419,7 +1459,13 @@ class StagePage:
         self.attempts = {item["attempt_id"]: item for item in attempts}
         self.current.configure(state="normal")
         self.current.delete("1.0", "end")
-        self.current.insert("1.0", self.stage_text(context.get("current_stage"), attempts))
+        self.current.insert(
+            "1.0",
+            self.stage_text(
+                context.get("current_stage"), attempts,
+                context.get("stage_freshness_warning"),
+            ),
+        )
         self.current.configure(state="disabled")
 
         for item in self.attempt_tree.get_children():
@@ -1470,6 +1516,7 @@ class DashboardApp:
         self.snapshot: dict | None = None
         self.active_preset: str | None = None
         self.advanced_window: AdvancedWindow | None = None
+        self.last_refresh_error: str | None = None
         root.title("Project Maintenance")
         root.geometry("1120x760")
         root.minsize(800, 560)
@@ -1484,6 +1531,8 @@ class DashboardApp:
         self.version_label.pack(side="left", padx=(18, 0))
         ttk.Button(toolbar, text="刷新", command=self.refresh).pack(side="right")
         ttk.Button(toolbar, text="高级查看", command=self.open_advanced).pack(side="right", padx=(0, 6))
+        ttk.Button(toolbar, text="报告 Bug", command=self.report_bug).pack(side="right", padx=(0, 6))
+        ttk.Button(toolbar, text="导出诊断包", command=self.export_diagnostic_bundle).pack(side="right", padx=(0, 6))
         self.update_button = ttk.Button(toolbar, text="检查更新", command=self.check_for_updates)
         self.update_button.pack(side="right", padx=(0, 6))
         self.update_label = ttk.Label(toolbar, text="")
@@ -1601,21 +1650,74 @@ class DashboardApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    @property
+    def project_root(self) -> Path:
+        return self.provider.model.database_path.parent.parent
+
+    def export_diagnostic_bundle(self) -> None:
+        try:
+            from tkinter import filedialog
+            export_folder = self.project_root / "diagnostics-export"
+            export_folder.mkdir(parents=True, exist_ok=True)
+            selected = filedialog.asksaveasfilename(
+                parent=self.root,
+                title="导出脱敏诊断包",
+                defaultextension=".zip",
+                initialdir=str(export_folder),
+                initialfile=f"project-hooks-diagnostics-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip",
+                filetypes=(("ZIP 文件", "*.zip"),),
+            )
+            if not selected:
+                self.notify("已取消导出诊断包")
+                return
+            # Imported lazily to avoid a module cycle during CLI startup.
+            from .cli import diagnostic_check_snapshot
+            result = export_bundle(self.project_root, Path(selected), diagnostic_check_snapshot)
+            self.notify(f"诊断包已保存：{result['output']}（不会自动上传）")
+        except Exception as exc:
+            record = record_failure(
+                self.project_root, exc, command="dashboard.diagnostics.export",
+                application_version=__version__, schema_version=SCHEMA_VERSION,
+                execution_mode=execution_mode(),
+            )
+            self.notify(f"导出失败 [{record['code']}]，事件编号：{record['incident_id']}")
+
+    def report_bug(self) -> None:
+        try:
+            from .diagnostics import diagnostics_status
+            latest = diagnostics_status(self.project_root).get("latest_incident_id")
+            opened = open_dashboard_bug(incident_id=latest)
+            self.notify("已打开 GitHub Bug 报告，请检查并手工附加诊断 ZIP" if opened else "无法打开浏览器，请手工访问项目 Issues")
+        except Exception as exc:
+            self.notify(f"无法打开 Bug 报告：{exc}")
+
     def refresh(self) -> None:
         snapshot, error = self.controller.refresh()
         if error is None and snapshot is not None:
             self.snapshot = snapshot
+            self.last_refresh_error = None
             self.apply_snapshot(snapshot)
             rebuilt = "；本次已重建" if snapshot["health"]["rebuilt"] else ""
             self.status.configure(text=f"刷新成功：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{rebuilt}")
         else:
             self.status.configure(text=f"刷新失败，继续显示上一次数据：{error}")
+            if error and error != self.last_refresh_error:
+                record_failure(
+                    self.project_root, DashboardError(error), command="dashboard.refresh",
+                    application_version=__version__, schema_version=SCHEMA_VERSION,
+                    execution_mode=execution_mode(),
+                )
+                self.last_refresh_error = error
 
     def apply_snapshot(self, snapshot: dict) -> None:
         branch_type = snapshot["classification"]["kind"]
         health = snapshot["health"]
         self.branch_label.configure(text=f"分支：{snapshot['branch']}（{branch_type}）")
-        self.health_label.configure(text=f"数据库：{health['status']}")
+        warning = snapshot.get("active_task_warning")
+        health_text = f"数据库：{health['status']}"
+        if warning:
+            health_text += f" | {warning['message']}"
+        self.health_label.configure(text=health_text)
         self.version_label.configure(text=version_status_text(self.provider.version_info()))
         overview = self.overview_text(snapshot)
         self.overview.configure(state="normal")

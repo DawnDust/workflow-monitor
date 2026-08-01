@@ -17,23 +17,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Test
-        run: python -m unittest tests.test_distribution tests.test_project_hooks
-      - name: Build executable
-        run: |
-          python -m pip install pyinstaller==6.21.0
-          python scripts/build_windows_exe.py
-      - name: Build release manifest
-        shell: powershell
-        run: |
-          $version = $env:GITHUB_REF_NAME.Substring(1)
-          python scripts/build_release.py --version $version
-      - name: Smoke test executable
-        shell: powershell
-        run: |
-          $output = & .\dist\project-hooks.exe version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $output | Select-String 'application_version'
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Full test, build and frozen smoke
+        run: python scripts/run_tests.py release
       - uses: softprops/action-gh-release@v2
         with:
           files: |

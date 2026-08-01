@@ -26,14 +26,29 @@
 .\project-hooks.exe start --help
 .\project-hooks.exe end --help
 .\project-hooks.exe check
+.\project-hooks.exe diagnostics status
+.\project-hooks.exe diagnostics export
 .\project-hooks.exe dashboard
 ```
 
 双击无参数启动 Dashboard；在 PowerShell 中带参数运行时执行完整 CLI。`--help` 显示日常入口，`--help-all` 显示全部命令。
 
 Dashboard 顶部直接显示当前 EXE 与项目版本；点击“检查更新”可在后台只读查询最新正式版本，不会修改项目或卡住界面。
+遇到错误时，程序会在 `.project_hooks/diagnostics/` 保存轮转的脱敏本地记录。Dashboard 可在用户明确选择位置后导出诊断 ZIP，并打开预填的 GitHub Bug 报告；程序不会自动上传数据。
 概览按项目资料、当前大阶段、当前执行、探索和资料分区显示；“阶段”页集中展示阶段历史与各探索分支当前步骤。
 “资料”页显示七个标准资源目录的文件/索引数量并可直接打开目录；“工作台”的“对外项目总结”提示词将确认后的 Markdown 报告保存到 `resources/reports/` 并登记索引。
+
+## 崩溃恢复与遗忘任务
+
+活动任务现场同时保存在原子写入的 `.project_hooks/active-task.json` 和 SQLite 投影中。命令异常退出后运行：
+
+```powershell
+.\project-hooks.exe task recover
+.\project-hooks.exe task abandon --reason "不再继续的原因"
+.\project-hooks.exe task recover --skip-auto-commit --reason "自动提交持续失败的原因"
+```
+
+`abandon` 只追加可审计记录并解除活动状态，不删除、不重置科研文件、暂存区或探索分支。Dashboard 在任务超过 24 小时后提醒，超过 7 天后加强提醒，但永不自动结束任务。
 
 ## 更新
 
@@ -65,3 +80,6 @@ EXE从最新 GitHub Release 下载并校验新版程序，把版本化运行时�
 - `release-manifest.json`：由程序自动读取，用于版本发现和 SHA-256 校验，普通用户无需手动下载。
 
 发布前应同步更新 `project_hooks.__version__` 与 `CHANGELOG.md`，然后提交、推送并创建相同版本的标签。
+
+维护者日常写入后运行 `python scripts/run_tests.py fast`，任务结束前运行
+`python scripts/run_tests.py full`，发布前运行 `python scripts/run_tests.py release`。

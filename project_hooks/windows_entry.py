@@ -9,9 +9,17 @@ import sys
 from pathlib import Path
 
 from project_hooks import __version__
+from project_hooks.diagnostics import execution_mode, format_failure, record_failure
+from project_hooks.store import SCHEMA_VERSION
+
 from project_hooks.cli import check_repository, classify_branch, read_model, set_project_root
 from project_hooks.dashboard import DashboardDataProvider, launch_dashboard
-from project_hooks.launcher import PORTABLE_ROOT_ENV, is_frozen, run_selected_executable
+from project_hooks.launcher import (
+    PORTABLE_ROOT_ENV,
+    configure_utf8_stdio,
+    is_frozen,
+    run_selected_executable,
+)
 from project_hooks.project_manager import CONFIG_PATH, initialize_project
 
 
@@ -147,6 +155,7 @@ def run_portable_dashboard(root: Path | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_utf8_stdio()
     args = list(sys.argv[1:] if argv is None else argv)
     if not is_frozen():
         from project_hooks.launcher import main as launcher_main
@@ -165,7 +174,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return run_portable_dashboard(project)
     except Exception as exc:
-        show_error(str(exc))
+        record = record_failure(
+            project, exc, command="dashboard.startup", application_version=__version__,
+            schema_version=SCHEMA_VERSION, execution_mode=execution_mode(),
+        )
+        show_error(format_failure(record))
         return 1
 
 

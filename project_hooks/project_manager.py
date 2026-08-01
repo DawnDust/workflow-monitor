@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .build_identity import build_identity
 from .resource_layout import RESOURCE_DIRECTORIES, ensure_resource_directories
 from .store import (
     SCHEMA_VERSION,
@@ -55,6 +56,8 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - 科研资料文件只放在 `resources/` 的七个标准子目录，并通过 `catalog` 指令登记；`check` 必须保持通过。
 - 只有 `validated` 尝试可准备 Squash PR；推送和合并必须由用户明确确认。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态或绕过 `end`。
+- 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
+- 遇到故障时使用 `diagnostics status/export` 生成脱敏本地诊断；程序不自动上传数据。
 <!-- project-maintenance-hooks:end -->"""
 
 GITIGNORE_BLOCK = """# project-maintenance-hooks:begin
@@ -62,10 +65,13 @@ GITIGNORE_BLOCK = """# project-maintenance-hooks:begin
 __pycache__/
 *.py[cod]
 .pytest_cache/
+/.coverage
+/.coverage.*
 .venv/
 build/
 dist/
 /project-hooks.exe
+/diagnostics-export/
 # project-maintenance-hooks:end"""
 
 GITATTRIBUTES_BLOCK = """# project-maintenance-hooks:begin
@@ -95,7 +101,7 @@ MAINTENANCE_README = """# 项目维护规范
 项目说明和长期大目标通过 `.\\project-hooks.exe project update` 记录。全项目同一时间最多
 一个 active 大阶段，使用 `stage start` 和 `stage update` 推进。探索分支自动关联创建时的
 当前阶段，并通过 `attempt update --current-step ... --progress ... --next-step ...` 保存进度。
-Dashboard 只读显示分区概览和“阶段”页，不直接写入维护数据。
+Dashboard 对业务数据只读显示分区概览和“阶段”页，不直接写入维护数据；仅在用户明确操作时导出脱敏诊断 ZIP。
 
 稳定维护只在 `main` 使用 `--track stable`。新理论、算法、实验和不确定改动使用
 `--track research|experiment|sandbox --topic <slug>`。只有 `validated` 尝试可以准备
@@ -118,6 +124,17 @@ Squash PR，合并必须等待用户明确确认。
 `check` 会报告缺失目录、错位条目和未索引文件。旧项目先运行
 `.\\project-hooks.exe catalog migrate-layout --dry-run`，确认无冲突后再执行实际迁移。
 事件日志只追加，不得手工修改既有行；SQLite 不纳入 Git，也不是唯一备份。
+
+## 故障反馈
+
+运行 `.\\project-hooks.exe diagnostics status` 查看本地故障摘要，运行
+`.\\project-hooks.exe diagnostics export` 导出脱敏 ZIP。诊断记录位于被 Git 忽略的
+`.project_hooks/diagnostics/`，不包含项目文件、完整事件日志、环境变量或 Git 远程地址，且不会自动上传。
+
+## 崩溃恢复
+
+活动任务异常中断后运行 `.\\project-hooks.exe task recover`。确认放弃时运行
+`.\\project-hooks.exe task abandon --reason <原因>`；命令保留科研文件、暂存区和分支。
 """
 
 
@@ -211,6 +228,7 @@ def installation_record(root: Path, application_version: str) -> dict:
     return {
         "format": 1,
         "application_version": application_version,
+        "build_identity": build_identity(),
         "template_version": TEMPLATE_VERSION,
         "managed_files": managed_hashes(root),
     }

@@ -16,6 +16,13 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from . import __version__
+from .active_task import (
+    ActiveTaskError,
+    delete_active_state,
+    load_active_state,
+    restore_active_row,
+    save_active_state,
+)
 from .catalog import (
     CatalogError,
     CatalogRuntime,
@@ -24,6 +31,16 @@ from .catalog import (
     decode_item,
 )
 from .dashboard import DashboardDataProvider, DashboardError, launch_dashboard
+from .diagnostics import (
+    diagnostics_status,
+    execution_mode,
+    export_diagnostics,
+    format_failure,
+    open_bug_report,
+    record_failure,
+)
+from . import git_ops
+from .health import active_task_errors
 from .read_model import (
     MaintenanceReadModel,
     ReadModelError,
@@ -55,6 +72,7 @@ from .project_manager import (
 )
 from .resource_layout import catalog_consistency_errors, ensure_resource_directories
 from .updater import UpdateError, run_update, version_report
+from .transaction import MutationLockError, mutation_lock, read_writer_lock
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -87,7 +105,7 @@ STATE_ARGUMENTS = (
     "goal", "judgment", "breakpoint", "blocker", "status", "main_goal_version",
 )
 DAILY_HELP = """\
-usage: project-hooks [-h] [--help-all] [--project PATH] {context,start,end,dashboard} ...
+usage: project-hooks [-h] [--help-all] [--project PATH] {context,start,end,dashboard,diagnostics} ...
 
 项目内维护入口。无参数运行时显示行动概览。
 
@@ -96,6 +114,7 @@ usage: project-hooks [-h] [--help-all] [--project PATH] {context,start,end,dashb
   start       开始任务生命周期
   end         完成任务生命周期
   dashboard   打开只读管理窗口
+  diagnostics 查看或导出本地脱敏诊断
 
 首次使用:
   .\\project-hooks.exe init .
@@ -110,7 +129,7 @@ FULL_HELP = """\
 usage: project-hooks [-h] [--help-all] [--project PATH] <command> ...
 
 日常命令:
-  context, start, end, dashboard
+  context, start, end, dashboard, diagnostics
 
 仓库维护:
   init, install, update, version, check, status, branch-status
@@ -122,7 +141,7 @@ usage: project-hooks [-h] [--help-all] [--project PATH] <command> ...
   attempt, exploration, prepare-pr, archive-attempt
 
 数据维护:
-  db
+  db, diagnostics
 
 内部 Git Hook 命令不显示；所有既有公开命令保持兼容。
 使用 <命令> --help 查看详细参数。
@@ -131,6 +150,11 @@ usage: project-hooks [-h] [--help-all] [--project PATH] <command> ...
 
 class WorkflowError(RuntimeError):
     pass
+
+
+class WorkflowArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise WorkflowError(message)
 
 
 def clean_text(value: str | None, label: str, maximum: int) -> str | None:
@@ -190,10 +214,14 @@ def installed_project_version() -> str | None:
 
 def command_is_read_only(args: argparse.Namespace) -> bool:
     if args.command in {None, "version", "context", "check", "status", "branch-status",
-                        "history", "decisions", "explorations", "dashboard", "update"}:
+                        "history", "decisions", "explorations", "dashboard", "diagnostics"}:
+        return True
+    if args.command == "update" and args.check:
         return True
     if args.command == "attempt" and args.attempt_command == "show":
         return True
+    if args.command == "task" and args.task_command == "recover":
+        return False
     if args.command == "project" and args.project_command == "show":
         return True
     if args.command == "stage" and args.stage_command in {"list", "show"}:
@@ -290,44 +318,24 @@ def changed(before: dict, after: dict) -> list[str]:
 
 
 def run_git(args: list[str], *, env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=ROOT, text=True, encoding="utf-8", errors="replace",
-                          capture_output=True, timeout=60, env=env, check=check)
+    return git_ops.run(ROOT, args, env=env, check=check)
 
 
 def is_git_repo() -> bool:
-    try:
-        return run_git(["rev-parse", "--is-inside-work-tree"]).stdout.strip() == "true"
-    except (OSError, subprocess.SubprocessError):
-        return False
+    return git_ops.is_repository(ROOT)
 
 
 def git_dirty_paths() -> list[str]:
-    if not is_git_repo():
-        return []
-    entries = run_git(["status", "--porcelain=v1", "-z", "--untracked-files=all"]).stdout.split("\0")
-    paths: set[str] = set()
-    index = 0
-    while index < len(entries):
-        entry = entries[index]
-        index += 1
-        if not entry:
-            continue
-        status, path = entry[:2], entry[3:]
-        if "R" in status or "C" in status:
-            if index < len(entries) and entries[index]:
-                paths.add(entries[index].replace("\\", "/"))
-                index += 1
-        paths.add(path.replace("\\", "/"))
-    return sorted(paths)
+    return git_ops.dirty_paths(ROOT)
 
 
 def current_branch() -> str:
     if not is_git_repo():
         raise WorkflowError("当前目录不是 Git 仓库")
-    result = run_git(["symbolic-ref", "--quiet", "--short", "HEAD"], check=False)
-    if result.returncode != 0 or not result.stdout.strip():
+    branch = git_ops.current_branch(ROOT)
+    if branch is None:
         raise WorkflowError("当前处于 detached HEAD，不能运行分支维护生命周期")
-    return result.stdout.strip()
+    return branch
 
 
 def branch_policy() -> dict:
@@ -406,6 +414,7 @@ def check_repository(
     try:
         connection = database()
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+        errors.extend(active_task_errors(connection))
         catalog_items = [
             decode_item(dict(row))
             for row in connection.execute("SELECT * FROM catalog_items").fetchall()
@@ -434,6 +443,17 @@ def active_row(connection: sqlite3.Connection | None = None) -> sqlite3.Row | No
 
 
 def read_active() -> dict:
+    try:
+        state = load_active_state(state_dir())
+    except ActiveTaskError as exc:
+        raise WorkflowError(str(exc)) from exc
+    if state is not None:
+        record = json.loads(json.dumps(state["record"], ensure_ascii=False))
+        record["state_updated"] = bool(state["state_updated"])
+        record["decisions_added"] = int(state["decisions_added"])
+        record["recovery_phase"] = state["phase"]
+        record["finish"] = state.get("finish")
+        return record
     connection = database()
     row = active_row(connection)
     connection.close()
@@ -445,18 +465,46 @@ def read_active() -> dict:
     return record
 
 
-def save_active(record: dict, *, state_updated: int = 0, decisions_added: int = 0) -> None:
+def save_active(
+    record: dict,
+    *,
+    state_updated: int = 0,
+    decisions_added: int = 0,
+    phase: str = "active",
+    finish: dict | None = None,
+) -> None:
+    save_active_state(
+        state_dir(), record, state_updated=bool(state_updated),
+        decisions_added=decisions_added, phase=phase, finish=finish,
+    )
     connection = database()
     with connection:
         connection.execute(
-            "INSERT INTO active_tasks VALUES (?, ?, ?, ?, ?, ?)",
-            (record["task_id"], record["started_at"], record["git"]["branch"], canonical_json(record), state_updated, decisions_added),
+            """INSERT INTO active_tasks VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(task_id) DO UPDATE SET
+                 started_at=excluded.started_at,
+                 branch=excluded.branch,
+                 record_json=excluded.record_json,
+                 state_updated=excluded.state_updated,
+                 decisions_added=excluded.decisions_added""",
+            (record["task_id"], record["started_at"], record["git"]["branch"],
+             canonical_json(record), state_updated, decisions_added),
         )
     connection.close()
 
 
 def update_active_flags(*, state_updated: bool = False, decision_added: bool = False) -> None:
     record = read_active()
+    next_state_updated = bool(record["state_updated"] or state_updated)
+    next_decisions = int(record["decisions_added"]) + int(decision_added)
+    save_active_state(
+        state_dir(), {key: value for key, value in record.items()
+                     if key not in {"state_updated", "decisions_added", "recovery_phase", "finish"}},
+        state_updated=next_state_updated,
+        decisions_added=next_decisions,
+        phase=record.get("recovery_phase", "active"),
+        finish=record.get("finish"),
+    )
     connection = database()
     with connection:
         if state_updated:
@@ -471,6 +519,7 @@ def delete_active(task_id: str) -> None:
     with connection:
         connection.execute("DELETE FROM active_tasks WHERE task_id=?", (task_id,))
     connection.close()
+    delete_active_state(state_dir())
 
 
 def assert_active_branch(record: dict) -> str:
@@ -735,8 +784,9 @@ def start_task(args: argparse.Namespace) -> dict:
             "stage_id": linked_stage["stage_id"] if linked_stage else None,
         }))
     try:
-        save_active(record)
+        save_active(record, phase="starting")
         persist(events)
+        save_active(record, phase="active")
     except Exception:
         try:
             delete_active(args.task_id)
@@ -762,6 +812,114 @@ def task_status() -> dict:
         "state_updated": record["state_updated"], "decisions_added": record["decisions_added"],
         "missing_updates": [] if record["state_updated"] else ["project state update"],
         "checks": check_repository(),
+    }
+
+
+def task_recover(args: argparse.Namespace) -> dict:
+    try:
+        state = load_active_state(state_dir())
+    except ActiveTaskError as exc:
+        raise WorkflowError(str(exc)) from exc
+    if state is None:
+        row = active_row()
+        if row is None:
+            raise WorkflowError("没有可恢复的活动任务")
+        record = json.loads(row["record_json"])
+        save_active_state(
+            state_dir(), record, state_updated=bool(row["state_updated"]),
+            decisions_added=int(row["decisions_added"]), phase="active",
+        )
+        state = load_active_state(state_dir())
+    assert state is not None
+    record = state["record"]
+    restore_active_row(database_path(), state_dir(), force=True)
+    events = load_events(journal_path())
+    finished = [
+        event for event in events
+        if event.get("task_id") == record["task_id"] and event["event_type"] == "task.finished"
+    ]
+    if args.skip_auto_commit:
+        if not args.reason:
+            raise WorkflowError("--skip-auto-commit 必须同时提供 --reason")
+        if state["phase"] != "finishing" and not finished:
+            raise WorkflowError("只有完成事件已写入但自动提交未完成时才能跳过自动提交")
+        pending = state.get("finish") or {}
+        if pending.get("events"):
+            persist(pending["events"])
+        persist([emit(
+            "task.recovery.recorded", branch=record["git"]["branch"],
+            task_id=record["task_id"], payload={
+                "action": "skip-auto-commit", "reason": args.reason,
+            },
+        )])
+        delete_active(record["task_id"])
+        return {
+            "status": "recovered",
+            "task_id": record["task_id"],
+            "auto_commit": "skipped",
+            "reason": args.reason,
+        }
+    if state["phase"] == "starting":
+        if not any(
+            event.get("task_id") == record["task_id"] and event["event_type"] == "task.started"
+            for event in events
+        ):
+            event = emit(
+                "task.started", branch=record["git"]["branch"], task_id=record["task_id"],
+                payload=record["declaration"],
+                event_id=hashlib.sha256(
+                    f"{record['task_id']}:recovered-start".encode("utf-8")
+                ).hexdigest()[:32],
+            )
+            persist([event])
+        save_active(
+            record, state_updated=int(state["state_updated"]),
+            decisions_added=state["decisions_added"], phase="active",
+        )
+        state["phase"] = "active"
+    suggestion = (
+        "使用与首次请求完全相同的参数重新运行 end；若自动提交持续失败，运行 "
+        "task recover --skip-auto-commit --reason <原因>"
+        if state["phase"] == "finishing"
+        else "继续当前任务；写入后运行 fast，结束前运行 full，再运行 end"
+    )
+    return {
+        "status": "recovered",
+        "task_id": record["task_id"],
+        "phase": state["phase"],
+        "branch": record["git"]["branch"],
+        "next_safe_action": suggestion,
+    }
+
+
+def task_abandon(args: argparse.Namespace) -> dict:
+    record = read_active()
+    branch = assert_active_branch(record)
+    event = emit(
+        "task.finished", branch=branch, task_id=record["task_id"],
+        event_id=hashlib.sha256(
+            f"{record['task_id']}:abandoned".encode("utf-8")
+        ).hexdigest()[:32],
+        payload={
+            "summary": record["declaration"]["scope"],
+            "evidence": "",
+            "result": "abandoned",
+            "route": "unchanged",
+            "methods_action": "reviewed-no-change",
+            "main_goal": "unchanged",
+            "note": args.reason,
+            "attempt_state": None,
+            "started_at": record["started_at"],
+        },
+    )
+    persist([event])
+    delete_active(record["task_id"])
+    return {
+        "status": "abandoned",
+        "task_id": record["task_id"],
+        "reason": args.reason,
+        "files_preserved": True,
+        "branch_preserved": branch,
     }
 
 
@@ -913,11 +1071,77 @@ def auto_commit(record: dict, paths: list[str], result: str, message: str | None
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def _base_active_record(record: dict) -> dict:
+    return {
+        key: value for key, value in record.items()
+        if key not in {"state_updated", "decisions_added", "recovery_phase", "finish"}
+    }
+
+
+def _finish_signature(args: argparse.Namespace) -> str:
+    values = {
+        name: getattr(args, name, None)
+        for name in (
+            "task_id", "result", "route", "methods_action", "main_goal", "note",
+            "evidence", "commit_message", "attempt_state", *STATE_ARGUMENTS, "next",
+        )
+    }
+    return hashlib.sha256(canonical_json(values).encode("utf-8")).hexdigest()
+
+
+def _fixed_finish_event_ids(task_id: str, events: list[dict]) -> None:
+    for index, event in enumerate(events):
+        material = f"{task_id}:finish:{index}:{event['event_type']}"
+        event["event_id"] = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+
+def stage_update_reminder(record: dict) -> dict | None:
+    connection = database()
+    try:
+        stage = active_stage(connection)
+    finally:
+        connection.close()
+    if not stage or stage.get("task_id") == record.get("task_id"):
+        return None
+    return {
+        "code": "stage-not-updated",
+        "message": "本任务没有更新当前阶段；请确认阶段进展、当前步骤和下一步是否仍然准确",
+        "stage_id": stage["stage_id"],
+        "stage_updated_at": stage.get("updated_at"),
+        "next_safe_command": f".\\project-hooks.exe stage update {stage['stage_id']} ...",
+    }
+
+
 def finish_task(args: argparse.Namespace) -> dict:
     record = read_active()
     if args.task_id != record["task_id"]:
         raise WorkflowError(f"活动任务是 {record['task_id']}，不是 {args.task_id}")
     branch = assert_active_branch(record)
+    signature = _finish_signature(args)
+    pending_finish = record.get("finish") if record.get("recovery_phase") == "finishing" else None
+    if pending_finish is not None:
+        if pending_finish.get("signature") != signature:
+            raise WorkflowError(
+                "该任务正在重试 end，参数与首次结束请求不同；请使用相同参数重试，"
+                "或运行 task recover --skip-auto-commit --reason <原因>"
+            )
+        events = pending_finish["events"]
+        finish_values = pending_finish["values"]
+        persist(events)
+        paths = changed(record["baseline"], snapshot())
+        report = {
+            "task_id": args.task_id,
+            "started_at": record["started_at"],
+            "finished_at": pending_finish["finished_at"],
+            **finish_values,
+            "changed_paths": paths,
+        }
+        report["git"] = auto_commit(record, paths, finish_values["result"], args.commit_message)
+        reminder = stage_update_reminder(record)
+        if reminder:
+            report["warnings"] = [reminder]
+        delete_active(args.task_id)
+        return report
     check_repository(raise_on_error=True)
     final_state_requested = state_arguments_requested(args)
     if not record["state_updated"] and not final_state_requested:
@@ -955,16 +1179,40 @@ def finish_task(args: argparse.Namespace) -> dict:
         "route": args.route, "methods_action": args.methods_action, "main_goal": args.main_goal,
         "note": args.note, "attempt_state": args.attempt_state, "started_at": record["started_at"],
     }))
+    _fixed_finish_event_ids(args.task_id, events)
+    finished_at = timestamp()
+    finish_values = {
+        "result": args.result,
+        "route": args.route,
+        "methods_action": args.methods_action,
+        "main_goal": args.main_goal,
+        "note": args.note,
+        "attempt_state": args.attempt_state,
+    }
+    finish_state = {
+        "signature": signature,
+        "events": events,
+        "values": finish_values,
+        "finished_at": finished_at,
+    }
+    save_active(
+        _base_active_record(record),
+        state_updated=int(record["state_updated"] or final_state_requested),
+        decisions_added=record["decisions_added"],
+        phase="finishing",
+        finish=finish_state,
+    )
     persist(events)
     if final_state_requested:
-        update_active_flags(state_updated=True)
         record["state_updated"] = True
     paths = changed(record["baseline"], snapshot())
-    report = {"task_id": args.task_id, "started_at": record["started_at"], "finished_at": timestamp(),
-              "result": args.result, "route": args.route, "methods_action": args.methods_action,
-              "main_goal": args.main_goal, "note": args.note, "attempt_state": args.attempt_state,
+    report = {"task_id": args.task_id, "started_at": record["started_at"], "finished_at": finished_at,
+              **finish_values,
               "changed_paths": paths}
     report["git"] = auto_commit(record, paths, args.result, args.commit_message)
+    reminder = stage_update_reminder(record)
+    if reminder:
+        report["warnings"] = [reminder]
     delete_active(args.task_id)
     return report
 
@@ -1362,6 +1610,90 @@ def db_command(args: argparse.Namespace) -> dict:
     return output
 
 
+def diagnostic_check_snapshot() -> dict:
+    """Collect check/db-verify evidence without creating or rebuilding the database."""
+    errors: list[str] = []
+    try:
+        cfg = config()
+        if cfg.get("version") != 3:
+            errors.append("workflow_config_version")
+        if cfg.get("core_read_order") != STATIC_READ_ORDER:
+            errors.append("core_read_order")
+        if cfg.get("maintenance_store") != DEFAULT_STORE:
+            errors.append("maintenance_store")
+    except Exception:
+        errors.append("workflow_config_unreadable")
+    for relative in (*STATIC_READ_ORDER, "maintenance/events.jsonl", INSTALLATION_PATH.as_posix()):
+        if not (ROOT / relative).is_file():
+            errors.append(f"missing:{relative}")
+
+    database_result: dict = {"status": "missing", "database_matches_journal": False}
+    path = database_path()
+    if path.is_file():
+        connection = None
+        try:
+            uri = path.resolve().as_uri() + "?mode=ro"
+            connection = sqlite3.connect(uri, uri=True, timeout=2)
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+            event_count = connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            stored = connection.execute("SELECT value FROM meta WHERE key='journal_hash'").fetchone()
+            actual_hash = journal_hash(journal_path())
+            database_result = {
+                "status": "passed" if integrity == "ok" else "failed",
+                "integrity": integrity,
+                "events": event_count,
+                "database_matches_journal": bool(stored and stored[0] == actual_hash),
+            }
+        except Exception as exc:
+            database_result = {"status": "failed", "error_type": type(exc).__name__}
+        finally:
+            if connection is not None:
+                connection.close()
+    git_result = {"relation": "unknown", "branch_kind": "unknown"}
+    try:
+        state = read_model().git_state(branch_policy()["default_branch"])
+        git_result = {
+            "relation": state.get("relation") or "unknown",
+            "branch_kind": classify_branch(state.get("branch") or "").get("kind") or "unknown",
+        }
+    except Exception:
+        pass
+    return {
+        "check": {"status": "passed" if not errors else "failed", "errors": errors},
+        "db_verify": database_result,
+        "git": git_result,
+    }
+
+
+def diagnostics_command(args: argparse.Namespace) -> dict:
+    if args.diagnostics_command == "status":
+        return diagnostics_status(ROOT)
+    output = args.output or (
+        ROOT / "diagnostics-export" /
+        f"project-hooks-diagnostics-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+    )
+    result = export_diagnostics(
+        ROOT,
+        output,
+        application_version=__version__,
+        schema_version=SCHEMA_VERSION,
+        execution_mode=execution_mode(),
+        checks=diagnostic_check_snapshot,
+    )
+    try:
+        relative = output.resolve().relative_to(ROOT).as_posix()
+        ignored = run_git(["check-ignore", "--quiet", "--", relative], check=False).returncode == 0
+        if not ignored:
+            result["warning"] = "诊断包位于项目内且未被 Git 忽略；提交前请移出或加入忽略规则"
+    except (OSError, ValueError):
+        pass
+    if args.open_issue:
+        result["issue_opened"] = open_bug_report(
+            incident_id=result.get("latest_incident_id"), version=__version__,
+        )
+    return result
+
+
 def non_negative_float(value: str) -> float:
     try:
         number = float(value)
@@ -1379,7 +1711,7 @@ def add_state_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="project-hooks", add_help=False)
+    parser = WorkflowArgumentParser(prog="project-hooks", add_help=False)
     parser.add_argument("-h", "--help", action="store_true", dest="basic_help")
     parser.add_argument("--help-all", action="store_true")
     parser.add_argument("--project", type=Path)
@@ -1404,6 +1736,13 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--track", choices=("stable", "research", "experiment", "sandbox"))
     start.add_argument("--topic")
     sub.add_parser("status")
+    task = sub.add_parser("task")
+    task_sub = task.add_subparsers(dest="task_command", required=True)
+    recover = task_sub.add_parser("recover")
+    recover.add_argument("--skip-auto-commit", action="store_true")
+    recover.add_argument("--reason")
+    abandon = task_sub.add_parser("abandon")
+    abandon.add_argument("--reason", required=True)
     sub.add_parser("branch-status")
     sub.add_parser("prepare-pr")
     sub.add_parser("archive-attempt")
@@ -1416,6 +1755,12 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard = sub.add_parser("dashboard", help="打开只读 SQLite 维护数据窗口")
     dashboard.add_argument("--refresh-seconds", type=non_negative_float, default=3.0)
     dashboard.add_argument("--branch")
+    diagnostics = sub.add_parser("diagnostics", help="查看或导出本地脱敏诊断")
+    diagnostics_sub = diagnostics.add_subparsers(dest="diagnostics_command", required=True)
+    diagnostics_sub.add_parser("status")
+    diagnostics_export = diagnostics_sub.add_parser("export")
+    diagnostics_export.add_argument("--output", type=Path)
+    diagnostics_export.add_argument("--open-issue", action="store_true")
     project = sub.add_parser("project")
     project_sub = project.add_subparsers(dest="project_command", required=True)
     project_show = project_sub.add_parser("show")
@@ -1497,9 +1842,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_args = list(os.sys.argv[1:] if argv is None else argv)
+    args: argparse.Namespace | None = None
+    root: Path | None = None
+    writer_context = None
     try:
-        root: Path | None
+        args = build_parser().parse_args(raw_args)
         if args.command == "init":
             root = (args.project or args.path).resolve()
         else:
@@ -1507,6 +1855,15 @@ def main(argv: list[str] | None = None) -> int:
         if root is not None:
             set_project_root(root)
             assert_project_version_compatible(args)
+            if not command_is_read_only(args):
+                lock_state_dir = root / ".project_hooks" if args.command == "init" else state_dir()
+                writer_context = mutation_lock(
+                    lock_state_dir,
+                    command=".".join(filter(None, [args.command, getattr(args, f"{args.command}_command", None)])),
+                    task_id=getattr(args, "task_id", None),
+                    timeout=0.25,
+                )
+                writer_context.__enter__()
         if args.basic_help:
             output = DAILY_HELP
         elif args.help_all:
@@ -1542,6 +1899,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             output = action_overview_text(context_data())
         elif args.command == "start": output = start_task(args)
+        elif args.command == "task":
+            output = task_recover(args) if args.task_command == "recover" else task_abandon(args)
         elif args.command == "status": output = task_status()
         elif args.command == "branch-status": output = branch_status()
         elif args.command == "prepare-pr": output = prepare_pr()
@@ -1556,6 +1915,7 @@ def main(argv: list[str] | None = None) -> int:
             provider = DashboardDataProvider(read_model(), classify_branch, args.branch)
             launch_dashboard(provider, args.refresh_seconds)
             output = {"status": "closed"}
+        elif args.command == "diagnostics": output = diagnostics_command(args)
         elif args.command == "state": output = state_update(args)
         elif args.command == "project": output = project_command(args)
         elif args.command == "stage": output = stage_command(args)
@@ -1570,11 +1930,37 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(output, str): print(output, end="")
         else: print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0
-    except (OSError, ValueError, json.JSONDecodeError, sqlite3.DatabaseError, subprocess.SubprocessError,
-            CatalogError, DashboardError, ProjectManagerError, ReadModelError, StoreError,
-            UpdateError, WorkflowError) as exc:
-        print(str(exc), file=os.sys.stderr)
+    except Exception as exc:
+        command_parts = [str((args.command if args is not None else (raw_args[0] if raw_args else None)) or "overview")]
+        for attribute in ("diagnostics_command", "db_command", "catalog_command", "project_command",
+                          "stage_command", "attempt_command", "exploration_command", "task_command"):
+            value = getattr(args, attribute, None) if args is not None else None
+            if value:
+                command_parts.append(str(value))
+        metadata = {
+            "command": ".".join(command_parts),
+            "application_version": __version__,
+            "schema_version": SCHEMA_VERSION,
+            "execution_mode": execution_mode(),
+        }
+        try:
+            state = read_model().git_state(branch_policy()["default_branch"])
+            metadata["git_state"] = {
+                "relation": state.get("relation") or "unknown",
+                "branch_kind": classify_branch(state.get("branch") or "").get("kind") or "unknown",
+            }
+        except Exception:
+            pass
+        try:
+            record = record_failure((root or ROOT).resolve(), exc, **metadata)
+            message = format_failure(record)
+        except Exception:
+            message = str(exc)
+        print(message, file=os.sys.stderr)
         return 1
+    finally:
+        if writer_context is not None:
+            writer_context.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

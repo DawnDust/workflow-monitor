@@ -1,6 +1,14 @@
 {
   "format": 1,
-  "application_version": "1.3.0",
+  "application_version": "1.4.1",
+  "build_identity": {
+    "build_id": "26a776bcf81b28e7",
+    "source_commit": "0026bb7709b3e7bd1701ca8516d564eb12d2fd1d",
+    "source_tree": "9c041e749232aec37fcc2fe65b8a8221cd2c0a06982507781036b0ab98227dde",
+    "built_at": "2026-08-01T10:13:59+00:00",
+    "dirty": true,
+    "mode": "frozen"
+  },
   "template_version": 3,
   "managed_files": {
     ".githooks/pre-commit": {

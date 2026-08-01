@@ -61,6 +61,7 @@ def action_overview_text(context: dict) -> str:
     state = context.get("overview_state") or context.get("state") or {}
     profile = context.get("project_profile") or {}
     stage = context.get("current_stage") or {}
+    stage_warning = context.get("stage_freshness_warning") or {}
     active = context.get("active_task")
     active_text = (
         f"{active.get('task_id')}（{active.get('branch') or context.get('branch') or '未知分支'}）"
@@ -78,13 +79,13 @@ def action_overview_text(context: dict) -> str:
         f"大目标：{big_goal}",
         separator,
         "",
-        "当前大阶段",
-        f"阶段：{compact_text(stage.get('title'))}",
-        f"阶段目标：{compact_text(stage.get('goal'))}",
-        f"阶段进展：{compact_text(stage.get('summary'))}",
-        f"当前步骤：{compact_text(stage.get('current_step'))}",
-        f"下一步：{compact_text(stage.get('next_step'))}",
-        f"阶段阻塞：{compact_text(stage.get('blocker'), '无。')}",
+        "当前阶段",
+        (
+            f"{compact_text(stage.get('title'))}（{stage.get('status') or '未知'}，"
+            f"更新于 {stage.get('updated_at') or '未知时间'}）"
+            if stage else "无 active 阶段"
+        ),
+        *([f"提醒：{stage_warning.get('message')}"] if stage_warning else []),
         separator,
         "",
         "当前执行",
@@ -125,6 +126,25 @@ def action_overview_text(context: dict) -> str:
         lines.append("- 无 active 探索。")
     lines.append(separator)
     return "\n".join(lines) + "\n"
+
+
+def stage_freshness_warning(stage: dict | None, handoffs: list[dict] | None) -> dict | None:
+    """Return a reminder when newer completed work did not update the active stage."""
+    if not stage or not handoffs:
+        return None
+    latest = handoffs[0]
+    if latest.get("task_id") == stage.get("task_id"):
+        return None
+    stage_updated = str(stage.get("updated_at") or "")
+    latest_finished = str(latest.get("occurred_at") or "")
+    if not stage_updated or not latest_finished or latest_finished <= stage_updated:
+        return None
+    return {
+        "message": "最近完成的任务没有更新当前阶段，请确认阶段进展是否仍然准确",
+        "stage_updated_at": stage_updated,
+        "latest_task_id": latest.get("task_id"),
+        "latest_finished_at": latest_finished,
+    }
 
 
 def is_auxiliary_task_id(task_id: str | None) -> bool:
@@ -480,6 +500,7 @@ class MaintenanceReadModel:
             by_attempt.values(), key=lambda item: (item.get("updated_at", ""), item["attempt_id"]),
             reverse=True,
         )
+        current_stage = next((item for item in stages if item["status"] == "active"), None)
         return {
             "branch": branch,
             "state": state_data,
@@ -487,7 +508,8 @@ class MaintenanceReadModel:
             "recent_handoffs": handoffs,
             "active_task": active_data,
             "project_profile": dict(profile) if profile else None,
-            "current_stage": next((item for item in stages if item["status"] == "active"), None),
+            "current_stage": current_stage,
+            "stage_freshness_warning": stage_freshness_warning(current_stage, handoffs),
             "stages": stages,
             "attempts": attempts,
             "active_attempts": [item for item in attempts if item["state"] == "active"],

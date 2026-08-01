@@ -12,4 +12,11 @@
 - 科研资料文件只放在 `resources/` 的七个标准子目录，并通过 `catalog` 指令登记；`check` 必须保持通过。
 - 仅当用户明确要求纯 Git 发布，且 `main` 没有活动任务、不再编辑、改动已经结束并验证通过时，才可直接检查、暂存、提交和推送。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态、绕过 `end`、在 `main` 试改、自动合并。
+- 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
 <!-- project-maintenance-hooks:end -->
+
+## 软件维护测试
+
+- 每次代码写入后运行 `python scripts/run_tests.py fast`。
+- 任务结束前运行 `python scripts/run_tests.py full`；发布前运行 `python scripts/run_tests.py release`。
+- 不得通过删除现有测试场景缩短耗时；使用 `python scripts/run_tests.py list` 查看场景清单。
