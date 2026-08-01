@@ -16,8 +16,9 @@ from project_hooks.project_manager import (
     apply_project_update,
     initialize_project,
 )
-from project_hooks.updater import UpdateError, check_latest_update, run_update, verify_digest
+from project_hooks.updater import UpdateError, check_latest_update, check_update, run_update, verify_digest
 from project_hooks.windows_entry import PortableBootstrapError, prepare_portable_project
+from scripts.run_tests import validate_release_tag
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 
@@ -102,9 +103,25 @@ class DistributionTests(unittest.TestCase):
         manifest = json.loads((dist / "release-manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(
             set(manifest),
-            {"version", "launcher_min_version", "event_schema", "windows_exe"},
+            {"version", "build_identity", "launcher_min_version", "event_schema", "windows_exe"},
         )
+        self.assertIn("build_id", manifest["build_identity"])
         self.assertEqual(manifest["windows_exe"]["file"], "project-hooks.exe")
+
+    def test_release_tag_must_match_application_version(self) -> None:
+        validate_release_tag(CURRENT_VERSION, f"v{CURRENT_VERSION}")
+        with self.assertRaisesRegex(RuntimeError, "tag/version mismatch"):
+            validate_release_tag(CURRENT_VERSION, "v999.0.0")
+
+    def test_same_version_different_build_is_reported(self) -> None:
+        self.init()
+        manifest = {
+            "version": CURRENT_VERSION,
+            "build_identity": {"build_id": "different-build-id"},
+        }
+        result = check_update(self.root, manifest)
+        self.assertEqual(result["status"], "different-build")
+        self.assertIn("不同构建", result["build_warning"])
 
     def test_project_root_is_discovered_from_descendant(self) -> None:
         self.init()
@@ -197,7 +214,7 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in portable.iterdir()), ["project-hooks.exe"])
 
     def test_project_update_preserves_existing_journal_bytes_and_rebuilds_database(self) -> None:
-        self.init("0.9.0")
+        self.init("1.3.0")
         self.commit()
         before = (self.root / "maintenance/events.jsonl").read_bytes()
         result = apply_project_update(self.root, CURRENT_VERSION)
@@ -205,6 +222,9 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(after.startswith(before))
         self.assertIn(b"workflow.upgraded", after[len(before):])
         self.assertEqual(result["status"], "updated")
+        installation = json.loads((self.root / ".codex/project-maintenance-installation.json").read_text(encoding="utf-8"))
+        self.assertEqual(installation["application_version"], CURRENT_VERSION)
+        self.assertTrue(installation["build_identity"]["build_id"])
         self.assertTrue((self.root / ".project_hooks/maintenance.sqlite3").is_file())
 
     def test_customized_managed_file_is_preserved_and_reported(self) -> None:

@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Iterable, Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .active_task import ActiveTaskError, active_row_matches, active_task_path, restore_active_row
+from .transaction import mutation_lock
+
 
 SCHEMA_VERSION = 3
 SUPPORTED_EVENT_SCHEMA_VERSIONS = (1, 2, 3)
@@ -548,6 +551,26 @@ def rebuild(database: Path, journal: Path, *, preserve_active: bool = True) -> s
 
 
 def ensure_database(database: Path, journal: Path) -> sqlite3.Connection:
+    def restore_sidecar(connection: sqlite3.Connection) -> sqlite3.Connection:
+        if not active_task_path(database.parent).is_file():
+            return connection
+        try:
+            if active_row_matches(database, database.parent):
+                return connection
+        except (ActiveTaskError, sqlite3.DatabaseError):
+            pass
+        connection.close()
+        try:
+            with mutation_lock(database.parent, command="active-task.restore"):
+                restore_active_row(database, database.parent)
+        except ActiveTaskError as exc:
+            raise StoreError(str(exc)) from exc
+        return connect(database)
+
+    def guarded_rebuild() -> sqlite3.Connection:
+        with mutation_lock(database.parent, command="database.rebuild"):
+            return restore_sidecar(rebuild(database, journal))
+
     previous_version = None
     layout_current = False
     if database.exists():
@@ -562,53 +585,56 @@ def ensure_database(database: Path, journal: Path) -> sqlite3.Connection:
             if probe is not None:
                 probe.close()
     if database.exists() and (previous_version != SCHEMA_VERSION or not layout_current):
-        return rebuild(database, journal)
+        return guarded_rebuild()
     connection = None
     try:
         connection = connect(database)
         stored = connection.execute("SELECT value FROM meta WHERE key='journal_hash'").fetchone()
         if stored is None or stored[0] != journal_hash(journal):
             connection.close()
-            return rebuild(database, journal)
-        return connection
+            return guarded_rebuild()
+        return restore_sidecar(connection)
     except sqlite3.DatabaseError:
         if connection is not None:
             connection.close()
-        return rebuild(database, journal)
+        return guarded_rebuild()
 
 
 def record_events(database: Path, journal: Path, state_dir: Path, events: Iterable[dict]) -> None:
-    existed = journal.exists()
-    original = journal.read_bytes() if existed else b""
-    append_events(journal, state_dir, events)
-    try:
-        connection = rebuild(database, journal)
-        connection.close()
-    except Exception as exc:
-        descriptor, temp_name = tempfile.mkstemp(
-            prefix="events-rollback-", suffix=".jsonl", dir=journal.parent
-        )
+    pending = list(events)
+    task_id = next((event.get("task_id") for event in pending if event.get("task_id")), None)
+    with mutation_lock(state_dir, command="event.persist", task_id=task_id):
+        existed = journal.exists()
+        original = journal.read_bytes() if existed else b""
+        append_events(journal, state_dir, pending)
         try:
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(original)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if existed:
-                os.replace(temp_name, journal)
-            else:
-                os.unlink(temp_name)
-                journal.unlink(missing_ok=True)
-        finally:
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
-        try:
-            rollback = rebuild(database, journal)
-            rollback.close()
-        except Exception as rollback_exc:
-            raise StoreError(
-                f"事件写入失败且数据库回滚失败: {exc}; rollback: {rollback_exc}"
-            ) from exc
-        raise
+            connection = rebuild(database, journal)
+            connection.close()
+        except Exception as exc:
+            descriptor, temp_name = tempfile.mkstemp(
+                prefix="events-rollback-", suffix=".jsonl", dir=journal.parent
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(original)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if existed:
+                    os.replace(temp_name, journal)
+                else:
+                    os.unlink(temp_name)
+                    journal.unlink(missing_ok=True)
+            finally:
+                if os.path.exists(temp_name):
+                    os.unlink(temp_name)
+            try:
+                rollback = rebuild(database, journal)
+                rollback.close()
+            except Exception as rollback_exc:
+                raise StoreError(
+                    f"事件写入失败且数据库回滚失败: {exc}; rollback: {rollback_exc}"
+                ) from exc
+            raise
 
 
 def rows(connection: sqlite3.Connection, query: str, parameters: tuple = ()) -> list[dict]:

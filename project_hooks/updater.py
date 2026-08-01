@@ -13,6 +13,7 @@ import urllib.request
 from pathlib import Path
 
 from . import __version__
+from .build_identity import build_identity, build_warning
 from .launcher import ACTIVE_ENV, is_frozen, runtime_root
 from .project_manager import INSTALLATION_PATH, apply_project_update, preflight_update
 from .store import SCHEMA_VERSION, load_events
@@ -141,11 +142,25 @@ def project_version(root: Path) -> str | None:
 def check_update(root: Path, manifest: dict) -> dict:
     current = project_version(root)
     target = str(manifest["version"])
+    current_build = build_identity().get("build_id")
+    latest_build = (manifest.get("build_identity") or {}).get("build_id")
+    build_mismatch = bool(
+        current == target == __version__ and latest_build and current_build != latest_build
+    )
     return {
-        "status": "update-available" if current != target or __version__ != target else "current",
+        "status": (
+            "update-available" if current != target or __version__ != target
+            else "different-build" if build_mismatch else "current"
+        ),
         "application_version": __version__,
         "project_version": current,
         "latest_version": target,
+        "current_build_id": current_build,
+        "latest_build_id": latest_build,
+        "build_warning": (
+            f"同一版本存在不同构建：当前 {current_build}，发布 {latest_build}"
+            if build_mismatch else None
+        ),
     }
 
 
@@ -225,8 +240,19 @@ def run_update(
 
 
 def version_report(root: Path | None) -> dict:
+    identity = build_identity()
+    project_build_id = None
+    if root:
+        try:
+            installation = json.loads((root / INSTALLATION_PATH).read_text(encoding="utf-8"))
+            project_build_id = (installation.get("build_identity") or {}).get("build_id")
+        except (OSError, ValueError):
+            pass
     return {
         "application_version": __version__,
         "project_version": project_version(root) if root else None,
         "schema_version": SCHEMA_VERSION,
+        "build_identity": identity,
+        "project_build_id": project_build_id,
+        "build_warning": build_warning(project_build_id),
     }

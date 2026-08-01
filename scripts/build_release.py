@@ -36,8 +36,14 @@ def main() -> int:
         "https://github.com/DawnDust/project-maintenance-template/"
         f"releases/download/v{args.version}/"
     )
+    build_info_path = ROOT / "build" / "build-info.json"
+    try:
+        build_identity = json.loads(build_info_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        build_identity = {"build_id": "unknown"}
     manifest = {
         "version": args.version,
+        "build_identity": build_identity,
         "launcher_min_version": "1.0.0",
         "event_schema": {"minimum": 1, "maximum": SCHEMA_VERSION},
         "windows_exe": {

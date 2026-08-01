@@ -10,11 +10,13 @@ import sys
 import tempfile
 import unittest
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from project_hooks import cli as cli_module
+from project_hooks.active_task import load_active_state
 from project_hooks.catalog import CatalogRuntime, migrate_layout
 from project_hooks.dashboard import (
     CLI_FALLBACK,
@@ -32,6 +34,7 @@ from project_hooks.dashboard import (
     RecordsPage,
     TablePage,
     AdvancedWindow,
+    active_task_warning,
     advanced_summary,
     build_research_prompt,
     catalog_overview_text,
@@ -59,32 +62,53 @@ from project_hooks.read_model import (
     git_state_summary,
     is_auxiliary_task_id,
     is_publication_step,
+    stage_freshness_warning,
 )
-from project_hooks.store import append_events, ensure_database, record_events, rebuild
+from project_hooks.store import append_events, ensure_database, load_events, record_events, rebuild
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProjectHooksSqliteTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name) / "repo"
-        self.root.mkdir()
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.seed_temp = tempfile.TemporaryDirectory()
+        cls.seed_root = Path(cls.seed_temp.name) / "seed"
+        cls.seed_root.mkdir()
         for name in (".codex", ".githooks", "maintenance", "project_hooks"):
-            shutil.copytree(SOURCE_ROOT / name, self.root / name, ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.copytree(SOURCE_ROOT / name, cls.seed_root / name, ignore=shutil.ignore_patterns("__pycache__"))
         for name in ("source", "data", "theory", "analysis", "outputs", "others", "reports"):
-            directory = self.root / "resources" / name
+            directory = cls.seed_root / "resources" / name
             directory.mkdir(parents=True)
             (directory / ".gitkeep").write_text("\n", encoding="utf-8")
         for name in ("AGENTS.md", ".gitignore", ".gitattributes"):
-            shutil.copy2(SOURCE_ROOT / name, self.root / name)
-        (self.root / "maintenance/events.jsonl").write_text("", encoding="utf-8")
-        self.git("init", "-b", "main")
+            shutil.copy2(SOURCE_ROOT / name, cls.seed_root / name)
+        (cls.seed_root / "maintenance/events.jsonl").write_text("", encoding="utf-8")
+        commands = (
+            ("init", "-b", "main"),
+            ("config", "user.name", "Project Hooks Test"),
+            ("config", "user.email", "hooks@example.invalid"),
+            ("add", "."),
+            ("commit", "-m", "baseline"),
+        )
+        for command in commands:
+            subprocess.run(["git", *command], cwd=cls.seed_root, check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.seed_temp.cleanup()
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "repo"
+        subprocess.run(
+            ["git", "clone", "--quiet", "--no-hardlinks", str(self.seed_root), str(self.root)],
+            check=True, capture_output=True,
+        )
+        self.git("remote", "remove", "origin")
         self.git("config", "user.name", "Project Hooks Test")
         self.git("config", "user.email", "hooks@example.invalid")
-        self.git("add", ".")
-        self.git("commit", "-m", "baseline")
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -133,7 +157,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         overview = self.hooks().stdout
         self.assertIn("项目概览", overview)
         self.assertIn("项目描述：", overview)
-        self.assertIn("当前大阶段", overview)
+        self.assertIn("当前阶段", overview)
         self.assertIn("状态：", overview)
         self.assertIn("活动任务：", overview)
         self.assertIn("当前阻塞：", overview)
@@ -1301,6 +1325,26 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         )
         self.assertIn("必须大于或等于 0", legacy.stderr)
 
+    def test_diagnostics_cli_records_failure_and_exports_allowlisted_bundle(self) -> None:
+        self.start("20260722_diag_001")
+        rejected = self.start("20260722_diag_002", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("PH-E100", rejected.stderr)
+        self.assertIn("事件编号", rejected.stderr)
+        status = json.loads(self.hooks("diagnostics", "status").stdout)
+        self.assertEqual(status["records"], 1)
+        self.assertFalse(status["automatic_upload"])
+        output = self.root / "diagnostics.zip"
+        exported = json.loads(self.hooks("diagnostics", "export", "--output", str(output)).stdout)
+        self.assertEqual(exported["status"], "exported")
+        self.assertTrue(output.is_file())
+        import zipfile
+        with zipfile.ZipFile(output) as archive:
+            self.assertEqual(
+                set(archive.namelist()),
+                {"manifest.json", "report.md", "environment.json", "checks.json", "diagnostics.jsonl"},
+            )
+
     def test_root_help_separates_daily_and_advanced_commands(self) -> None:
         basic = self.hooks("--help").stdout
         self.assertIn("context", basic)
@@ -1314,6 +1358,103 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertIn("archive-attempt", advanced)
         self.assertIn("db", advanced)
         self.assertNotIn("pre-commit", advanced)
+
+
+    def test_active_task_sidecar_restores_corrupt_database(self) -> None:
+        task_id = "20260801_sidecar_001"
+        self.start(task_id)
+        sidecar = load_active_state(self.root / ".project_hooks")
+        self.assertEqual(sidecar["record"]["task_id"], task_id)
+        (self.root / ".project_hooks/maintenance.sqlite3").write_bytes(b"not sqlite")
+        recovered = self.hooks("status")
+        self.assertEqual(json.loads(recovered.stdout)["task_id"], task_id)
+        connection = sqlite3.connect(self.root / ".project_hooks/maintenance.sqlite3")
+        try:
+            row = connection.execute("SELECT task_id FROM active_tasks").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row[0], task_id)
+
+    def test_task_abandon_preserves_files_and_staging(self) -> None:
+        task_id = "20260801_abandon_001"
+        self.start(task_id)
+        work = self.root / "preserved.txt"
+        work.write_text("keep\n", encoding="utf-8")
+        self.git("add", "preserved.txt")
+        result = json.loads(self.hooks("task", "abandon", "--reason", "superseded").stdout)
+        self.assertTrue(result["files_preserved"])
+        self.assertEqual(work.read_text(encoding="utf-8"), "keep\n")
+        self.assertIn("preserved.txt", self.git("diff", "--cached", "--name-only").stdout)
+        events = load_events(self.root / "maintenance/events.jsonl")
+        finished = [event for event in events if event["task_id"] == task_id and event["event_type"] == "task.finished"]
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["payload"]["result"], "abandoned")
+
+    def test_simultaneous_start_has_one_winner_and_reports_holder(self) -> None:
+        common = [
+            sys.executable, "-m", "project_hooks", "start", None,
+            "--kind", "analysis", "--scope", "concurrent start",
+            "--acceptance", "one writer", "--git-commit", "never", "--task-size", "small",
+        ]
+        commands = []
+        for task_id in ("20260801_race_a_001", "20260801_race_b_001"):
+            command = list(common)
+            command[4] = task_id
+            commands.append(command)
+        processes = [
+            subprocess.Popen(command, cwd=self.root, text=True, encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for command in commands
+        ]
+        results = [process.communicate(timeout=20) + (process.returncode,) for process in processes]
+        self.assertEqual(sorted(item[2] for item in results), [0, 1])
+        failure = next(item[1] for item in results if item[2] == 1)
+        self.assertIn("PID=", failure)
+
+    def test_end_retry_does_not_duplicate_finished_event(self) -> None:
+        task_id = "20260801_retry_end_001"
+        self.start(task_id, commit="always")
+        self.update_state()
+        (self.root / "result.txt").write_text("result\n", encoding="utf-8")
+        self.git("config", "user.name", "")
+        self.git("config", "user.email", "")
+        first = self.end(task_id, check=False)
+        self.assertNotEqual(first.returncode, 0)
+        first_events = load_events(self.root / "maintenance/events.jsonl")
+        self.assertEqual(len([
+            event for event in first_events
+            if event["task_id"] == task_id and event["event_type"] == "task.finished"
+        ]), 1)
+        self.git("config", "user.name", "Project Hooks Test")
+        self.git("config", "user.email", "hooks@example.invalid")
+        self.end(task_id)
+        final_events = load_events(self.root / "maintenance/events.jsonl")
+        self.assertEqual(len([
+            event for event in final_events
+            if event["task_id"] == task_id and event["event_type"] == "task.finished"
+        ]), 1)
+        connection = sqlite3.connect(self.root / ".project_hooks/maintenance.sqlite3")
+        try:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_tasks").fetchone()[0], 0)
+        finally:
+            connection.close()
+
+    def test_end_warns_when_active_stage_was_not_updated_by_task(self) -> None:
+        setup_task = "20260801_stage_setup_001"
+        self.start(setup_task)
+        self.hooks(
+            "stage", "start", "validation", "--title", "Validation",
+            "--goal", "Validate workflow", "--acceptance", "All tests pass",
+        )
+        self.update_state()
+        setup_result = json.loads(self.end(setup_task).stdout)
+        self.assertNotIn("warnings", setup_result)
+
+        task_id = "20260801_stage_reminder_001"
+        self.start(task_id)
+        self.update_state()
+        result = json.loads(self.end(task_id).stdout)
+        self.assertEqual(result["warnings"][0]["code"], "stage-not-updated")
+        self.assertEqual(result["warnings"][0]["stage_id"], "validation")
 
 
 class DashboardPresentationTests(unittest.TestCase):
@@ -1330,6 +1471,13 @@ class DashboardPresentationTests(unittest.TestCase):
                 "next_steps": ["完成代码", "运行测试"],
             },
             "active_task": {"task_id": "task-1", "branch": "main"},
+            "current_stage": {
+                "title": "稳定维护", "status": "active",
+                "updated_at": "2026-07-22 09:00:00",
+                "goal": "不应在概览重复", "summary": "不应在概览重复",
+                "current_step": "不应在概览重复", "next_step": "不应在概览重复",
+            },
+            "stage_freshness_warning": {"message": "阶段可能未更新"},
             "git_state": {
                 "branch": "main",
                 "head": "1234567890",
@@ -1344,8 +1492,11 @@ class DashboardPresentationTests(unittest.TestCase):
             }],
         }
         text = action_overview_text(context)
-        self.assertLess(text.index("项目描述："), text.index("当前大阶段"))
-        self.assertLess(text.index("当前大阶段"), text.index("当前执行"))
+        self.assertLess(text.index("项目描述："), text.index("当前阶段"))
+        self.assertLess(text.index("当前阶段"), text.index("当前执行"))
+        self.assertIn("稳定维护（active，更新于 2026-07-22 09:00:00）", text)
+        self.assertIn("提醒：阶段可能未更新", text)
+        self.assertNotIn("不应在概览重复", text)
         self.assertIn("活动任务：task-1（main）", text)
         self.assertIn("当前阻塞：无。", text)
         self.assertIn("1. 完成代码", text)
@@ -1442,10 +1593,21 @@ class DashboardPresentationTests(unittest.TestCase):
         text = StagePage.stage_text(stage, [{
             "stage_id": "validation", "branch": "research/model", "state": "active",
             "current_step": "Calibrate model",
-        }])
+        }], {"message": "阶段可能未更新", "stage_updated_at": "2026-07-22 09:00:00"})
         self.assertIn("当前步骤：Run tests", text)
         self.assertIn("下一步：Review evidence", text)
         self.assertIn("research/model｜active｜Calibrate model", text)
+        self.assertIn("阶段可能未更新", text)
+
+    def test_stage_freshness_uses_latest_completed_task(self) -> None:
+        stage = {"task_id": "task-old", "updated_at": "2026-07-22 09:00:00"}
+        warning = stage_freshness_warning(stage, [{
+            "task_id": "task-new", "occurred_at": "2026-07-22 10:00:00",
+        }])
+        self.assertEqual(warning["latest_task_id"], "task-new")
+        self.assertIsNone(stage_freshness_warning(stage, [{
+            "task_id": "task-old", "occurred_at": "2026-07-22 10:00:00",
+        }]))
 
     def test_search_catalog_and_records_use_horizontal_detail_without_changing_advanced_view(self) -> None:
         table_source = inspect.getsource(TablePage)
@@ -1834,6 +1996,12 @@ class DashboardPresentationTests(unittest.TestCase):
         second, error = controller.refresh()
         self.assertEqual(second, first)
         self.assertIn("database unavailable", error)
+
+    def test_active_task_age_warning_thresholds(self) -> None:
+        now = datetime(2026, 8, 1, 12, 0, 0)
+        self.assertIsNone(active_task_warning({"started_at": "2026-08-01 00:00:01（Asia/Shanghai）"}, now))
+        self.assertEqual(active_task_warning({"started_at": "2026-07-31 11:59:59（Asia/Shanghai）"}, now)["level"], "yellow")
+        self.assertEqual(active_task_warning({"started_at": "2026-07-25 11:59:59（Asia/Shanghai）"}, now)["level"], "red")
 
 
 

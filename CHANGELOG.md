@@ -1,6 +1,17 @@
 # Changelog
 
+## 1.4.1
+
+- 增加项目级跨进程单写者锁、可恢复活动任务 sidecar 与幂等 `end`。
+- 增加 `task recover`、`task abandon`、构建身份及冻结 EXE UTF-8 输出保护。
+- 增加本地脱敏诊断导出、Dashboard Bug 报告入口与分层并行测试。
+- 精简 Dashboard 阶段展示，并在任务完成但阶段未更新时给出非阻塞提醒。
+
 ## Unreleased
+
+- 新增本地轮转、脱敏且不自动上传的诊断记录，以及 CLI/Dashboard 诊断 ZIP 导出和 GitHub Bug 报告入口。
+- 为错误与冲突增加稳定分类、事件编号和安全下一步提示，Dashboard 刷新失败继续保留上次正常数据。
+- 新增 fast/full/release 分层并行测试入口、分支覆盖率门禁及 PR/main 持续集成。
 
 ## 1.3.0
 
