@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .resource_layout import RESOURCE_DIRECTORIES, ensure_resource_directories
 from .store import (
     SCHEMA_VERSION,
     append_events,
@@ -22,7 +23,7 @@ from .store import (
 )
 
 
-TEMPLATE_VERSION = 2
+TEMPLATE_VERSION = 3
 INSTALLATION_PATH = Path(".codex/project-maintenance-installation.json")
 CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
 AGENTS_BEGIN = "<!-- project-maintenance-hooks:begin -->"
@@ -51,6 +52,7 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - 稳定维护只在 `main` 使用 `--track stable`；研究和实验使用独立探索分支。
 - 使用 `state update`、`decision add` 和 `attempt update` 保存进展，最后必须运行 `end`。
 - 项目资料和大阶段只通过 `project update` 与 `stage` 指令记录；探索进度使用 `attempt update` 的结构化步骤字段。
+- 科研资料文件只放在 `resources/` 的七个标准子目录，并通过 `catalog` 指令登记；`check` 必须保持通过。
 - 只有 `validated` 尝试可准备 Squash PR；推送和合并必须由用户明确确认。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态或绕过 `end`。
 <!-- project-maintenance-hooks:end -->"""
@@ -103,13 +105,18 @@ Squash PR，合并必须等待用户明确确认。
 
 | 路径 | 内容 |
 |:---|:---|
-| `source/` | 外部资料和来源证据 |
-| `data/` | 原始、过程和处理后数据 |
-| `theory/` | 理论、假设、定义和推导 |
-| `analysis/` | 分析代码、Notebook 和实验 |
-| `outputs/` | 报告、图表、模型和成果 |
+| `resources/source/` | 外部资料和来源证据 |
+| `resources/data/` | 原始、过程和处理后数据 |
+| `resources/theory/` | 理论、假设、定义和推导 |
+| `resources/analysis/` | 分析代码、Notebook 和实验 |
+| `resources/outputs/` | 图表、模型和其他成果 |
+| `resources/others/` | 暂时无法可靠分类的资料 |
+| `resources/reports/` | 面向外部受众的项目总结与报告 |
 
 原始资料不覆盖；过程与成果分开。Markdown 文件中的公式使用 Markdown/LaTeX 语法。
+`catalog scan` 固定扫描以上七个目录；`add`、`update` 和 `ingest` 拒绝目录与资料类型不一致。
+`check` 会报告缺失目录、错位条目和未索引文件。旧项目先运行
+`.\\project-hooks.exe catalog migrate-layout --dry-run`，确认无冲突后再执行实际迁移。
 事件日志只追加，不得手工修改既有行；SQLite 不纳入 Git，也不是唯一备份。
 """
 
@@ -128,7 +135,7 @@ def text_hash(content: str) -> str:
 
 def default_config() -> dict:
     return {
-        "version": 2,
+        "version": 3,
         "enabled": True,
         "timezone": "Asia/Shanghai",
         "state_dir": ".project_hooks",
@@ -153,10 +160,12 @@ def default_config() -> dict:
 
 
 def template_files() -> dict[str, str]:
-    return {
+    files = {
         ".githooks/pre-commit": HOOK_TEMPLATE,
         "maintenance/README.md": MAINTENANCE_README,
     }
+    files.update({f"{item.relative_path}/.gitkeep": "\n" for item in RESOURCE_DIRECTORIES})
+    return files
 
 
 def extract_block(text: str, begin: str, end: str) -> str | None:
@@ -231,6 +240,7 @@ def initialize_project(root: Path, application_version: str) -> dict:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8", newline="\n")
+    ensure_resource_directories(root)
     agents = root / "AGENTS.md"
     agents_text = agents.read_text(encoding="utf-8") if agents.is_file() else "# Agent 操作规范\n"
     agents.write_text(
@@ -369,6 +379,9 @@ def validate_project(root: Path) -> None:
     ):
         if not (root / relative).is_file():
             raise ProjectManagerError(f"升级后缺少文件: {relative.as_posix()}")
+    for item in RESOURCE_DIRECTORIES:
+        if not (root / item.relative_path).is_dir():
+            raise ProjectManagerError(f"升级后缺少资源目录: {item.relative_path}")
     load_events(root / "maintenance/events.jsonl")
     configured = git(root, "config", "--local", "--get", "core.hooksPath").stdout.strip()
     if configured != ".githooks":
@@ -454,6 +467,7 @@ def apply_project_update(root: Path, target_version: str) -> dict:
         for key in conflicts:
             installation["managed_files"][key]["customized"] = True
         write_json(install_path, installation)
+        ensure_resource_directories(root)
         journal = root / "maintenance/events.jsonl"
         event = new_event(
             "workflow.upgraded",
