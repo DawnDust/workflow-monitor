@@ -15,7 +15,7 @@ from pathlib import Path
 from . import __version__
 from .launcher import ACTIVE_ENV, is_frozen, runtime_root
 from .project_manager import INSTALLATION_PATH, apply_project_update, preflight_update
-from .store import load_events
+from .store import SCHEMA_VERSION, load_events
 
 
 LATEST_MANIFEST = (
@@ -173,7 +173,9 @@ def run_update(
     target = str(manifest["version"])
     if normalized_target and version_key(target) != version_key(normalized_target):
         raise UpdateError(f"Release manifest 版本 {target} 与请求版本 {target_version} 不一致")
-    supported = manifest.get("event_schema", {"minimum": 1, "maximum": 2})
+    supported = manifest.get(
+        "event_schema", {"minimum": 1, "maximum": SCHEMA_VERSION}
+    )
     try:
         minimum, maximum = int(supported["minimum"]), int(supported["maximum"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -226,5 +228,5 @@ def version_report(root: Path | None) -> dict:
     return {
         "application_version": __version__,
         "project_version": project_version(root) if root else None,
-        "schema_version": 2,
+        "schema_version": SCHEMA_VERSION,
     }

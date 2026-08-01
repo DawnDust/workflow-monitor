@@ -21,6 +21,8 @@
 
 ```powershell
 .\project-hooks.exe context --format markdown
+.\project-hooks.exe project show
+.\project-hooks.exe stage list
 .\project-hooks.exe start --help
 .\project-hooks.exe end --help
 .\project-hooks.exe check
@@ -30,6 +32,7 @@
 双击无参数启动 Dashboard；在 PowerShell 中带参数运行时执行完整 CLI。`--help` 显示日常入口，`--help-all` 显示全部命令。
 
 Dashboard 顶部直接显示当前 EXE 与项目版本；点击“检查更新”可在后台只读查询最新正式版本，不会修改项目或卡住界面。
+概览按项目资料、当前大阶段、当前执行、探索和资料分区显示；“阶段”页集中展示阶段历史与各探索分支当前步骤。
 
 ## 更新
 
@@ -46,6 +49,7 @@ EXE从最新 GitHub Release 下载并校验新版程序，把版本化运行时�
 
 - `maintenance/events.jsonl` 是 Git 跟踪的追加式永久事件源。
 - `.project_hooks/maintenance.sqlite3` 是可重建的本地查询投影。
+- 项目说明、大目标、阶段和探索进度均通过受约束 CLI 写入事件源，不直接编辑 SQLite 或概览文本。
 - `source/`、`data/`、`theory/`、`analysis/` 和 `outputs/` 在首次需要时创建。
 - `project-hooks.exe` 和 `.project_hooks/` 均被 Git 忽略。
 

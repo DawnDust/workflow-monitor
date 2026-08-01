@@ -22,7 +22,7 @@ from .store import (
 )
 
 
-TEMPLATE_VERSION = 1
+TEMPLATE_VERSION = 2
 INSTALLATION_PATH = Path(".codex/project-maintenance-installation.json")
 CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
 AGENTS_BEGIN = "<!-- project-maintenance-hooks:begin -->"
@@ -50,6 +50,7 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - 每次任务先运行 `.\\project-hooks.exe context --format markdown`，按 `core_read_order` 阅读规范，首次写入前运行 `start`。
 - 稳定维护只在 `main` 使用 `--track stable`；研究和实验使用独立探索分支。
 - 使用 `state update`、`decision add` 和 `attempt update` 保存进展，最后必须运行 `end`。
+- 项目资料和大阶段只通过 `project update` 与 `stage` 指令记录；探索进度使用 `attempt update` 的结构化步骤字段。
 - 只有 `validated` 尝试可准备 Squash PR；推送和合并必须由用户明确确认。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态或绕过 `end`。
 <!-- project-maintenance-hooks:end -->"""
@@ -76,7 +77,7 @@ maintenance/events.jsonl text eol=lf merge=union
 
 MAINTENANCE_README = """# 项目维护规范
 
-本项目使用 `project-hooks` 保存任务生命周期、研究尝试、决策、交接和科研资料索引。
+本项目使用 `project-hooks` 保存项目资料、阶段、任务生命周期、研究尝试、决策、交接和科研资料索引。
 `maintenance/events.jsonl` 是追加式永久事件源；`.project_hooks/maintenance.sqlite3`
 是可从事件源重建的本地查询投影。
 
@@ -88,6 +89,11 @@ MAINTENANCE_README = """# 项目维护规范
 2. 首次写入前运行 `.\\project-hooks.exe start ...`。
 3. 使用 `.\\project-hooks.exe state update` 更新断点；路线变化使用 `decision add`；探索证据使用 `attempt update`。
 4. 最后运行 `.\\project-hooks.exe end ...`，不得删除活动状态或绕过收尾。
+
+项目说明和长期大目标通过 `.\\project-hooks.exe project update` 记录。全项目同一时间最多
+一个 active 大阶段，使用 `stage start` 和 `stage update` 推进。探索分支自动关联创建时的
+当前阶段，并通过 `attempt update --current-step ... --progress ... --next-step ...` 保存进度。
+Dashboard 只读显示分区概览和“阶段”页，不直接写入维护数据。
 
 稳定维护只在 `main` 使用 `--track stable`。新理论、算法、实验和不确定改动使用
 `--track research|experiment|sandbox --topic <slug>`。只有 `validated` 尝试可以准备

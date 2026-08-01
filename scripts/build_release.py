@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from project_hooks import __version__
+from project_hooks.store import SCHEMA_VERSION
 
 
 def digest(path: Path) -> str:
@@ -38,7 +39,7 @@ def main() -> int:
     manifest = {
         "version": args.version,
         "launcher_min_version": "1.0.0",
-        "event_schema": {"minimum": 1, "maximum": 2},
+        "event_schema": {"minimum": 1, "maximum": SCHEMA_VERSION},
         "windows_exe": {
             "file": executable.name,
             "url": base + executable.name,
