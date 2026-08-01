@@ -473,8 +473,48 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
 
 def rebuild(database: Path, journal: Path, *, preserve_active: bool = True) -> sqlite3.Connection:
     events = load_events(journal)
+    active_tasks: list[tuple] = []
+    recreate = not database.exists()
+    if database.exists():
+        probe = None
+        try:
+            probe = sqlite3.connect(database, timeout=2)
+            version = probe.execute("PRAGMA user_version").fetchone()[0]
+            attempt_columns = {
+                row[1] for row in probe.execute("PRAGMA table_info(attempts)").fetchall()
+            }
+            recreate = version != SCHEMA_VERSION or not {
+                "stage_id", "current_step", "progress", "next_step"
+            }.issubset(attempt_columns)
+            table = probe.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='active_tasks'"
+            ).fetchone()
+            if preserve_active and table:
+                active_tasks = probe.execute(
+                    "SELECT task_id, started_at, branch, record_json, state_updated, decisions_added "
+                    "FROM active_tasks"
+                ).fetchall()
+        except sqlite3.DatabaseError:
+            active_tasks = []
+            recreate = True
+        finally:
+            if probe is not None:
+                probe.close()
+
+    if recreate:
+        try:
+            for path in (database, Path(str(database) + "-wal"), Path(str(database) + "-shm")):
+                if path.exists():
+                    path.unlink()
+        except OSError as exc:
+            raise StoreError(f"无法重建维护数据库: {exc}") from exc
+
     connection = connect(database)
     with connection:
+        if recreate and active_tasks:
+            connection.executemany(
+                "INSERT INTO active_tasks VALUES (?, ?, ?, ?, ?, ?)", active_tasks
+            )
         for table in PROJECTION_TABLES:
             connection.execute(f"DELETE FROM {table}")
         if not preserve_active:
@@ -502,6 +542,7 @@ def ensure_database(database: Path, journal: Path) -> sqlite3.Connection:
                 probe.close()
     if previous_version not in (None, 0, SCHEMA_VERSION):
         return rebuild(database, journal)
+    connection = None
     try:
         connection = connect(database)
         stored = connection.execute("SELECT value FROM meta WHERE key='journal_hash'").fetchone()
@@ -510,12 +551,8 @@ def ensure_database(database: Path, journal: Path) -> sqlite3.Connection:
             return rebuild(database, journal)
         return connection
     except sqlite3.DatabaseError:
-        try:
-            for path in (database, Path(str(database) + "-wal"), Path(str(database) + "-shm")):
-                if path.exists():
-                    path.unlink()
-        except OSError as exc:
-            raise StoreError(f"无法重建损坏的维护数据库: {exc}") from exc
+        if connection is not None:
+            connection.close()
         return rebuild(database, journal)
 
 

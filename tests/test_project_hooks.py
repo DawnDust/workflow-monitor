@@ -58,7 +58,7 @@ from project_hooks.read_model import (
     is_auxiliary_task_id,
     is_publication_step,
 )
-from project_hooks.store import append_events
+from project_hooks.store import append_events, rebuild
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
@@ -137,6 +137,72 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         context = json.loads(self.hooks("context", "--format", "json").stdout)
         self.assertEqual(context["git_state"]["relation"], "unavailable")
         self.assertEqual(self.git("config", "--local", "--get", "core.hooksPath").stdout.strip(), ".githooks")
+
+    def test_rebuild_recreates_legacy_schema_and_preserves_active_task(self) -> None:
+        database = self.root / ".project_hooks/legacy.sqlite3"
+        journal = self.root / "maintenance/legacy-events.jsonl"
+        database.parent.mkdir(parents=True, exist_ok=True)
+        legacy = sqlite3.connect(database)
+        legacy.executescript(
+            """
+            CREATE TABLE attempts (
+              attempt_id TEXT PRIMARY KEY, branch TEXT NOT NULL UNIQUE, track TEXT NOT NULL,
+              topic TEXT NOT NULL, base_commit TEXT NOT NULL, goal TEXT NOT NULL,
+              acceptance_json TEXT NOT NULL, hypothesis TEXT, conclusion TEXT,
+              state TEXT NOT NULL, pr TEXT, archive_branch TEXT,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE active_tasks (
+              task_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, branch TEXT NOT NULL,
+              record_json TEXT NOT NULL, state_updated INTEGER NOT NULL DEFAULT 0,
+              decisions_added INTEGER NOT NULL DEFAULT 0
+            );
+            PRAGMA user_version=2;
+            """
+        )
+        legacy.execute(
+            "INSERT INTO active_tasks VALUES (?, ?, ?, ?, ?, ?)",
+            ("active-legacy", "2026-08-01", "main", "{}", 1, 0),
+        )
+        legacy.commit()
+        legacy.close()
+        append_events(
+            journal,
+            self.root / ".project_hooks",
+            [{
+                "event_id": "attempt-v3",
+                "schema_version": 3,
+                "event_type": "attempt.started",
+                "occurred_at": "2026-08-01 00:00:00",
+                "branch": "research/schema-rebuild",
+                "task_id": "task-v3",
+                "payload": {
+                    "attempt_id": "task-v3",
+                    "track": "research",
+                    "topic": "schema-rebuild",
+                    "base_commit": "abc123",
+                    "goal": "verify schema rebuild",
+                    "acceptance": ["new columns are projected"],
+                    "stage_id": "current-stage",
+                },
+            }],
+        )
+
+        connection = rebuild(database, journal)
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(attempts)").fetchall()
+        }
+        attempt = connection.execute(
+            "SELECT stage_id FROM attempts WHERE attempt_id='task-v3'"
+        ).fetchone()
+        active = connection.execute(
+            "SELECT task_id FROM active_tasks WHERE task_id='active-legacy'"
+        ).fetchone()
+        connection.close()
+
+        self.assertTrue({"stage_id", "current_step", "progress", "next_step"} <= columns)
+        self.assertEqual(attempt[0], "current-stage")
+        self.assertEqual(active[0], "active-legacy")
 
     def test_git_state_tracks_synced_ahead_behind_and_diverged(self) -> None:
         model = MaintenanceReadModel(
