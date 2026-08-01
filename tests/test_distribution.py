@@ -76,6 +76,8 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue((self.root / ".codex/project-maintenance-workflow.json").is_file())
         self.assertTrue((self.root / ".codex/project-maintenance-installation.json").is_file())
         self.assertIn("workflow.initialized", (self.root / "maintenance/events.jsonl").read_text(encoding="utf-8"))
+        for name in ("source", "data", "theory", "analysis", "outputs", "others", "reports"):
+            self.assertTrue((self.root / "resources" / name / ".gitkeep").is_file())
         self.assertEqual(
             self.git("config", "--local", "--get", "core.hooksPath").stdout.strip(),
             ".githooks",
@@ -106,7 +108,7 @@ class DistributionTests(unittest.TestCase):
 
     def test_project_root_is_discovered_from_descendant(self) -> None:
         self.init()
-        nested = self.root / "analysis/deep"
+        nested = self.root / "resources/analysis/deep"
         nested.mkdir(parents=True)
         self.assertEqual(discover_project_root(nested), self.root.resolve())
 

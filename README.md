@@ -33,6 +33,7 @@
 
 Dashboard 顶部直接显示当前 EXE 与项目版本；点击“检查更新”可在后台只读查询最新正式版本，不会修改项目或卡住界面。
 概览按项目资料、当前大阶段、当前执行、探索和资料分区显示；“阶段”页集中展示阶段历史与各探索分支当前步骤。
+“资料”页显示七个标准资源目录的文件/索引数量并可直接打开目录；“工作台”的“对外项目总结”提示词将确认后的 Markdown 报告保存到 `resources/reports/` 并登记索引。
 
 ## 更新
 
@@ -50,7 +51,8 @@ EXE从最新 GitHub Release 下载并校验新版程序，把版本化运行时�
 - `maintenance/events.jsonl` 是 Git 跟踪的追加式永久事件源。
 - `.project_hooks/maintenance.sqlite3` 是可重建的本地查询投影。
 - 项目说明、大目标、阶段和探索进度均通过受约束 CLI 写入事件源，不直接编辑 SQLite 或概览文本。
-- `source/`、`data/`、`theory/`、`analysis/` 和 `outputs/` 在首次需要时创建。
+- 初始化时固定创建 `resources/source/`、`data/`、`theory/`、`analysis/`、`outputs/`、`others/` 和 `reports/`；资料命令与 `check` 强制目录和索引一致。
+- 旧项目先运行 `.\project-hooks.exe catalog migrate-layout --dry-run`，确认后再运行实际迁移；命令拒绝覆盖目标文件。
 - `project-hooks.exe` 和 `.project_hooks/` 均被 Git 忽略。
 
 完整生命周期和分支策略见 [maintenance/README.md](./maintenance/README.md)。

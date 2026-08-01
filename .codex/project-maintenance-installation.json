@@ -1,18 +1,46 @@
 {
   "format": 1,
-  "application_version": "1.2.0",
-  "template_version": 1,
+  "application_version": "1.3.0",
+  "template_version": 3,
   "managed_files": {
     ".githooks/pre-commit": {
       "hash": "2d9776d503e44c6251de0b0d218f521ab85c5d21eb0a3cc2581a7f8d2c45989b",
       "customized": false
     },
     "maintenance/README.md": {
-      "hash": "a1a51a13ee9ef54622b44b749aa779899237b6544fcfa7169d3b6eef4718058b",
+      "hash": "e81fb5c42b088b72ccb74a10f05ba3e00aae6e6948186caadd28bbdb65921505",
       "customized": true
     },
+    "resources/source/.gitkeep": {
+      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "customized": false
+    },
+    "resources/data/.gitkeep": {
+      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "customized": false
+    },
+    "resources/theory/.gitkeep": {
+      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "customized": false
+    },
+    "resources/analysis/.gitkeep": {
+      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "customized": false
+    },
+    "resources/outputs/.gitkeep": {
+      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "customized": false
+    },
+    "resources/others/.gitkeep": {
+      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "customized": false
+    },
+    "resources/reports/.gitkeep": {
+      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "customized": false
+    },
     "AGENTS.md:block": {
-      "hash": "b8cecd481f7dae58a6e861cd363e2548fa8a8a4c8aa1c8c7b0e9c13b4f9b04a7",
+      "hash": "1521d83443395a166a59bbb262fc657674616c47331010a3c5d84dde5f0fe507",
       "customized": true
     },
     ".gitignore:block": {

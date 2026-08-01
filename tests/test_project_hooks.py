@@ -11,11 +11,13 @@ import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from project_hooks import cli as cli_module
+from project_hooks.catalog import CatalogRuntime, migrate_layout
 from project_hooks.dashboard import (
     CLI_FALLBACK,
-    CODEX_CATALOG_SCAN_PROMPT,
     CatalogPage,
     DashboardApp,
     DashboardController,
@@ -33,7 +35,6 @@ from project_hooks.dashboard import (
     advanced_summary,
     build_research_prompt,
     catalog_overview_text,
-    copy_catalog_scan_prompt,
     copy_research_prompt,
     dashboard_presets,
     filter_records,
@@ -41,6 +42,7 @@ from project_hooks.dashboard import (
     launch_dashboard,
     linked_task_ids,
     normalize_records,
+    open_resource_directory,
     record_identity,
     record_location,
     reveal_catalog_file,
@@ -58,7 +60,7 @@ from project_hooks.read_model import (
     is_auxiliary_task_id,
     is_publication_step,
 )
-from project_hooks.store import append_events, rebuild
+from project_hooks.store import append_events, ensure_database, record_events, rebuild
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +73,10 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.root.mkdir()
         for name in (".codex", ".githooks", "maintenance", "project_hooks"):
             shutil.copytree(SOURCE_ROOT / name, self.root / name, ignore=shutil.ignore_patterns("__pycache__"))
+        for name in ("source", "data", "theory", "analysis", "outputs", "others", "reports"):
+            directory = self.root / "resources" / name
+            directory.mkdir(parents=True)
+            (directory / ".gitkeep").write_text("\n", encoding="utf-8")
         for name in ("AGENTS.md", ".gitignore", ".gitattributes"):
             shutil.copy2(SOURCE_ROOT / name, self.root / name)
         (self.root / "maintenance/events.jsonl").write_text("", encoding="utf-8")
@@ -115,12 +121,15 @@ class ProjectHooksSqliteTests(unittest.TestCase):
     def test_install_rebuilds_database_and_context_is_available(self) -> None:
         database = self.root / ".project_hooks/maintenance.sqlite3"
         self.assertFalse(database.exists())
+        (self.root / "resources/reports/.gitkeep").unlink()
+        (self.root / "resources/reports").rmdir()
         missing = self.hooks(check=False)
         self.assertNotEqual(missing.returncode, 0)
         self.assertIn(".\\project-hooks.exe install", missing.stderr)
         self.assertIn(".\\project-hooks.exe check", missing.stderr)
         self.hooks("install")
         self.assertTrue(database.exists())
+        self.assertTrue((self.root / "resources/reports/.gitkeep").is_file())
         overview = self.hooks().stdout
         self.assertIn("项目概览", overview)
         self.assertIn("项目描述：", overview)
@@ -138,7 +147,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(context["git_state"]["relation"], "unavailable")
         self.assertEqual(self.git("config", "--local", "--get", "core.hooksPath").stdout.strip(), ".githooks")
 
-    def test_rebuild_recreates_legacy_schema_and_preserves_active_task(self) -> None:
+    def test_ensure_database_recreates_v3_numbered_legacy_schema_and_preserves_active_task(self) -> None:
         database = self.root / ".project_hooks/legacy.sqlite3"
         journal = self.root / "maintenance/legacy-events.jsonl"
         database.parent.mkdir(parents=True, exist_ok=True)
@@ -157,7 +166,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
               record_json TEXT NOT NULL, state_updated INTEGER NOT NULL DEFAULT 0,
               decisions_added INTEGER NOT NULL DEFAULT 0
             );
-            PRAGMA user_version=2;
+            PRAGMA user_version=3;
             """
         )
         legacy.execute(
@@ -188,7 +197,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             }],
         )
 
-        connection = rebuild(database, journal)
+        connection = ensure_database(database, journal)
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(attempts)").fetchall()
         }
@@ -203,6 +212,94 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertTrue({"stage_id", "current_step", "progress", "next_step"} <= columns)
         self.assertEqual(attempt[0], "current-stage")
         self.assertEqual(active[0], "active-legacy")
+
+    def test_record_events_rolls_back_journal_when_projection_fails(self) -> None:
+        database = self.root / ".project_hooks/rollback.sqlite3"
+        journal = self.root / "maintenance/rollback-events.jsonl"
+        state_dir = self.root / ".project_hooks"
+        initial = {
+            "event_id": "initial-task",
+            "schema_version": 3,
+            "event_type": "task.started",
+            "occurred_at": "2026-08-01 00:00:00",
+            "branch": "main",
+            "task_id": "initial-task",
+            "payload": {"scope": "initial"},
+        }
+        append_events(journal, state_dir, [initial])
+        connection = rebuild(database, journal)
+        connection.close()
+        before = journal.read_bytes()
+        addition = {
+            "event_id": "new-state",
+            "schema_version": 3,
+            "event_type": "project_state.updated",
+            "occurred_at": "2026-08-01 00:01:00",
+            "branch": "main",
+            "task_id": "initial-task",
+            "payload": {"status": "testing", "next_steps": []},
+        }
+        real_rebuild = rebuild
+        calls = 0
+
+        def flaky_rebuild(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise sqlite3.OperationalError("injected projection failure")
+            return real_rebuild(*args, **kwargs)
+
+        with patch("project_hooks.store.rebuild", side_effect=flaky_rebuild):
+            with self.assertRaises(sqlite3.OperationalError):
+                record_events(database, journal, state_dir, [addition])
+
+        self.assertEqual(journal.read_bytes(), before)
+        connection = ensure_database(database, journal)
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
+        connection.close()
+
+    def test_failed_exploration_start_restores_branch_active_state_and_journal(self) -> None:
+        base = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("update-ref", "refs/remotes/origin/main", base)
+        before = (self.root / "maintenance/events.jsonl").read_bytes()
+        args = cli_module.build_parser().parse_args([
+            "start", "20260801_atomic_start_001", "--kind", "analysis",
+            "--scope", "verify atomic exploration start", "--acceptance", "no residue",
+            "--track", "research", "--topic", "atomic-start", "--task-size", "small",
+            "--git-commit", "never",
+        ])
+        real_rebuild = rebuild
+        real_persist = cli_module.persist
+
+        def failing_persist(events):
+            calls = 0
+
+            def flaky_rebuild(*call_args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise sqlite3.OperationalError("injected start projection failure")
+                return real_rebuild(*call_args, **kwargs)
+
+            with patch("project_hooks.store.rebuild", side_effect=flaky_rebuild):
+                return real_persist(events)
+
+        cli_module.set_project_root(self.root)
+        try:
+            with patch("project_hooks.cli.persist", side_effect=failing_persist):
+                with self.assertRaises(cli_module.WorkflowError):
+                    cli_module.start_task(args)
+            self.assertEqual(self.git("branch", "--show-current").stdout.strip(), "main")
+            self.assertFalse(self.git("show-ref", "--verify", "refs/heads/research/atomic-start", check=False).returncode == 0)
+            self.assertEqual((self.root / "maintenance/events.jsonl").read_bytes(), before)
+            connection = ensure_database(
+                self.root / ".project_hooks/maintenance.sqlite3",
+                self.root / "maintenance/events.jsonl",
+            )
+            self.assertIsNone(connection.execute("SELECT 1 FROM active_tasks").fetchone())
+            connection.close()
+        finally:
+            cli_module.set_project_root(SOURCE_ROOT)
 
     def test_git_state_tracks_synced_ahead_behind_and_diverged(self) -> None:
         model = MaintenanceReadModel(
@@ -767,10 +864,8 @@ class ProjectHooksSqliteTests(unittest.TestCase):
     def test_catalog_cli_scan_relations_context_and_rebuild(self) -> None:
         task_id = "20260726_catalog_001"
         self.start(task_id)
-        for directory in ("source", "data", "theory", "analysis", "outputs"):
-            (self.root / directory).mkdir()
-        paper = self.root / "source/paper.pdf"
-        dataset = self.root / "data/sample.csv"
+        paper = self.root / "resources/source/paper.pdf"
+        dataset = self.root / "resources/data/sample.csv"
         paper.write_bytes(b"%PDF-test")
         dataset.write_text("x,y\n1,2\n", encoding="utf-8")
 
@@ -786,7 +881,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         items = json.loads(self.hooks("catalog", "list", "--format", "json").stdout)
         paper_item = next(item for item in items if item["kind"] == "literature")
         data_item = next(item for item in items if item["kind"] == "data")
-        self.assertEqual(paper_item["path"], "source/paper.pdf")
+        self.assertEqual(paper_item["path"], "resources/source/paper.pdf")
         self.assertEqual(paper_item["metadata"]["extension"], ".pdf")
 
         theory = json.loads(self.hooks(
@@ -850,12 +945,128 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         )
         dashboard = model.dashboard_snapshot()
         self.assertEqual(len(dashboard["catalog_items"]), 3)
+        self.assertEqual(len(dashboard["resource_directories"]), 7)
+        data_directory = next(
+            item for item in dashboard["resource_directories"] if item["name"] == "data"
+        )
+        self.assertEqual(data_directory["actual_files"], 1)
+        self.assertEqual(data_directory["indexed_files"], 1)
         self.assertTrue(any(item["kind"] == "catalog" for item in dashboard["search_index"]))
 
         database = self.root / ".project_hooks/maintenance.sqlite3"
         database.unlink()
         rebuilt = json.loads(self.hooks("catalog", "list", "--format", "json").stdout)
         self.assertEqual(len(rebuilt), 3)
+
+    def test_catalog_enforces_resource_layout_and_check_requires_index(self) -> None:
+        task_id = "20260801_catalog_layout_001"
+        self.start(task_id)
+        other = self.root / "resources/others/uncategorized.bin"
+        report = self.root / "resources/reports/status.md"
+        other.write_bytes(b"other")
+        report.write_text("# Status\n", encoding="utf-8")
+
+        failed = self.hooks("check", check=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("未索引文件", failed.stderr)
+        scanned = json.loads(self.hooks("catalog", "scan").stdout)
+        self.assertEqual(scanned["scanned_files"], 2)
+        items = json.loads(self.hooks("catalog", "list", "--format", "json").stdout)
+        self.assertEqual({item["kind"] for item in items}, {"other", "report"})
+        self.assertEqual(self.hooks("check", check=False).returncode, 0)
+
+        loose = self.root / "loose.pdf"
+        loose.write_bytes(b"loose")
+        rejected = self.hooks(
+            "catalog", "add", "--kind", "other", "--title", "loose",
+            "--path", "loose.pdf", check=False,
+        )
+        self.assertIn("资料文件必须位于 resources/source", rejected.stderr)
+        mismatch = self.hooks(
+            "catalog", "update",
+            next(item["item_id"] for item in items if item["kind"] == "report"),
+            "--kind", "other", check=False,
+        )
+        self.assertIn("与 --kind other 不一致", mismatch.stderr)
+
+    def test_catalog_migrate_layout_previews_preserves_ids_and_rejects_conflicts(self) -> None:
+        task_id = "20260801_catalog_migrate_001"
+        self.start(task_id)
+        legacy = self.root / "theory/legacy.md"
+        legacy.parent.mkdir()
+        legacy.write_text("# Legacy\n", encoding="utf-8")
+        item_id = "theory-legacy"
+        event = {
+            "event_id": "legacy-catalog-item",
+            "schema_version": 3,
+            "event_type": "catalog.item_upserted",
+            "occurred_at": "2026-08-01 14:00:00（Asia/Shanghai）",
+            "branch": "main",
+            "task_id": task_id,
+            "payload": {
+                "item_id": item_id, "kind": "theory", "title": "Legacy",
+                "summary": "keep", "path": "theory/legacy.md", "status": "active",
+                "tags": ["core"], "source": "legacy", "metadata": {},
+                "created_at": "2026-08-01 14:00:00（Asia/Shanghai）",
+            },
+        }
+        journal = self.root / "maintenance/events.jsonl"
+        append_events(journal, self.root / ".project_hooks", [event])
+        connection = rebuild(self.root / ".project_hooks/maintenance.sqlite3", journal)
+        connection.close()
+
+        preview = json.loads(self.hooks("catalog", "migrate-layout", "--dry-run").stdout)
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["move_count"], 1)
+        self.assertTrue(legacy.is_file())
+        migrated = json.loads(self.hooks("catalog", "migrate-layout").stdout)
+        self.assertEqual(migrated["migrated"], 1)
+        self.assertFalse(legacy.exists())
+        target = self.root / "resources/theory/legacy.md"
+        self.assertTrue(target.is_file())
+        item = json.loads(self.hooks("catalog", "show", item_id, "--format", "json").stdout)["item"]
+        self.assertEqual(item["path"], "resources/theory/legacy.md")
+        self.assertEqual(item["tags"], ["core"])
+
+        conflict_source = self.root / "source/conflict.pdf"
+        conflict_source.parent.mkdir()
+        conflict_source.write_bytes(b"old")
+        conflict_target = self.root / "resources/source/conflict.pdf"
+        conflict_target.write_bytes(b"new")
+        conflict = json.loads(self.hooks("catalog", "migrate-layout", "--dry-run").stdout)
+        self.assertEqual(conflict["conflict_count"], 1)
+        rejected = self.hooks("catalog", "migrate-layout", check=False)
+        self.assertIn("目标冲突", rejected.stderr)
+        self.assertEqual(conflict_source.read_bytes(), b"old")
+        self.assertEqual(conflict_target.read_bytes(), b"new")
+
+    def test_catalog_migrate_layout_rolls_back_files_when_event_persist_fails(self) -> None:
+        self.hooks("install")
+        source = self.root / "data/rollback.csv"
+        source.parent.mkdir()
+        source.write_text("x\n1\n", encoding="utf-8")
+        database_path = self.root / ".project_hooks/maintenance.sqlite3"
+
+        def connection_factory():
+            connection = sqlite3.connect(database_path)
+            connection.row_factory = sqlite3.Row
+            return connection
+
+        runtime = CatalogRuntime(
+            root=self.root,
+            database=connection_factory,
+            emit=lambda kind, **values: {"event_type": kind, **values},
+            persist=lambda _events: (_ for _ in ()).throw(RuntimeError("injected persist failure")),
+            write_context=lambda: ({"task_id": "migration", "git": {"track": "stable"}}, "main"),
+            timestamp=lambda: "2026-08-01 14:00:00（Asia/Shanghai）",
+            has_active_task=lambda: True,
+            auto_start=lambda _name: {},
+            auto_finish=lambda _success, _note, _evidence: {},
+        )
+        with self.assertRaisesRegex(RuntimeError, "injected persist failure"):
+            migrate_layout(SimpleNamespace(dry_run=False), runtime)
+        self.assertTrue(source.is_file())
+        self.assertFalse((self.root / "resources/data/rollback.csv").exists())
 
     def test_catalog_writes_require_active_task_and_v1_events_remain_supported(self) -> None:
         rejected = self.hooks(
@@ -904,8 +1115,8 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             "--tag", "core", "--dry-run",
         ).stdout)
         self.assertTrue(preview["dry_run"])
-        self.assertEqual(preview["target_path"], "source/paper.pdf")
-        self.assertFalse((self.root / "source/paper.pdf").exists())
+        self.assertEqual(preview["target_path"], "resources/source/paper.pdf")
+        self.assertFalse((self.root / "resources/source/paper.pdf").exists())
         self.assertFalse(json.loads(self.hooks("status").stdout)["active"])
 
         ingested = json.loads(self.hooks(
@@ -914,12 +1125,12 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         ).stdout)
         self.assertTrue(ingested["copied"])
         self.assertEqual(ingested["item"]["kind"], "literature")
-        self.assertTrue((self.root / "source/paper.pdf").is_file())
+        self.assertTrue((self.root / "resources/source/paper.pdf").is_file())
         self.assertTrue(outside.is_file())
         self.assertFalse(json.loads(self.hooks("status").stdout)["active"])
 
         updated = json.loads(self.hooks(
-            "catalog", "ingest", "source/paper.pdf",
+            "catalog", "ingest", "resources/source/paper.pdf",
             "--summary", "updated summary", "--tag", "reviewed",
         ).stdout)
         self.assertEqual(updated["action"], "update")
@@ -939,7 +1150,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             "catalog", "ingest", str(other), "--kind", "literature",
             "--name", "paper-2.pdf",
         ).stdout)
-        self.assertEqual(renamed["target_path"], "source/paper-2.pdf")
+        self.assertEqual(renamed["target_path"], "resources/source/paper-2.pdf")
 
         failing = Path(self.temp.name) / "invalid.pdf"
         failing.write_bytes(b"invalid")
@@ -948,7 +1159,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             "--title", " ", check=False,
         )
         self.assertNotEqual(failed.returncode, 0)
-        self.assertFalse((self.root / "source/invalid.pdf").exists())
+        self.assertFalse((self.root / "resources/source/invalid.pdf").exists())
         self.assertFalse(json.loads(self.hooks("status").stdout)["active"])
 
         wrong_location = self.root / "loose.pdf"
@@ -958,18 +1169,18 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             "--dry-run", check=False,
         )
         self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn("必须先移动", rejected.stderr)
+        self.assertIn("必须位于七个标准 resources 目录之一", rejected.stderr)
 
     def test_catalog_ingest_reuses_active_task_and_bulk_update_is_safe(self) -> None:
         task_id = "20260726_catalogbulk_001"
         self.start(task_id)
         (self.root / "data").mkdir()
-        first = self.root / "data/first.csv"
-        second = self.root / "data/second.csv"
+        first = self.root / "resources/data/first.csv"
+        second = self.root / "resources/data/second.csv"
         first.write_text("x\n1\n", encoding="utf-8")
         second.write_text("x\n2\n", encoding="utf-8")
-        one = json.loads(self.hooks("catalog", "ingest", "data/first.csv", "--tag", "batch").stdout)
-        two = json.loads(self.hooks("catalog", "ingest", "data/second.csv", "--tag", "batch").stdout)
+        one = json.loads(self.hooks("catalog", "ingest", "resources/data/first.csv", "--tag", "batch").stdout)
+        two = json.loads(self.hooks("catalog", "ingest", "resources/data/second.csv", "--tag", "batch").stdout)
         self.assertIsNone(one["task"])
         self.assertIsNone(two["task"])
         self.assertTrue(json.loads(self.hooks("status").stdout)["active"])
@@ -1242,6 +1453,11 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertIn("Panedwindow", table_source)
         self.assertIn('orient="horizontal"', table_source)
         self.assertIn("split_detail=True", inspect.getsource(CatalogPage))
+        catalog_source = inspect.getsource(CatalogPage)
+        self.assertIn("资源目录", catalog_source)
+        self.assertIn("open_resource_directory", catalog_source)
+        self.assertNotIn("复制 Codex 扫描提示词", catalog_source)
+        self.assertNotIn("text=\"标签\"", catalog_source)
         self.assertIn("split_detail=True", inspect.getsource(RecordsPage))
         self.assertIn("split_detail=True", inspect.getsource(DashboardApp))
         self.assertNotIn("split_detail=True", inspect.getsource(AdvancedWindow))
@@ -1251,12 +1467,15 @@ class DashboardPresentationTests(unittest.TestCase):
             [template["label"] for template in RESEARCH_PROMPT_TEMPLATES.values()],
             [
                 "文献精读", "文献比较", "研究问题与思路", "研究方法设计",
-                "研究过程复盘", "结论与局限", "下一步研究计划",
+                "研究过程复盘", "结论与局限", "下一步研究计划", "对外项目总结",
             ],
         )
         self.assertEqual(
             [template["category"] for template in RESEARCH_PROMPT_TEMPLATES.values()],
-            ["文献研究", "文献研究", "研究设计", "研究设计", "研究复盘", "研究复盘", "研究规划"],
+            [
+                "文献研究", "文献研究", "研究设计", "研究设计", "研究复盘",
+                "研究复盘", "研究规划", "对外沟通",
+            ],
         )
         for template_id, template in RESEARCH_PROMPT_TEMPLATES.items():
             prompt = build_research_prompt(template_id)
@@ -1289,7 +1508,7 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(
             WORKBENCH_PROMPT_CATEGORIES,
             (
-                "全部", "文献研究", "研究设计", "研究复盘", "研究规划",
+                "全部", "文献研究", "研究设计", "研究复盘", "研究规划", "对外沟通",
                 "软件升级", "软件诊断", "版本发布",
             ),
         )
@@ -1315,6 +1534,12 @@ class DashboardPresentationTests(unittest.TestCase):
             ["验证正式版本安装"],
         )
         self.assertEqual(research_prompt_records("不存在的筛选词"), [])
+        report = build_research_prompt("external_project_report")
+        self.assertIn("受众、报告周期、语言、语气和保密边界", report)
+        self.assertIn("resources/reports/YYYYMMDD_<topic>_v01.md", report)
+        self.assertIn("Markdown/LaTeX", report)
+        self.assertIn("登记为 report", report)
+        self.assertIn("不得自动提交、推送、发布或对外发送", report)
 
     def test_software_workbench_templates_cover_install_update_release_and_diagnostics(self) -> None:
         self.assertEqual(
@@ -1525,7 +1750,7 @@ class DashboardPresentationTests(unittest.TestCase):
     def test_catalog_detail_shows_metadata_relations_and_missing_warning(self) -> None:
         detail = CatalogPage.detail_text({
             "item_id": "lit-1", "kind_label": "文献", "status": "missing",
-            "title": "Paper", "path": "source/paper.pdf", "source": "doi:10/example",
+            "title": "Paper", "path": "resources/source/paper.pdf", "source": "doi:10/example",
             "tags": ["core"], "summary": "summary", "metadata": {"year": "2026"},
             "updated_at": "2026-07-26 10:00:00", "_relations": [{
                 "relation_type": "supports", "target_id": "theory-1",
@@ -1534,7 +1759,7 @@ class DashboardPresentationTests(unittest.TestCase):
         })
         self.assertIn("文件当前不存在", detail)
         self.assertIn("supports → Theory", detail)
-        self.assertIn('"year": "2026"', detail)
+        self.assertNotIn('"year": "2026"', detail)
 
     def test_catalog_overview_and_cross_platform_file_reveal(self) -> None:
         items = [
@@ -1556,11 +1781,11 @@ class DashboardPresentationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            target = root / "source/paper.pdf"
-            target.parent.mkdir()
+            target = root / "resources/source/paper.pdf"
+            target.parent.mkdir(parents=True)
             target.write_bytes(b"pdf")
             commands = []
-            item = {"path": "source/paper.pdf"}
+            item = {"path": "resources/source/paper.pdf"}
             reveal_catalog_file(root, item, system="Windows", runner=commands.append)
             reveal_catalog_file(root, item, system="Darwin", runner=commands.append)
             reveal_catalog_file(root, item, system="Linux", runner=commands.append)
@@ -1572,25 +1797,15 @@ class DashboardPresentationTests(unittest.TestCase):
             target.unlink()
             with self.assertRaisesRegex(DashboardError, "文件不存在"):
                 reveal_catalog_file(root, item, runner=commands.append)
-
-    def test_catalog_scan_prompt_copies_without_codex_detection(self) -> None:
-        class Clipboard:
-            def __init__(self):
-                self.value = ""
-
-            def clipboard_clear(self):
-                self.value = ""
-
-            def clipboard_append(self, value):
-                self.value += value
-
-        clipboard = Clipboard()
-        message = copy_catalog_scan_prompt(clipboard)
-        self.assertEqual(clipboard.value, CODEX_CATALOG_SCAN_PROMPT)
-        self.assertIn("catalog scan --dry-run", clipboard.value)
-        self.assertIn("不要提交或推送", clipboard.value)
-        self.assertNotIn("CODEX_THREAD_ID", clipboard.value)
-        self.assertIn("粘贴到当前 Codex 对话框", message)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            open_resource_directory(root, "resources/source", system="Windows", runner=commands.append)
+            open_resource_directory(root, "resources/source", system="Darwin", runner=commands.append)
+            open_resource_directory(root, "resources/source", system="Linux", runner=commands.append)
+            self.assertEqual(commands[3], ["explorer.exe", str(target.parent.resolve())])
+            self.assertEqual(commands[4], ["open", str(target.parent.resolve())])
+            self.assertEqual(commands[5], ["xdg-open", str(target.parent.resolve())])
+            with self.assertRaisesRegex(DashboardError, "超出项目范围"):
+                open_resource_directory(root, "../outside", runner=commands.append)
 
     def test_advanced_summary_contains_technical_status(self) -> None:
         text = advanced_summary({

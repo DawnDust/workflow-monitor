@@ -21,6 +21,7 @@ from .catalog import (
     CatalogRuntime,
     catalog_command,
     configure_catalog_parser,
+    decode_item,
 )
 from .dashboard import DashboardDataProvider, DashboardError, launch_dashboard
 from .read_model import (
@@ -52,6 +53,7 @@ from .project_manager import (
     installation_record,
     write_json,
 )
+from .resource_layout import catalog_consistency_errors, ensure_resource_directories
 from .updater import UpdateError, run_update, version_report
 
 
@@ -198,7 +200,10 @@ def command_is_read_only(args: argparse.Namespace) -> bool:
         return True
     if args.command == "db" and args.db_command in {"status", "verify"}:
         return True
-    if args.command == "catalog" and args.catalog_command in {"list", "show", "context"}:
+    if args.command == "catalog" and (
+        args.catalog_command in {"list", "show", "context"}
+        or (args.catalog_command == "migrate-layout" and args.dry_run)
+    ):
         return True
     return False
 
@@ -370,11 +375,13 @@ def markdown_link_errors() -> list[str]:
     return errors
 
 
-def check_repository(*, raise_on_error: bool = False) -> list[str]:
+def check_repository(
+    *, raise_on_error: bool = False, include_catalog_consistency: bool = True,
+) -> list[str]:
     cfg = config()
     errors: list[str] = []
-    if cfg.get("version") != 2:
-        errors.append("项目维护配置必须为 version=2")
+    if cfg.get("version") != 3:
+        errors.append("项目维护配置必须为 version=3")
     if cfg.get("core_read_order") != STATIC_READ_ORDER:
         errors.append("core_read_order 与 SQLite 工作流不一致")
     store = cfg.get("maintenance_store")
@@ -395,14 +402,23 @@ def check_repository(*, raise_on_error: bool = False) -> list[str]:
         if (ROOT / rel).exists():
             errors.append(f"旧动态维护文件仍存在: {rel}")
     errors.extend(markdown_link_errors())
+    connection = None
     try:
         connection = database()
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
-        connection.close()
+        catalog_items = [
+            decode_item(dict(row))
+            for row in connection.execute("SELECT * FROM catalog_items").fetchall()
+        ]
         if integrity != "ok":
             errors.append(f"SQLite integrity_check: {integrity}")
+        if include_catalog_consistency:
+            errors.extend(catalog_consistency_errors(ROOT, catalog_items))
     except (WorkflowError, sqlite3.DatabaseError) as exc:
         errors.append(f"维护数据库检查失败: {exc}")
+    finally:
+        if connection is not None:
+            connection.close()
     if errors and raise_on_error:
         raise WorkflowError("项目维护检查失败:\n- " + "\n- ".join(errors))
     return errors
@@ -650,7 +666,6 @@ def stage_command(args: argparse.Namespace) -> dict | list[dict] | str:
 
 
 def start_task(args: argparse.Namespace) -> dict:
-    check_repository(raise_on_error=True)
     if active_row() is not None:
         raise WorkflowError("已有活动任务，请先执行 status/end")
     if not TASK_ID_RE.fullmatch(args.task_id):
@@ -658,6 +673,15 @@ def start_task(args: argparse.Namespace) -> dict:
     original_branch = current_branch()
     classification = classify_branch(original_branch)
     requested_track, requested_topic = args.track, args.topic
+    # A stable repair task must be able to start while legacy or unindexed resources exist;
+    # the normal check and task end still require the inconsistency to be repaired.
+    repairing_on_main = (
+        classification["kind"] == "stable" and (requested_track or "stable") == "stable"
+    )
+    check_repository(
+        raise_on_error=True,
+        include_catalog_consistency=not repairing_on_main,
+    )
     created_branch = False
     base_head = run_git(["rev-parse", "HEAD"]).stdout.strip()
     if classification["kind"] == "stable":
@@ -820,6 +844,7 @@ def pre_commit_check() -> None:
 
 
 def install_git_hook(force: bool = False) -> str:
+    ensure_resource_directories(ROOT)
     connection = database()
     connection.close()
     if not is_git_repo():

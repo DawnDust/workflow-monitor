@@ -13,29 +13,30 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .resource_layout import (
+    LEGACY_BY_PATH,
+    RESOURCE_BY_KIND,
+    RESOURCE_DIRECTORIES,
+    RESOURCE_KINDS,
+    RESOURCE_KIND_LABELS,
+    files_under,
+    is_indexable_resource_file,
+    legacy_resource_for_path,
+    resource_for_path,
+)
 
-CATALOG_KINDS = ("literature", "data", "theory", "simulation", "output")
-CATALOG_KIND_LABELS = {
-    "literature": "文献",
-    "data": "数据",
-    "theory": "理论",
-    "simulation": "模拟",
-    "output": "输出",
-}
+CATALOG_KINDS = RESOURCE_KINDS
+CATALOG_KIND_LABELS = RESOURCE_KIND_LABELS
 CATALOG_KIND_PREFIXES = {
     "literature": "lit",
     "data": "data",
     "theory": "theory",
     "simulation": "sim",
     "output": "out",
+    "other": "other",
+    "report": "report",
 }
-CATALOG_DIRECTORIES = {
-    "source": "literature",
-    "data": "data",
-    "theory": "theory",
-    "analysis": "simulation",
-    "outputs": "output",
-}
+CATALOG_DIRECTORIES = {item.relative_path: item.kind for item in RESOURCE_DIRECTORIES}
 CATALOG_STATUSES = ("active", "missing", "archived")
 RELATION_TYPES = (
     "supports",
@@ -79,6 +80,26 @@ def normalize_project_path(root: Path, value: str, *, require_file: bool = False
     if require_file and not absolute.is_file():
         raise CatalogError(f"资料文件不存在: {relative.as_posix()}")
     return relative.as_posix()
+
+
+def validate_resource_path(relative: str, kind: str) -> str:
+    resource = resource_for_path(relative)
+    if resource is None:
+        legacy = legacy_resource_for_path(relative)
+        if legacy is not None:
+            raise CatalogError(
+                f"旧版资料路径不再接受登记: {relative}；"
+                "请运行 catalog migrate-layout --dry-run"
+            )
+        raise CatalogError(
+            "资料文件必须位于 resources/source、resources/data、resources/theory、"
+            "resources/analysis、resources/outputs、resources/others 或 resources/reports"
+        )
+    if resource.kind != kind:
+        raise CatalogError(
+            f"文件所在目录对应 {resource.kind}，与 --kind {kind} 不一致"
+        )
+    return relative
 
 
 def validate_identifier(value: str, *, label: str = "条目 ID") -> str:
@@ -280,6 +301,8 @@ def render_catalog_list(items: list[dict]) -> str:
 def add_item(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     record, branch = runtime.write_context()
     item_path = normalize_project_path(runtime.root, args.path, require_file=True) if args.path else None
+    if item_path:
+        validate_resource_path(item_path, args.kind)
     item_id = validate_identifier(args.id) if args.id else generated_item_id(args.kind, item_path)
     connection = runtime.database()
     try:
@@ -337,6 +360,8 @@ def update_item(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         raise CatalogError("catalog update 至少提供一个更新字段")
     if args.kind is not None:
         item["kind"] = args.kind
+    if item.get("path"):
+        validate_resource_path(item["path"], item["kind"])
     if args.title is not None:
         if not args.title.strip():
             raise CatalogError("标题不能为空")
@@ -441,7 +466,14 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         scan_root = runtime.root / relative
         if not scan_root.is_dir():
             raise CatalogError(f"扫描目录不存在: {relative}")
-        roots.append((scan_root, args.kind))
+        resource = resource_for_path(relative)
+        if resource is None:
+            raise CatalogError("扫描目录必须位于标准 resources 目录内")
+        if resource.kind != args.kind:
+            raise CatalogError(
+                f"扫描目录对应 {resource.kind}，与 --kind {args.kind} 不一致"
+            )
+        roots.append((scan_root, resource.kind))
     else:
         roots.extend((runtime.root / directory, kind) for directory, kind in CATALOG_DIRECTORIES.items())
     connection = runtime.database()
@@ -455,7 +487,6 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         }
     finally:
         connection.close()
-    ignored = {".git", ".project_hooks", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
     discovered: dict[str, tuple[Path, str]] = {}
     scanned_prefixes: list[str] = []
     for scan_root, kind in roots:
@@ -463,7 +494,11 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
             continue
         scanned_prefixes.append(scan_root.relative_to(runtime.root).as_posix().rstrip("/") + "/")
         for path in scan_root.rglob("*"):
-            if path.is_file() and not any(part in ignored for part in path.relative_to(scan_root).parts):
+            if path.is_file() and is_indexable_resource_file(path, base=scan_root):
+                try:
+                    path.resolve().relative_to(runtime.root.resolve())
+                except ValueError:
+                    continue
                 relative = path.relative_to(runtime.root).as_posix()
                 discovered[relative] = (path, kind)
     actions: list[dict] = []
@@ -556,8 +591,7 @@ def read_catalog(args: argparse.Namespace, runtime: CatalogRuntime) -> str | dic
 
 
 def _directory_for_kind(root: Path, kind: str) -> Path:
-    directory = next(name for name, value in CATALOG_DIRECTORIES.items() if value == kind)
-    return root / directory
+    return root / RESOURCE_BY_KIND[kind].relative_path
 
 
 def _validate_target_name(value: str) -> str:
@@ -578,12 +612,12 @@ def ingest_plan(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     except ValueError:
         relative = None
     if relative is not None:
-        directory = relative.parts[0] if relative.parts else ""
-        inferred = CATALOG_DIRECTORIES.get(directory)
-        if inferred is None:
-            raise CatalogError("项目内文件必须先移动到 source/data/theory/analysis/outputs 之一")
-        if args.kind and args.kind != inferred:
-            raise CatalogError(f"文件所在目录对应 {inferred}，与 --kind {args.kind} 不一致")
+        resource = resource_for_path(relative)
+        if resource is None:
+            raise CatalogError("项目内文件必须位于七个标准 resources 目录之一")
+        inferred = resource.kind
+        if args.kind and args.kind != resource.kind:
+            raise CatalogError(f"文件所在目录对应 {resource.kind}，与 --kind {args.kind} 不一致")
         if args.name and args.name != source.name:
             raise CatalogError("项目内文件不能通过 ingest 改名；请先在文件系统中改名")
         kind, target, copied = inferred, source, False
@@ -700,6 +734,142 @@ def ingest_item(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
                 f"资料已登记，但自动任务收尾失败: {exc}；请运行 status 并手工结束活动任务"
             ) from exc
     return {"dry_run": False, **preview, "item": payload, "task": task}
+
+
+def migrate_layout(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
+    root = runtime.root.resolve()
+    connection = runtime.database()
+    try:
+        existing = {
+            item["path"].casefold(): item
+            for item in (
+                decode_item(dict(row))
+                for row in connection.execute("SELECT * FROM catalog_items").fetchall()
+            )
+            if item.get("path")
+        }
+    finally:
+        connection.close()
+
+    moves: list[dict] = []
+    conflicts: list[dict] = []
+    planned_targets: set[str] = set()
+    for legacy_name, resource in LEGACY_BY_PATH.items():
+        for source in files_under(root, legacy_name):
+            relative_tail = source.relative_to(root / legacy_name)
+            target = root / resource.relative_path / relative_tail
+            source_path = source.relative_to(root).as_posix()
+            target_path = target.relative_to(root).as_posix()
+            folded_target = target_path.casefold()
+            conflict = target.exists() or folded_target in planned_targets
+            entry = {
+                "source": source_path,
+                "target": target_path,
+                "kind": resource.kind,
+                "item_id": existing.get(source_path.casefold(), {}).get("item_id"),
+            }
+            if conflict:
+                conflicts.append(entry)
+            else:
+                moves.append(entry)
+                planned_targets.add(folded_target)
+
+    preview = {
+        "dry_run": bool(args.dry_run),
+        "moves": moves,
+        "conflicts": conflicts,
+        "move_count": len(moves),
+        "conflict_count": len(conflicts),
+    }
+    if args.dry_run:
+        return preview
+    if conflicts:
+        raise CatalogError(
+            "旧布局迁移存在目标冲突，未移动任何文件: "
+            + ", ".join(item["target"] for item in conflicts)
+        )
+    record, branch = runtime.write_context()
+    if branch != "main" or record.get("git", {}).get("track") != "stable":
+        raise CatalogError("旧布局迁移只能在 main 的 stable 活动任务中执行")
+    if not moves:
+        return {**preview, "dry_run": False, "migrated": 0, "indexed": 0}
+
+    moved: list[tuple[Path, Path]] = []
+    payloads: list[dict] = []
+    try:
+        for move in moves:
+            source = root / move["source"]
+            target = root / move["target"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+            moved.append((source, target))
+            current = existing.get(move["source"].casefold())
+            metadata = dict(current.get("metadata", {})) if current else {}
+            metadata.update(file_metadata(target))
+            item = current or {
+                "item_id": generated_item_id(move["kind"], move["target"]),
+                "title": target.stem,
+                "summary": "",
+                "tags": [],
+                "source": "",
+                "created_at": runtime.timestamp(),
+            }
+            item.update({
+                "kind": move["kind"],
+                "path": move["target"],
+                "status": "active",
+                "metadata": metadata,
+            })
+            move["item_id"] = item["item_id"]
+            payloads.append(catalog_item_payload(item))
+        runtime.persist([
+            runtime.emit(
+                "catalog.item_upserted",
+                branch=branch,
+                task_id=record["task_id"],
+                payload=payload,
+            )
+            for payload in payloads
+        ])
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        for source, target in reversed(moved):
+            try:
+                source.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists() and not source.exists():
+                    shutil.move(str(target), str(source))
+            except OSError as rollback_exc:
+                rollback_errors.append(f"{target} -> {source}: {rollback_exc}")
+        if rollback_errors:
+            raise CatalogError(
+                f"迁移失败且文件回滚不完整: {exc}; " + "; ".join(rollback_errors)
+            ) from exc
+        raise
+
+    for legacy_name in LEGACY_BY_PATH:
+        directory = root / legacy_name
+        if not directory.is_dir():
+            continue
+        for candidate in sorted(
+            (path for path in directory.rglob("*") if path.is_dir()),
+            key=lambda path: len(path.parts),
+            reverse=True,
+        ):
+            try:
+                candidate.rmdir()
+            except OSError:
+                pass
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    return {
+        **preview,
+        "dry_run": False,
+        "moves": moves,
+        "migrated": len(moved),
+        "indexed": len(payloads),
+    }
 
 
 def bulk_update(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
@@ -832,6 +1002,8 @@ def configure_catalog_parser(subparsers) -> None:
     scan_parser.add_argument("--root")
     scan_parser.add_argument("--kind", choices=CATALOG_KINDS)
     scan_parser.add_argument("--dry-run", action="store_true")
+    migrate_parser = catalog_sub.add_parser("migrate-layout")
+    migrate_parser.add_argument("--dry-run", action="store_true")
     list_parser = catalog_sub.add_parser("list")
     add_catalog_filters(list_parser)
     show_parser = catalog_sub.add_parser("show")
@@ -881,6 +1053,8 @@ def catalog_command(args: argparse.Namespace, runtime: CatalogRuntime) -> str | 
         return unlink_items(args, runtime)
     if args.catalog_command == "scan":
         return scan_items(args, runtime)
+    if args.catalog_command == "migrate-layout":
+        return migrate_layout(args, runtime)
     if args.catalog_command == "ingest":
         return ingest_item(args, runtime)
     if args.catalog_command == "bulk-update":

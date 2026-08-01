@@ -30,24 +30,6 @@ CLI_FALLBACK = (
     "  .\\project-hooks.exe db status"
 )
 
-CODEX_CATALOG_SCAN_PROMPT = """请立即在当前项目执行科研资料扫描和索引登记，不要只提供方案。
-
-执行范围和约束：
-0. 以下所有 `project-hooks` 命令均使用项目根目录的 `.\\project-hooks.exe` 执行。
-1. 先运行 `project-hooks context --format markdown`，并按 core_read_order 阅读项目规范。
-2. 只扫描项目内的五个标准目录：source/、data/、theory/、analysis/、outputs/。
-3. 先运行 `project-hooks catalog scan --dry-run`；存在变化时再运行实际的 `catalog scan`。
-4. 扫描应新增尚未登记的文件、更新已登记文件的大小和修改时间，并将消失文件标记为 missing。
-5. 如果已有活动维护任务，复用它并且绝不替用户结束；如果没有活动任务，仅在确有变化时创建一个
-   YYYYMMDD_catalog_scan_NNN stable 小任务，完成扫描、状态更新、校验和 end。
-6. 完成后运行 `project-hooks db verify`。不要修改代码，不要直接编辑 SQLite 或既有事件，
-   不要读取 Zotero 的随机存储目录，不要提交或推送，不要操作项目外文件。
-7. 如果当前处于 Plan Mode 或规则禁止执行，请明确说明原因，不要绕过限制。
-
-完成后请简短报告新增、更新、缺失和未变化的资料数量。
-"""
-
-
 class DashboardError(RuntimeError):
     pass
 
@@ -142,6 +124,25 @@ RESEARCH_PROMPT_TEMPLATES = {
             "每项任务的目标、所需输入、方法、预期输出、完成标准、风险与依赖",
             "最小可执行第一步",
             "建议保存的项目记录",
+        ),
+    },
+    "external_project_report": {
+        "category": "对外沟通",
+        "label": "对外项目总结",
+        "task": "基于当前项目的结构化上下文和已索引证据，形成适合指定外部受众的项目总结。",
+        "sections": (
+            "报告受众、周期、语言、语气与保密边界",
+            "项目背景、目标与当前阶段",
+            "已完成工作、关键结果与可回查证据",
+            "明确区分的事实、合理推断与待验证事项",
+            "局限、风险和下一步",
+            "报告文件路径、资料索引 ID 与未执行的发布动作",
+        ),
+        "extra_rules": (
+            "写入前必须先确认受众、报告周期、语言、语气和保密边界；未确认时只提问，不生成文件。"
+            "确认后将报告写为 `resources/reports/YYYYMMDD_<topic>_v01.md`，公式使用可预览的 "
+            "Markdown/LaTeX 语法，并引用资料 ID 或项目相对路径。写入后通过 catalog 登记为 report，"
+            "运行 check 与 db verify；不得自动提交、推送、发布或对外发送。"
         ),
     },
 }
@@ -320,12 +321,6 @@ def copy_research_prompt(clipboard, prompt: str) -> str:
     clipboard.clipboard_clear()
     clipboard.clipboard_append(prompt)
     return "工作台提示词已复制，请粘贴到当前 Codex 对话框并发送。"
-
-
-def copy_catalog_scan_prompt(clipboard) -> str:
-    clipboard.clipboard_clear()
-    clipboard.clipboard_append(CODEX_CATALOG_SCAN_PROMPT)
-    return "扫描提示词已复制，请粘贴到当前 Codex 对话框并发送。"
 
 
 PRIMARY_TABS = ("概览", "搜索", "资料", "工作台", "任务", "阶段", "记录")
@@ -518,6 +513,36 @@ def reveal_catalog_file(
     except OSError as exc:
         raise DashboardError(f"无法打开文件所在位置：{exc}") from exc
     return f"已打开文件所在位置：{relative}"
+
+
+def open_resource_directory(
+    project_root: Path,
+    relative: str,
+    *,
+    system: str | None = None,
+    runner: Callable[[list[str]], object] | None = None,
+) -> str:
+    root = project_root.resolve()
+    target = (root / relative).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise DashboardError("资源目录超出项目范围，已拒绝打开。") from exc
+    if not target.is_dir():
+        raise DashboardError(f"资源目录不存在：{relative}")
+    system = system or platform.system()
+    runner = runner or (lambda command: subprocess.Popen(command))
+    if system == "Windows":
+        command = ["explorer.exe", str(target)]
+    elif system == "Darwin":
+        command = ["open", str(target)]
+    else:
+        command = ["xdg-open", str(target)]
+    try:
+        runner(command)
+    except OSError as exc:
+        raise DashboardError(f"无法打开资源目录：{exc}") from exc
+    return f"已打开资源目录：{relative}"
 
 
 class DashboardDataProvider:
@@ -735,7 +760,23 @@ class CatalogPage:
         self.notify = notify
         self.items: list[dict] = []
         self.relations: list[dict] = []
-        self.prompt_window = None
+        self.directories: list[dict] = []
+        self.directory_buttons: dict[str, object] = {}
+
+        directory_frame = ttk.LabelFrame(self.frame, text="资源目录", padding=6)
+        directory_frame.pack(fill="x", pady=(0, 8))
+        for index, name in enumerate((
+            "source", "data", "theory", "analysis", "outputs", "others", "reports",
+        )):
+            button = ttk.Button(
+                directory_frame,
+                text=name,
+                command=lambda selected=name: self.open_directory(selected),
+            )
+            button.grid(row=index // 4, column=index % 4, sticky="ew", padx=3, pady=3)
+            self.directory_buttons[name] = button
+        for column in range(4):
+            directory_frame.columnconfigure(column, weight=1)
 
         filters = ttk.Frame(self.frame)
         filters.pack(fill="x", pady=(0, 6))
@@ -751,16 +792,8 @@ class CatalogPage:
             values=("全部", "active", "missing", "archived"), state="readonly", width=10,
         )
         status_box.pack(side="left", padx=(5, 10))
-        ttk.Label(filters, text="标签").pack(side="left")
-        self.tags = tk.StringVar()
-        ttk.Entry(filters, textvariable=self.tags, width=22).pack(side="left", padx=(5, 10))
         ttk.Button(filters, text="打开所在位置", command=self.open_location).pack(side="left")
-        ttk.Button(filters, text="复制路径", command=self.copy_path).pack(side="left")
         ttk.Button(filters, text="复制 AI 上下文", command=self.copy_context).pack(side="left", padx=(6, 0))
-        self.prompt_button = ttk.Button(
-            filters, text="复制 Codex 扫描提示词", command=self.show_codex_scan_prompt,
-        )
-        self.prompt_button.pack(side="left", padx=(6, 0))
 
         self.table = TablePage(
             self.frame, tk, ttk, scrolledtext,
@@ -773,11 +806,27 @@ class CatalogPage:
         self.table.frame.pack(fill="both", expand=True)
         self.kind.trace_add("write", lambda *_: self.apply_filters())
         self.status.trace_add("write", lambda *_: self.apply_filters())
-        self.tags.trace_add("write", lambda *_: self.apply_filters())
 
-    def set_data(self, items: list[dict], relations: list[dict]) -> None:
+    def set_data(
+        self, items: list[dict], relations: list[dict], directories: list[dict] | None = None,
+    ) -> None:
         self.items = [dict(item) for item in items]
         self.relations = [dict(relation) for relation in relations]
+        self.directories = [dict(item) for item in directories or []]
+        by_name = {item["name"]: item for item in self.directories}
+        for name, button in self.directory_buttons.items():
+            directory = by_name.get(name)
+            if directory is None:
+                button.configure(text=name, state="disabled")
+                continue
+            marker = "" if directory["status"] == "ok" else " ⚠"
+            button.configure(
+                text=(
+                    f"{directory['label']}  {directory['indexed_files']}/"
+                    f"{directory['actual_files']}{marker}"
+                ),
+                state="normal" if directory["exists"] else "disabled",
+            )
         by_id = {item["item_id"]: item for item in self.items}
         for item in self.items:
             item["_relations"] = []
@@ -800,15 +849,10 @@ class CatalogPage:
             None,
         )
         selected_status = None if self.status.get() == "全部" else self.status.get()
-        required_tags = {
-            tag.strip() for raw in self.tags.get().split(",") for tag in [raw] if tag.strip()
-        }
-
         def predicate(item: dict) -> bool:
             return (
                 (selected_kind is None or item.get("kind") == selected_kind)
                 and (selected_status is None or item.get("status") == selected_status)
-                and required_tags.issubset(set(item.get("tags", [])))
             )
 
         self.table.set_predicate(predicate)
@@ -816,18 +860,20 @@ class CatalogPage:
     def select_record(self, item_id: str) -> bool:
         self.kind.set("全部")
         self.status.set("全部")
-        self.tags.set("")
         return self.table.select_record("item_id", item_id)
 
     def selected_item(self) -> dict | None:
         return self.table.selected_record()
 
-    def copy_path(self) -> None:
-        item = self.selected_item()
-        if not item or not item.get("path"):
+    def open_directory(self, name: str) -> None:
+        directory = next((item for item in self.directories if item.get("name") == name), None)
+        if directory is None:
+            self.notify(f"找不到资源目录：{name}")
             return
-        self.frame.clipboard_clear()
-        self.frame.clipboard_append(item["path"])
+        try:
+            self.notify(open_resource_directory(self.project_root, directory["path"]))
+        except DashboardError as exc:
+            self.notify(str(exc))
 
     def open_location(self) -> None:
         item = self.selected_item()
@@ -846,40 +892,8 @@ class CatalogPage:
         self.frame.clipboard_clear()
         self.frame.clipboard_append(render_context_markdown([item], item.get("_relations", [])))
 
-    def show_codex_scan_prompt(self) -> None:
-        message = copy_catalog_scan_prompt(self.frame)
-        self.notify(message)
-        if self.prompt_window is not None and self.prompt_window.winfo_exists():
-            self.prompt_window.deiconify()
-            self.prompt_window.lift()
-            return
-        window = self.tk.Toplevel(self.frame.winfo_toplevel())
-        window.title("Codex 扫描提示词")
-        window.geometry("720x500")
-        window.transient(self.frame.winfo_toplevel())
-        self.ttk.Label(
-            window,
-            text="提示词已复制。请切换到 Codex 对话框，粘贴并发送。",
-            padding=(10, 10, 10, 4),
-        ).pack(fill="x")
-        preview = self.scrolledtext.ScrolledText(window, wrap="word")
-        preview.pack(fill="both", expand=True, padx=10, pady=(0, 8))
-        preview.insert("1.0", CODEX_CATALOG_SCAN_PROMPT)
-        preview.configure(state="disabled")
-        actions = self.ttk.Frame(window, padding=(10, 0, 10, 10))
-        actions.pack(fill="x")
-        self.ttk.Button(actions, text="关闭", command=window.destroy).pack(side="right")
-        self.ttk.Button(
-            actions,
-            text="再次复制",
-            command=lambda: self.notify(copy_catalog_scan_prompt(self.frame)),
-        ).pack(side="right", padx=(0, 6))
-        self.prompt_window = window
-
     @staticmethod
     def detail_text(item: dict) -> str:
-        tags = ", ".join(item.get("tags", [])) or "无"
-        metadata = json.dumps(item.get("metadata", {}), ensure_ascii=False, indent=2)
         relation_lines = []
         for relation in item.get("_relations", []):
             if relation["_direction"] == "out":
@@ -898,10 +912,10 @@ class CatalogPage:
         return (
             f"ID：{item.get('item_id')}\n类型：{item.get('kind_label')}\n"
             f"状态：{item.get('status')}\n路径：{item.get('path') or '无项目文件'}\n"
-            f"来源：{item.get('source') or '未记录'}\n标签：{tags}\n"
+            f"来源：{item.get('source') or '未记录'}\n"
             f"更新时间：{item.get('updated_at')}\n{missing}\n"
             f"摘要\n{item.get('summary') or '暂无摘要。'}\n\n"
-            f"扩展信息\n{metadata}\n\n关联\n"
+            f"关联\n"
             + ("\n".join(relation_lines) if relation_lines else "无")
         )
 
@@ -1612,6 +1626,7 @@ class DashboardApp:
         self.catalog_page.set_data(
             snapshot.get("catalog_items", []),
             snapshot.get("catalog_relations", []),
+            snapshot.get("resource_directories", []),
         )
         self.task_page.set_tasks(snapshot.get("task_details", {}))
         exploration_records = list(snapshot["explorations"])

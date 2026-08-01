@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from .catalog import decode_item
+from .resource_layout import resource_directory_snapshot
 from .store import SCHEMA_VERSION, ensure_database, journal_hash, rows
 
 
@@ -831,6 +832,9 @@ class MaintenanceReadModel:
                 "task_details": task_details,
                 "catalog_items": catalog_items,
                 "catalog_relations": catalog_relations,
+                "resource_directories": resource_directory_snapshot(
+                    self.database_path.parent.parent, catalog_items
+                ),
             }
         finally:
             connection.close()

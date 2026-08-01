@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "enabled": true,
   "timezone": "Asia/Shanghai",
   "state_dir": ".project_hooks",

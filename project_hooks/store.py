@@ -247,6 +247,30 @@ PROJECTION_TABLES = (
     "attempts", "attempt_evidence", "explorations", "catalog_relations", "catalog_items",
 )
 
+REQUIRED_SCHEMA_COLUMNS = {
+    "meta": {"key", "value"},
+    "events": {"event_id", "schema_version", "event_type", "payload_json"},
+    "project_profile": {"branch", "description", "big_goal", "event_id"},
+    "stages": {
+        "stage_id", "sequence", "title", "goal", "acceptance_json", "status",
+        "summary", "current_step", "next_step", "blocker", "evidence_json",
+    },
+    "attempts": {
+        "attempt_id", "branch", "stage_id", "current_step", "progress", "next_step", "state",
+    },
+    "active_tasks": {"task_id", "branch", "record_json", "state_updated", "decisions_added"},
+}
+
+
+def schema_layout_is_current(connection: sqlite3.Connection) -> bool:
+    for table, required in REQUIRED_SCHEMA_COLUMNS.items():
+        columns = {
+            row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if not required.issubset(columns):
+            return False
+    return True
+
 
 def validate_projection(events: Iterable[dict]) -> None:
     connection = sqlite3.connect(":memory:")
@@ -480,12 +504,7 @@ def rebuild(database: Path, journal: Path, *, preserve_active: bool = True) -> s
         try:
             probe = sqlite3.connect(database, timeout=2)
             version = probe.execute("PRAGMA user_version").fetchone()[0]
-            attempt_columns = {
-                row[1] for row in probe.execute("PRAGMA table_info(attempts)").fetchall()
-            }
-            recreate = version != SCHEMA_VERSION or not {
-                "stage_id", "current_step", "progress", "next_step"
-            }.issubset(attempt_columns)
+            recreate = version != SCHEMA_VERSION or not schema_layout_is_current(probe)
             table = probe.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='active_tasks'"
             ).fetchone()
@@ -530,17 +549,19 @@ def rebuild(database: Path, journal: Path, *, preserve_active: bool = True) -> s
 
 def ensure_database(database: Path, journal: Path) -> sqlite3.Connection:
     previous_version = None
+    layout_current = False
     if database.exists():
         probe = None
         try:
             probe = sqlite3.connect(database, timeout=2)
             previous_version = probe.execute("PRAGMA user_version").fetchone()[0]
+            layout_current = schema_layout_is_current(probe)
         except sqlite3.DatabaseError:
             previous_version = None
         finally:
             if probe is not None:
                 probe.close()
-    if previous_version not in (None, 0, SCHEMA_VERSION):
+    if database.exists() and (previous_version != SCHEMA_VERSION or not layout_current):
         return rebuild(database, journal)
     connection = None
     try:
@@ -557,9 +578,37 @@ def ensure_database(database: Path, journal: Path) -> sqlite3.Connection:
 
 
 def record_events(database: Path, journal: Path, state_dir: Path, events: Iterable[dict]) -> None:
+    existed = journal.exists()
+    original = journal.read_bytes() if existed else b""
     append_events(journal, state_dir, events)
-    connection = rebuild(database, journal)
-    connection.close()
+    try:
+        connection = rebuild(database, journal)
+        connection.close()
+    except Exception as exc:
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix="events-rollback-", suffix=".jsonl", dir=journal.parent
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(original)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if existed:
+                os.replace(temp_name, journal)
+            else:
+                os.unlink(temp_name)
+                journal.unlink(missing_ok=True)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+        try:
+            rollback = rebuild(database, journal)
+            rollback.close()
+        except Exception as rollback_exc:
+            raise StoreError(
+                f"事件写入失败且数据库回滚失败: {exc}; rollback: {rollback_exc}"
+            ) from exc
+        raise
 
 
 def rows(connection: sqlite3.Connection, query: str, parameters: tuple = ()) -> list[dict]:
