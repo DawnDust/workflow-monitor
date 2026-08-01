@@ -6,7 +6,6 @@ import json
 import platform
 import subprocess
 import threading
-from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -281,7 +280,7 @@ RESEARCH_PROMPT_COMMON_RULES = """请遵守以下规则：
 4. 论述时尽量引用资料 ID、标题或项目相对路径，使结论可以回查。
 5. 先完成分析，再单独列出建议保存的资料条目、资料关系、项目决策或探索记录。
 6. 未经我在对话中明确确认，不得修改项目文件、数据库、事件或 Git 状态。
-7. 如果我确认记录，再先运行 `project-hooks context --format markdown` 并按 core_read_order 阅读规范；复用已有活动任务且不替我结束，或按规范创建 stable 任务。只通过现有 catalog、decision、attempt 和 state 命令记录，完成后更新项目概览；仅结束由你创建的任务。
+7. 如果我确认记录，再先运行 `project-hooks context --format markdown` 并按 core_read_order 阅读规范；复用已有活动任务且不替我结束，或按规范创建 stable 任务。只通过现有 project、stage、catalog、decision、attempt 和 state 命令记录；项目资料与阶段只在 main 的 stable 任务中更新，探索当前步骤、进展和下一步使用 attempt update；完成后更新项目概览，仅结束由你创建的任务。
 """
 
 SOFTWARE_PROMPT_COMMON_RULES = """请遵守以下规则：
@@ -329,7 +328,7 @@ def copy_catalog_scan_prompt(clipboard) -> str:
     return "扫描提示词已复制，请粘贴到当前 Codex 对话框并发送。"
 
 
-PRIMARY_TABS = ("概览", "搜索", "资料", "工作台", "任务", "时间线", "记录")
+PRIMARY_TABS = ("概览", "搜索", "资料", "工作台", "任务", "阶段", "记录")
 
 RESULT_LABELS = {
     "completed": "完成",
@@ -420,11 +419,10 @@ def normalize_records(decisions: list[dict], explorations: list[dict]) -> list[d
 
 def advanced_summary(snapshot: dict) -> str:
     health = snapshot.get("health", {})
-    timeline_error = snapshot.get("timeline_error") or "无"
     return (
         f"数据库：{health.get('status', '未知')}　Schema：{health.get('schema_version', '未知')}　"
         f"事件：{health.get('events', 0)}　本次重建：{'是' if health.get('rebuilt') else '否'}\n"
-        f"事件日志哈希：{health.get('journal_hash') or '未知'}\n时间线警告：{timeline_error}"
+        f"事件日志哈希：{health.get('journal_hash') or '未知'}"
     )
 
 
@@ -448,10 +446,6 @@ def dashboard_presets(snapshot: dict) -> dict[str, list[str]]:
         "negative": [
             item.get("event_id") for item in snapshot.get("explorations", [])
             if item.get("result") == "negative" and item.get("event_id")
-        ],
-        "unmerged": [
-            item["name"] for item in snapshot.get("timeline", {}).get("branches", [])
-            if item.get("unmerged")
         ],
     }
 
@@ -526,95 +520,6 @@ def reveal_catalog_file(
     return f"已打开文件所在位置：{relative}"
 
 
-def timeline_layout(
-    timeline: dict,
-    branch: str = "全部分支",
-    query: str = "",
-    *,
-    expanded: bool = False,
-    limit: int = 50,
-    branch_subset: set[str] | None = None,
-) -> dict:
-    """Return deterministic coordinates and visibility for the timeline canvas."""
-    commits = list(timeline.get("commits", []))
-    all_lanes = list(timeline.get("lanes", []))
-    if branch_subset is not None:
-        commits = [
-            commit for commit in commits
-            if commit.get("lane") in branch_subset or branch_subset.intersection(commit.get("event_branches", []))
-        ]
-        used = set(branch_subset)
-        used.update(commit.get("lane") for commit in commits)
-        lanes = [lane for lane in all_lanes if lane in used]
-    elif branch != "全部分支":
-        commits = [
-            commit for commit in commits
-            if commit.get("lane") == branch or branch in commit.get("event_branches", [])
-        ]
-        used = {branch}
-        used.update(commit.get("lane") for commit in commits)
-        lanes = [lane for lane in all_lanes if lane in used]
-    else:
-        lanes = all_lanes
-
-    total_count = len(commits)
-    folded_count = 0 if expanded or total_count <= limit else total_count - limit
-    hidden_hashes = {commit["hash"] for commit in commits[:folded_count]}
-    if folded_count:
-        commits = commits[folded_count:]
-    for commit in commits:
-        if commit.get("lane") not in lanes:
-            lanes.append(commit.get("lane") or "其他")
-        for event_branch in commit.get("event_branches", []):
-            if branch == "全部分支" and event_branch not in lanes:
-                lanes.append(event_branch)
-
-    lane_y = {lane: 48 + index * 72 for index, lane in enumerate(lanes)}
-    needle = query.strip().casefold()
-    nodes: list[dict] = []
-    coordinates: dict[str, tuple[int, int]] = {}
-    start_x = 170 if folded_count else 70
-    for index, commit in enumerate(commits):
-        x = start_x + index * 132
-        y = lane_y[commit.get("lane") or "其他"]
-        searchable = json.dumps(commit, ensure_ascii=False, default=str).casefold()
-        node = {**commit, "x": x, "y": y, "match": not needle or needle in searchable}
-        nodes.append(node)
-        coordinates[commit["hash"]] = (x, y)
-
-    visible = set(coordinates)
-    edges = [
-        {**edge, "start": coordinates[edge["parent"]], "end": coordinates[edge["child"]]}
-        for edge in timeline.get("edges", [])
-        if edge["parent"] in visible and edge["child"] in visible
-    ]
-    truncated = [
-        {**edge, "end": coordinates[edge["child"]]}
-        for edge in timeline.get("edges", [])
-        if edge["parent"] in hidden_hashes and edge["child"] in visible
-    ]
-    associations = []
-    for node in nodes:
-        for event_branch in node.get("event_branches", []):
-            if event_branch != node.get("lane") and event_branch in lane_y:
-                associations.append({
-                    "commit": node["hash"], "branch": event_branch,
-                    "start": (node["x"], node["y"]), "end": (node["x"], lane_y[event_branch]),
-                })
-    return {
-        "lanes": lanes,
-        "lane_y": lane_y,
-        "nodes": nodes,
-        "edges": edges,
-        "truncated": truncated,
-        "associations": associations,
-        "total_count": total_count,
-        "folded_count": folded_count,
-        "width": max(900, start_x + 70 + len(nodes) * 132),
-        "height": max(160, 92 + len(lanes) * 72),
-    }
-
-
 class DashboardDataProvider:
     def __init__(self, model: MaintenanceReadModel, classifier: Callable[[str], dict], branch: str | None = None):
         self.model = model
@@ -660,16 +565,6 @@ class DashboardController:
     def refresh(self) -> tuple[dict | None, str | None]:
         try:
             snapshot = self.provider.load()
-            if snapshot.get("timeline_error") and self.snapshot and self.snapshot.get("timeline", {}).get("status") == "passed":
-                snapshot["timeline"] = deepcopy(self.snapshot["timeline"])
-                snapshot["timeline"]["stale"] = True
-                old_commits = [item for item in self.snapshot.get("search_index", []) if item.get("kind") == "commit"]
-                current = [item for item in snapshot.get("search_index", []) if item.get("kind") != "commit"]
-                snapshot["search_index"] = sorted(
-                    [*current, *deepcopy(old_commits)],
-                    key=lambda item: (item.get("occurred_at", ""), item.get("record_id", "")),
-                    reverse=True,
-                )
             self.snapshot = snapshot
             return self.snapshot, None
         except Exception as exc:
@@ -1294,26 +1189,13 @@ class TaskPage:
         if isinstance(acceptance, list):
             acceptance = "\n".join(f"- {item}" for item in acceptance) or "未记录"
         evidence = "\n".join(f"- {item}" for item in task.get("evidence", [])) or "无"
-        linked_commits = "\n".join(f"- {item}" for item in task.get("linked_commits", [])) or "无"
-        publication_commits = "\n".join(f"- {item}" for item in task.get("publication_commits", [])) or "无"
-        auxiliary_lines = []
-        for item in task.get("auxiliary_tasks", []):
-            auxiliary_lines.append(
-                f"- {item['finished_at'] or item['started_at']}｜{item['goal']}｜"
-                f"{result_label(item['result'])}｜{item['task_id']}"
-            )
-            if item.get("conclusion"):
-                auxiliary_lines.append(f"  {item['conclusion']}")
-        auxiliary_tasks = "\n".join(auxiliary_lines) or "无"
         self._set_summary(
             f"任务：{task['task_id']}\n分支：{task.get('branch') or '未知'}\n"
             f"开始：{task.get('started_at') or '未知'}\n结束：{task.get('finished_at') or '进行中'}\n"
             f"结果：{result_label(task.get('result'))}　状态：{task.get('status') or '未知'}　"
             f"路线：{task.get('route') or '未记录'}\n\n"
             f"目标\n{task.get('goal') or '未记录'}\n\n验收条件\n{acceptance}\n\n"
-            f"结论\n{task.get('conclusion') or '未记录'}\n\n证据\n{evidence}\n\n"
-            f"关联提交\n{linked_commits}\n\n已发布提交\n{publication_commits}\n\n"
-            f"发布记录\n{auxiliary_tasks}"
+            f"结论\n{task.get('conclusion') or '未记录'}\n\n证据\n{evidence}"
         )
         self.set_related(task.get("related", []))
 
@@ -1447,254 +1329,121 @@ class AdvancedWindow:
         self.on_close()
 
 
-class TimelinePage:
-    ALL_BRANCHES = "全部分支"
-    FOLD_LIMIT = 50
-
-    def __init__(self, parent, tk, ttk, scrolledtext, *, refresh: Callable[[], None],
-                 open_task: Callable[[str], None]):
+class StagePage:
+    def __init__(self, parent, tk, ttk, scrolledtext, *, open_task: Callable[[str], None]):
         self.tk, self.ttk = tk, ttk
         self.frame = ttk.Frame(parent, padding=8)
-        self.refresh_callback = refresh
-        self.timeline: dict = {"lanes": [], "commits": [], "edges": []}
-        self.selected_hash: str | None = None
-        self.node_by_hash: dict[str, dict] = {}
-        self.first_render = True
-        self.expanded = False
-        self.branch_subset: set[str] | None = None
-        self.error_message: str | None = None
         self.open_task_callback = open_task
+        self.stages: dict[str, dict] = {}
+        self.attempts: dict[str, dict] = {}
 
-        controls = ttk.Frame(self.frame)
-        controls.pack(fill="x", pady=(0, 6))
-        ttk.Label(controls, text="分支").pack(side="left")
-        self.branch = tk.StringVar(value=self.ALL_BRANCHES)
-        self.branch_box = ttk.Combobox(controls, textvariable=self.branch, state="readonly", width=24)
-        self.branch_box.pack(side="left", padx=(6, 12))
-        self.branch_box.bind("<<ComboboxSelected>>", self.branch_changed)
-        ttk.Label(controls, text="本页高亮").pack(side="left")
-        self.query = tk.StringVar()
-        entry = ttk.Entry(controls, textvariable=self.query, width=30)
-        entry.pack(side="left", padx=(6, 8))
-        self.query.trace_add("write", lambda *_: self.render())
-        ttk.Button(controls, text="复制选中", command=self.copy_selected).pack(side="left")
-        self.fold_button = ttk.Button(controls, text="无需折叠", command=self.toggle_expanded, state="disabled")
-        self.fold_button.pack(side="left", padx=(6, 0))
+        current_frame = ttk.LabelFrame(self.frame, text="当前阶段", padding=6)
+        current_frame.pack(fill="x", pady=(0, 8))
+        self.current = scrolledtext.ScrolledText(current_frame, height=9, wrap="word")
+        self.current.pack(fill="x")
+        self.current.configure(state="disabled")
 
-        task_controls = ttk.Frame(self.frame)
-        task_controls.pack(fill="x", pady=(0, 6))
-        ttk.Label(task_controls, text="关联任务").pack(side="left")
-        self.task_id = tk.StringVar()
-        self.task_box = ttk.Combobox(task_controls, textvariable=self.task_id, state="readonly", width=38)
-        self.task_box.pack(side="left", padx=(6, 8))
-        ttk.Button(task_controls, text="打开关联任务", command=self.open_selected_task).pack(side="left")
+        attempts_frame = ttk.LabelFrame(self.frame, text="当前探索", padding=6)
+        attempts_frame.pack(fill="both", expand=True, pady=(0, 8))
+        attempt_columns = ("branch", "track", "goal", "current_step", "next_step", "state", "updated_at")
+        self.attempt_tree = ttk.Treeview(attempts_frame, columns=attempt_columns, show="headings", height=6)
+        for key, label, width in (
+            ("branch", "分支", 160), ("track", "类型", 80), ("goal", "目标", 220),
+            ("current_step", "当前步骤", 180), ("next_step", "下一步", 180),
+            ("state", "状态", 80), ("updated_at", "更新时间", 160),
+        ):
+            self.attempt_tree.heading(key, text=label)
+            self.attempt_tree.column(key, width=width, minwidth=60)
+        attempt_scroll = ttk.Scrollbar(attempts_frame, orient="vertical", command=self.attempt_tree.yview)
+        self.attempt_tree.configure(yscrollcommand=attempt_scroll.set)
+        self.attempt_tree.pack(side="left", fill="both", expand=True)
+        attempt_scroll.pack(side="right", fill="y")
+        self.attempt_tree.bind("<Double-1>", self.open_selected_attempt)
 
-        ttk.Label(
-            self.frame,
-            text="● 关联任务的提交　○ 普通提交　实线 Git 父子关系　虚线 跨分支事件关联",
-        ).pack(anchor="w", pady=(0, 5))
+        history_frame = ttk.LabelFrame(self.frame, text="阶段历史", padding=6)
+        history_frame.pack(fill="both", expand=True)
+        history_body = ttk.Frame(history_frame)
+        history_body.pack(fill="both", expand=True)
+        stage_columns = ("sequence", "title", "status", "started_at", "finished_at")
+        self.stage_tree = ttk.Treeview(history_body, columns=stage_columns, show="headings", height=7)
+        for key, label, width in (
+            ("sequence", "序号", 55), ("title", "阶段", 240), ("status", "状态", 85),
+            ("started_at", "开始", 165), ("finished_at", "结束", 165),
+        ):
+            self.stage_tree.heading(key, text=label)
+            self.stage_tree.column(key, width=width, minwidth=50)
+        self.stage_tree.pack(side="left", fill="both", expand=True)
+        self.stage_tree.bind("<<TreeviewSelect>>", self.show_selected_stage)
+        self.stage_detail = scrolledtext.ScrolledText(history_body, width=52, wrap="word")
+        self.stage_detail.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        self.stage_detail.configure(state="disabled")
 
-        graph_frame = ttk.Frame(self.frame)
-        graph_frame.pack(fill="both", expand=True)
-        self.labels = tk.Canvas(graph_frame, width=180, background="#f8fafc", highlightthickness=0)
-        self.canvas = tk.Canvas(graph_frame, background="#ffffff", highlightthickness=1, highlightbackground="#d1d5db")
-        vertical = ttk.Scrollbar(graph_frame, orient="vertical", command=self.scroll_y)
-        horizontal = ttk.Scrollbar(graph_frame, orient="horizontal", command=self.canvas.xview)
-        self.canvas.configure(xscrollcommand=horizontal.set, yscrollcommand=vertical.set)
-        self.labels.configure(yscrollcommand=vertical.set)
-        self.labels.grid(row=0, column=0, sticky="ns")
-        self.canvas.grid(row=0, column=1, sticky="nsew")
-        vertical.grid(row=0, column=2, sticky="ns")
-        horizontal.grid(row=1, column=1, sticky="ew")
-        graph_frame.columnconfigure(1, weight=1)
-        graph_frame.rowconfigure(0, weight=1)
-
-        ttk.Label(self.frame, text="提交详情").pack(anchor="w", pady=(8, 3))
-        self.detail = scrolledtext.ScrolledText(self.frame, height=9, wrap="word")
-        self.detail.pack(fill="x")
-        self.detail.configure(state="disabled")
-        self.message = ttk.Label(self.frame, text="", foreground="#92400e")
-        self.message.pack(fill="x", pady=(4, 0))
-
-    def scroll_y(self, *arguments) -> None:
-        self.labels.yview(*arguments)
-        self.canvas.yview(*arguments)
-
-    def set_data(self, timeline: dict, *, error: str | None = None) -> None:
-        self.timeline = timeline
-        self.error_message = error
-        lanes = list(timeline.get("lanes", []))
-        values = [self.ALL_BRANCHES, *lanes]
-        self.branch_box.configure(values=values)
-        if self.branch.get() not in values:
-            self.branch.set(self.ALL_BRANCHES)
-        self.render()
-
-    def branch_changed(self, _event=None) -> None:
-        self.branch_subset = None
-        self.render()
-
-    def set_branch_subset(self, branches: set[str] | None) -> None:
-        self.branch_subset = None if branches is None else set(branches)
-        if branches is not None:
-            self.branch.set(self.ALL_BRANCHES)
-        self.render()
-
-    def toggle_expanded(self) -> None:
-        self.expanded = not self.expanded
-        self.render()
-
-    def render(self) -> None:
-        old_xview = self.canvas.xview()
-        layout = timeline_layout(
-            self.timeline, self.branch.get(), self.query.get(), expanded=self.expanded,
-            limit=self.FOLD_LIMIT, branch_subset=self.branch_subset,
+    @staticmethod
+    def stage_text(stage: dict | None, attempts: list[dict] | None = None) -> str:
+        if not stage:
+            return "当前没有 active 阶段。\n请在 main 的 stable 活动任务中运行 stage start。"
+        acceptance = "\n".join(f"- {item}" for item in stage.get("acceptance", [])) or "- 未设置"
+        evidence = "\n".join(f"- {item}" for item in stage.get("evidence", [])) or "- 无"
+        related = [item for item in (attempts or []) if item.get("stage_id") == stage.get("stage_id")]
+        branches = "\n".join(
+            f"- {item['branch']}｜{item['state']}｜{item.get('current_step') or '未记录当前步骤'}"
+            for item in related
+        ) or "- 无"
+        return (
+            f"{stage.get('sequence')}. {stage.get('title')}（{stage.get('status')}）\n"
+            f"目标：{stage.get('goal')}\n进展：{stage.get('summary') or '未设置'}\n"
+            f"当前步骤：{stage.get('current_step') or '未设置'}\n"
+            f"下一步：{stage.get('next_step') or '未设置'}\n"
+            f"阻塞：{stage.get('blocker') or '无。'}\n\n验收条件\n{acceptance}\n\n"
+            f"证据\n{evidence}\n\n关联探索\n{branches}"
         )
-        self.canvas.delete("all")
-        self.labels.delete("all")
-        self.node_by_hash = {node["hash"]: node for node in layout["nodes"]}
-        self.canvas.configure(scrollregion=(0, 0, layout["width"], layout["height"]))
-        self.labels.configure(scrollregion=(0, 0, 180, layout["height"]))
 
-        for lane in layout["lanes"]:
-            y = layout["lane_y"][lane]
-            self.canvas.create_line(0, y, layout["width"], y, fill="#e5e7eb", width=1)
-            font = ("TkDefaultFont", 9, "bold") if lane == self.timeline.get("default_branch") else ("TkDefaultFont", 9)
-            self.labels.create_text(10, y, anchor="w", text=short(lane, 25), fill="#111827", font=font)
+    def set_data(self, context: dict) -> None:
+        stages = context.get("stages") or []
+        attempts = context.get("attempts") or context.get("active_attempts") or []
+        self.stages = {item["stage_id"]: item for item in stages}
+        self.attempts = {item["attempt_id"]: item for item in attempts}
+        self.current.configure(state="normal")
+        self.current.delete("1.0", "end")
+        self.current.insert("1.0", self.stage_text(context.get("current_stage"), attempts))
+        self.current.configure(state="disabled")
 
-        if layout["folded_count"]:
-            self.canvas.create_rectangle(
-                8, 8, 125, layout["height"] - 8,
-                fill="#f1f5f9", outline="#94a3b8", dash=(4, 3),
-            )
-            self.canvas.create_text(
-                66, layout["height"] / 2,
-                text=f"早期 {layout['folded_count']} 次提交\n已折叠\n{len(layout['truncated'])} 条关系截断",
-                width=105, justify="center", fill="#475569",
-            )
-            for edge in layout["truncated"]:
-                x2, y2 = edge["end"]
-                self.canvas.create_line(125, y2, x2, y2, fill="#94a3b8", dash=(5, 4), width=2)
+        for item in self.attempt_tree.get_children():
+            self.attempt_tree.delete(item)
+        for attempt in context.get("active_attempts") or []:
+            self.attempt_tree.insert("", "end", iid=attempt["attempt_id"], values=(
+                attempt["branch"], attempt["track"], short(attempt.get("goal"), 50),
+                short(attempt.get("current_step") or "未设置", 40),
+                short(attempt.get("next_step") or "未设置", 40), attempt["state"], attempt["updated_at"],
+            ))
 
-        for edge in layout["edges"]:
-            x1, y1 = edge["start"]
-            x2, y2 = edge["end"]
-            midpoint = (x1 + x2) / 2
-            self.canvas.create_line(x1, y1, midpoint, y1, midpoint, y2, x2, y2, fill="#64748b", width=2)
-        for association in layout["associations"]:
-            x1, y1 = association["start"]
-            x2, y2 = association["end"]
-            self.canvas.create_line(x1, y1, x2, y2, fill="#2563eb", dash=(4, 3), width=1)
-            self.canvas.create_rectangle(x2 - 4, y2 - 4, x2 + 4, y2 + 4, outline="#2563eb", fill="#ffffff")
+        selected = self.stage_tree.selection()
+        selected_id = selected[0] if selected else None
+        for item in self.stage_tree.get_children():
+            self.stage_tree.delete(item)
+        for stage in stages:
+            self.stage_tree.insert("", "end", iid=stage["stage_id"], values=(
+                stage["sequence"], stage["title"], stage["status"],
+                stage["started_at"], stage.get("finished_at") or "—",
+            ))
+        if selected_id in self.stages:
+            self.stage_tree.selection_set(selected_id)
+        elif stages:
+            self.stage_tree.selection_set(stages[0]["stage_id"])
+        self.show_selected_stage()
 
-        if self.selected_hash not in self.node_by_hash:
-            self.selected_hash = layout["nodes"][-1]["hash"] if layout["nodes"] else None
-        for node in layout["nodes"]:
-            x, y = node["x"], node["y"]
-            linked = bool(node.get("task_ids"))
-            matched = node["match"]
-            fill = "#2563eb" if linked and matched else ("#ffffff" if matched else "#e5e7eb")
-            outline = "#b45309" if node["hash"] == self.selected_hash else ("#1e3a8a" if matched else "#9ca3af")
-            width = 3 if node["hash"] == self.selected_hash else 2
-            tag = f"commit-{node['hash']}"
-            if len(node.get("parents", [])) > 1:
-                item = self.canvas.create_rectangle(x - 8, y - 8, x + 8, y + 8, fill=fill, outline=outline, width=width, tags=(tag,))
-            else:
-                item = self.canvas.create_oval(x - 8, y - 8, x + 8, y + 8, fill=fill, outline=outline, width=width, tags=(tag,))
-            self.canvas.tag_bind(item, "<Button-1>", lambda _event, commit_hash=node["hash"]: self.select(commit_hash))
-            label = f"{node['short_hash']}\n{short(node['subject'], 18)}"
-            text_item = self.canvas.create_text(x, y - 28, text=label, width=118, justify="center", fill="#111827" if matched else "#9ca3af", tags=(tag,))
-            self.canvas.tag_bind(text_item, "<Button-1>", lambda _event, commit_hash=node["hash"]: self.select(commit_hash))
-            if node.get("task_ids"):
-                self.canvas.create_text(x, y + 19, text=f"{len(node['task_ids'])} 个任务", fill="#1e3a8a", font=("TkDefaultFont", 8))
+    def show_selected_stage(self, _event=None) -> None:
+        selected = self.stage_tree.selection()
+        stage = self.stages.get(selected[0]) if selected else None
+        self.stage_detail.configure(state="normal")
+        self.stage_detail.delete("1.0", "end")
+        self.stage_detail.insert("1.0", self.stage_text(stage, list(self.attempts.values())))
+        self.stage_detail.configure(state="disabled")
 
-        self.show_detail()
-        if layout["total_count"] > self.FOLD_LIMIT:
-            self.fold_button.configure(
-                state="normal",
-                text=(f"恢复折叠（保留 {self.FOLD_LIMIT} 条）" if self.expanded else f"展开全部（折叠 {layout['folded_count']} 条）"),
-            )
-        else:
-            self.fold_button.configure(state="disabled", text="无需折叠")
-        messages = []
-        if self.error_message:
-            messages.append(f"时间线刷新失败，继续显示上一次数据：{self.error_message}")
-        if self.branch_subset is not None:
-            messages.append(
-                f"未合并分支：{len(self.branch_subset)} 条" if self.branch_subset
-                else "没有未合并的探索分支。"
-            )
-        if layout["folded_count"]:
-            messages.append(f"已折叠早期 {layout['folded_count']} 次提交。")
-        self.message.configure(text="｜".join(messages))
-        if self.first_render and layout["nodes"]:
-            self.canvas.xview_moveto(1.0)
-            self.first_render = False
-        elif old_xview:
-            self.canvas.xview_moveto(old_xview[0])
-
-    def select(self, commit_hash: str) -> None:
-        self.selected_hash = commit_hash
-        self.render()
-
-    def reveal_commit(self, commit_hash: str) -> bool:
-        if not any(item.get("hash") == commit_hash for item in self.timeline.get("commits", [])):
-            return False
-        self.expanded = True
-        self.branch_subset = None
-        self.branch.set(self.ALL_BRANCHES)
-        self.query.set("")
-        self.selected_hash = commit_hash
-        self.render()
-        record = self.node_by_hash.get(commit_hash)
-        if record:
-            width = max(1, int(self.canvas.cget("scrollregion").split()[2]))
-            viewport = max(1, self.canvas.winfo_width())
-            self.canvas.xview_moveto(max(0.0, min(1.0, (record["x"] - viewport / 2) / width)))
-        return True
-
-    def selected_record(self) -> dict | None:
-        return self.node_by_hash.get(self.selected_hash or "")
-
-    def show_detail(self) -> None:
-        record = self.selected_record()
-        task_ids = linked_task_ids(record)
-        self.task_box.configure(values=task_ids)
-        if self.task_id.get() not in task_ids:
-            self.task_id.set(task_ids[0] if task_ids else "")
-        if record is None:
-            text = "没有可显示的提交。"
-        else:
-            tasks = "\n".join(f"- {item}" for item in record.get("task_ids", [])) or "无"
-            event_lines = []
-            for item in record.get("events", []):
-                payload = item.get("payload", {})
-                summary = next((payload.get(key) for key in ("summary", "scope", "goal", "decision", "state") if payload.get(key)), "")
-                task = f"｜{item['task_id']}" if item.get("task_id") else ""
-                suffix = f"｜{short(summary, 80)}" if summary else ""
-                event_lines.append(f"- {item['event_type']}｜{item.get('branch')}{task}{suffix}")
-            events = "\n".join(event_lines) or "无"
-            text = (
-                f"提交：{record['hash']}\n时间：{record['occurred_at']}\n作者：{record['author']}\n"
-                f"泳道：{record['lane']}\n引用：{', '.join(record.get('refs', [])) or '无'}\n"
-                f"父提交：{', '.join(record.get('parents', [])) or '无'}\n\n标题\n{record['subject']}\n\n"
-                f"关联任务\n{tasks}\n\n关联事件\n{events}"
-            )
-        self.detail.configure(state="normal")
-        self.detail.delete("1.0", "end")
-        self.detail.insert("1.0", text)
-        self.detail.configure(state="disabled")
-
-    def open_selected_task(self) -> None:
-        if self.task_id.get():
-            self.open_task_callback(self.task_id.get())
-
-    def copy_selected(self) -> None:
-        record = self.selected_record()
-        if not record:
-            return
-        self.frame.clipboard_clear()
-        self.frame.clipboard_append(json.dumps(record, ensure_ascii=False, indent=2, default=str))
+    def open_selected_attempt(self, _event=None) -> None:
+        selected = self.attempt_tree.selection()
+        if selected:
+            self.open_task_callback(selected[0])
 
 
 class DashboardApp:
@@ -1736,7 +1485,7 @@ class DashboardApp:
         ttk.Button(search_toolbar, text="搜索", command=self.perform_global_search).pack(side="left")
         ttk.Label(search_toolbar, text="快捷筛选").pack(side="left", padx=(18, 5))
         self.preset_buttons = {}
-        for name, label in (("recent", "最近任务"), ("negative", "失败探索"), ("unmerged", "未合并分支")):
+        for name, label in (("recent", "最近任务"), ("negative", "失败探索")):
             button = ttk.Button(search_toolbar, text=label, command=lambda selected=name: self.toggle_preset(selected))
             button.pack(side="left", padx=(0, 5))
             self.preset_buttons[name] = button
@@ -1784,10 +1533,10 @@ class DashboardApp:
         )
         self.notebook.add(self.task_page.frame, text="任务")
 
-        self.timeline_page = TimelinePage(
-            self.notebook, tk, ttk, scrolledtext, refresh=self.refresh, open_task=self.open_task,
+        self.stage_page = StagePage(
+            self.notebook, tk, ttk, scrolledtext, open_task=self.open_task,
         )
-        self.notebook.add(self.timeline_page.frame, text="时间线")
+        self.notebook.add(self.stage_page.frame, text="阶段")
 
         self.records_page = RecordsPage(
             self.notebook, tk, ttk, scrolledtext, open_task=self.open_record_task,
@@ -1844,8 +1593,7 @@ class DashboardApp:
             self.snapshot = snapshot
             self.apply_snapshot(snapshot)
             rebuilt = "；本次已重建" if snapshot["health"]["rebuilt"] else ""
-            timeline_warning = f"；时间线警告：{snapshot['timeline_error']}" if snapshot.get("timeline_error") else ""
-            self.status.configure(text=f"刷新成功：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{rebuilt}{timeline_warning}")
+            self.status.configure(text=f"刷新成功：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{rebuilt}")
         else:
             self.status.configure(text=f"刷新失败，继续显示上一次数据：{error}")
 
@@ -1860,10 +1608,7 @@ class DashboardApp:
         self.overview.delete("1.0", "end")
         self.overview.insert("1.0", overview)
         self.overview.configure(state="disabled")
-        self.timeline_page.set_data(
-            snapshot.get("timeline", {"lanes": [], "commits": [], "edges": []}),
-            error=snapshot.get("timeline_error"),
-        )
+        self.stage_page.set_data(snapshot.get("context", {}))
         self.catalog_page.set_data(
             snapshot.get("catalog_items", []),
             snapshot.get("catalog_relations", []),
@@ -1909,7 +1654,6 @@ class DashboardApp:
         self.notebook.tab(self.search_page.frame, text="搜索")
         self.task_page.query.set("")
         self.records_page.table.query.set("")
-        self.timeline_page.query.set("")
         self.apply_active_preset(switch=True)
         self.update_preset_buttons()
 
@@ -1917,7 +1661,6 @@ class DashboardApp:
         self.active_preset = None
         self.task_page.set_predicate(None)
         self.records_page.set_negative_only(None)
-        self.timeline_page.set_branch_subset(None)
         self.update_preset_buttons()
 
     def apply_active_preset(self, *, switch: bool) -> None:
@@ -1925,7 +1668,6 @@ class DashboardApp:
             return
         self.task_page.set_predicate(None)
         self.records_page.set_negative_only(None)
-        self.timeline_page.set_branch_subset(None)
         if self.active_preset == "recent":
             recent_ids = set(dashboard_presets(self.snapshot)["recent"])
             self.task_page.set_predicate(recent_ids)
@@ -1934,10 +1676,6 @@ class DashboardApp:
             negative_ids = set(dashboard_presets(self.snapshot)["negative"])
             self.records_page.set_negative_only(negative_ids)
             target = self.records_page.frame
-        else:
-            names = set(dashboard_presets(self.snapshot)["unmerged"])
-            self.timeline_page.set_branch_subset(names)
-            target = self.timeline_page.frame
         if switch:
             self.notebook.select(target)
 
@@ -1947,7 +1685,7 @@ class DashboardApp:
         snapshot = self.snapshot or {}
         values = dashboard_presets(snapshot)
         counts = {name: len(items) for name, items in values.items()}
-        labels = {"recent": "最近任务", "negative": "失败探索", "unmerged": "未合并分支"}
+        labels = {"recent": "最近任务", "negative": "失败探索"}
         for name, button in self.preset_buttons.items():
             prefix = "✓ " if self.active_preset == name else ""
             button.configure(text=f"{prefix}{labels[name]}（{counts[name]}）")
@@ -1974,9 +1712,6 @@ class DashboardApp:
             return found
         elif target == "events":
             return self.open_advanced(record_id)
-        elif target == "timeline" and record_id and self.timeline_page.reveal_commit(record_id):
-            self.notebook.select(self.timeline_page.frame)
-            return True
         self.status.configure(text=f"找不到关联记录：{target or '未知类型'} / {record_id or '未知 ID'}")
         return False
 
@@ -2021,7 +1756,7 @@ class DashboardApp:
     @staticmethod
     def overview_text(snapshot: dict) -> str:
         base = action_overview_text(snapshot["context"]).rstrip()
-        return base + "\n\n" + catalog_overview_text(snapshot.get("catalog_items", []))
+        return base + "\n\n资料概览\n" + catalog_overview_text(snapshot.get("catalog_items", []))
 
     def copy_overview(self) -> None:
         if not self.snapshot:
@@ -2058,7 +1793,11 @@ class DashboardApp:
         attempt = record.get("_attempt")
         if attempt:
             return (f"分支：{attempt['branch']}\n状态：{attempt['state']}\n类型：{attempt['track']}\n基线：{attempt['base_commit']}\n\n"
-                    f"目标\n{attempt['goal']}\n\n假设\n{attempt.get('hypothesis') or '未填写'}\n\n证据\n"
+                    f"所属阶段：{attempt.get('stage_id') or '未归属阶段'}\n\n目标\n{attempt['goal']}\n\n"
+                    f"当前步骤\n{attempt.get('current_step') or '未填写'}\n\n"
+                    f"进展\n{attempt.get('progress') or '未填写'}\n\n"
+                    f"下一步\n{attempt.get('next_step') or '未填写'}\n\n"
+                    f"假设\n{attempt.get('hypothesis') or '未填写'}\n\n证据\n"
                     + "\n".join(f"- {item}" for item in attempt.get("evidence", []))
                     + f"\n\n结论\n{attempt.get('conclusion') or '未填写'}")
         return (f"分支：{record.get('branch')}\n时间：{record.get('occurred_at')}\n结果：{record.get('result')}\n\n"

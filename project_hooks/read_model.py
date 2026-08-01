@@ -58,15 +58,39 @@ def git_state_inline(state: dict) -> str:
 
 def action_overview_text(context: dict) -> str:
     state = context.get("overview_state") or context.get("state") or {}
+    profile = context.get("project_profile") or {}
+    stage = context.get("current_stage") or {}
     active = context.get("active_task")
     active_text = (
         f"{active.get('task_id')}（{active.get('branch') or context.get('branch') or '未知分支'}）"
         if active else "无"
     )
+    separator = "─" * 32
+    description = compact_text(profile.get("description"))
+    big_goal = compact_text(profile.get("big_goal"))
+    if not profile:
+        description += "（请运行 project update 初始化）"
+        big_goal += "（请运行 project update 初始化）"
     lines = [
-        "项目行动概览",
-        f"状态：{compact_text(state.get('status'))}（目标版本：{compact_text(state.get('main_goal_version'))}）",
+        "项目概览",
+        f"项目描述：{description}",
+        f"大目标：{big_goal}",
+        separator,
+        "",
+        "当前大阶段",
+        f"阶段：{compact_text(stage.get('title'))}",
+        f"阶段目标：{compact_text(stage.get('goal'))}",
+        f"阶段进展：{compact_text(stage.get('summary'))}",
+        f"当前步骤：{compact_text(stage.get('current_step'))}",
+        f"下一步：{compact_text(stage.get('next_step'))}",
+        f"阶段阻塞：{compact_text(stage.get('blocker'), '无。')}",
+        separator,
+        "",
+        "当前执行",
+        f"状态：{compact_text(state.get('status'))}",
         f"活动任务：{active_text}",
+        f"当前判决：{compact_text(state.get('judgment'))}",
+        f"工作断点：{compact_text(state.get('breakpoint'))}",
         f"当前阻塞：{compact_text(state.get('blocker'), '无。')}",
         "下一步：",
     ]
@@ -76,7 +100,6 @@ def action_overview_text(context: dict) -> str:
         lines.append("无。")
     lines.extend([
         f"Git 同步：{git_state_inline(context.get('git_state') or {})}",
-        f"当前目标：{compact_text(state.get('goal'))}",
     ])
     handoffs = context.get("recent_handoffs") or []
     if handoffs:
@@ -89,6 +112,17 @@ def action_overview_text(context: dict) -> str:
         )
     else:
         lines.append("最近完成：无。")
+    lines.extend([separator, "", "探索概览"])
+    attempts = context.get("active_attempts") or []
+    if attempts:
+        for attempt in attempts:
+            lines.append(
+                f"- {attempt.get('branch')}｜{compact_text(attempt.get('current_step'))}｜"
+                f"{compact_text(attempt.get('next_step'))}｜{attempt.get('updated_at') or '未知时间'}"
+            )
+    else:
+        lines.append("- 无 active 探索。")
+    lines.append(separator)
     return "\n".join(lines) + "\n"
 
 
@@ -116,8 +150,6 @@ class MaintenanceReadModel:
         self.journal_path = journal
         self.branch_provider = branch_provider
         self.repo_path = repo or journal.parent.parent
-        self._timeline_signature: str | None = None
-        self._timeline_cache: dict | None = None
 
     def _git(self, *arguments: str) -> str:
         completed = subprocess.run(
@@ -126,26 +158,8 @@ class MaintenanceReadModel:
         )
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout).strip()
-            raise ReadModelError(f"读取 Git 时间线失败: {detail or '未知 Git 错误'}")
+            raise ReadModelError(f"读取 Git 发布状态失败: {detail or '未知 Git 错误'}")
         return completed.stdout
-
-    @staticmethod
-    def _branch_name(ref: str) -> str | None:
-        ref = ref.strip()
-        if not ref or ref.endswith("/HEAD"):
-            return None
-        if ref.startswith("refs/heads/"):
-            return ref.removeprefix("refs/heads/")
-        if ref.startswith("refs/remotes/"):
-            return ref.removeprefix("refs/remotes/")
-        return ref
-
-    def _git_signature(self) -> str:
-        refs = self._git(
-            "for-each-ref", "--format=%(refname)%00%(objectname)", "refs/heads", "refs/remotes",
-        )
-        head = self._git("rev-parse", "--verify", "HEAD").strip()
-        return f"{head}\n{refs}\n{journal_hash(self.journal_path)}"
 
     def git_state(self, default_branch: str = "main") -> dict:
         branch = self.branch_provider()
@@ -206,197 +220,113 @@ class MaintenanceReadModel:
                 result[event_id].append(current)
         return result
 
-    @staticmethod
-    def _lane_priority(name: str, default: str) -> tuple[int, str]:
-        if name == default:
-            return 2, name
-        if name.startswith(("research/", "experiment/", "sandbox/", "archive/")):
-            return 0, name
-        return 1, name
-
-    @staticmethod
-    def _branch_kind(name: str, default: str) -> str:
-        if name == default:
-            return "stable"
-        prefix = name.split("/", 1)[0]
-        return prefix if prefix in {"research", "experiment", "sandbox", "archive"} else "other"
-
-    def _build_timeline(self, connection: sqlite3.Connection) -> dict:
-        signature = self._git_signature()
-        if signature == self._timeline_signature and self._timeline_cache is not None:
-            return self._timeline_cache
-
-        separator = "\x1f"
-        raw = self._git(
-            "log", "--all", "--topo-order", "--reverse", "--date=iso-strict",
-            f"--format=%H{separator}%P{separator}%aI{separator}%an{separator}%s",
-        )
-        commits: list[dict] = []
+    def _publication_projection(self, connection: sqlite3.Connection) -> dict:
+        default = "main"
+        publication_ref = f"origin/{default}"
+        event_commits = self._event_commit_map()
+        event_tasks = {
+            row["event_id"]: row["task_id"]
+            for row in rows(connection, "SELECT event_id, task_id FROM events WHERE task_id IS NOT NULL")
+        }
         by_hash: dict[str, dict] = {}
-        for line in raw.splitlines():
-            parts = line.split(separator, 4)
-            if len(parts) != 5:
-                continue
-            commit_hash, parent_text, occurred_at, author, subject = parts
-            commit = {
-                "hash": commit_hash,
-                "short_hash": commit_hash[:8],
-                "parents": parent_text.split() if parent_text else [],
-                "occurred_at": occurred_at,
-                "author": author,
-                "subject": subject,
-                "refs": [],
-                "lane": "其他",
-                "events": [],
-                "task_ids": [],
-                "event_branches": [],
-            }
-            commits.append(commit)
-            by_hash[commit_hash] = commit
-
-        refs_output = self._git(
-            "for-each-ref", "--format=%(refname)%00%(objectname)", "refs/heads", "refs/remotes",
-        )
-        ref_entries: list[tuple[str, str, bool]] = []
-        for line in refs_output.splitlines():
-            if "\x00" not in line:
-                continue
-            ref, tip = line.split("\x00", 1)
-            branch = self._branch_name(ref)
-            if not branch or tip not in by_hash:
-                continue
-            ref_entries.append((branch, tip, ref.startswith("refs/remotes/")))
-
-        local_tips = {branch: tip for branch, tip, remote in ref_entries if not remote}
-        remote_groups: dict[str, set[str]] = {}
-        for branch, tip, remote in ref_entries:
-            if remote and "/" in branch:
-                remote_groups.setdefault(branch.split("/", 1)[1], set()).add(tip)
-
-        branch_tips: dict[str, str] = {}
-        branch_refs: dict[str, list[str]] = {}
-        for branch, tip, remote in ref_entries:
-            source_ref = branch
-            if remote and "/" in branch:
-                suffix = branch.split("/", 1)[1]
-                if local_tips.get(suffix) == tip or (suffix not in local_tips and len(remote_groups[suffix]) == 1):
-                    branch = suffix
-            branch_tips.setdefault(branch, tip)
-            if source_ref not in branch_refs.setdefault(branch, []):
-                branch_refs[branch].append(source_ref)
-            if branch not in by_hash[tip]["refs"]:
-                by_hash[tip]["refs"].append(branch)
-
-        event_rows = rows(
-            connection,
-            "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events ORDER BY occurred_at, event_id",
-        )
-        event_by_id: dict[str, dict] = {}
-        for event in event_rows:
-            event["payload"] = json.loads(event.pop("payload_json"))
-            event_by_id[event["event_id"]] = event
-        for event_id, hashes in self._event_commit_map().items():
-            event = event_by_id.get(event_id)
-            if event is None:
+        for event_id, hashes in event_commits.items():
+            task_id = event_tasks.get(event_id)
+            if not task_id:
                 continue
             for commit_hash in hashes:
-                commit = by_hash.get(commit_hash)
-                if commit is None:
-                    continue
-                commit["events"].append(event)
-                if event.get("task_id") and event["task_id"] not in commit["task_ids"]:
-                    commit["task_ids"].append(event["task_id"])
-                if event["branch"] not in commit["event_branches"]:
-                    commit["event_branches"].append(event["branch"])
-
-        default = "main" if "main" in branch_tips else (next(iter(branch_tips), "main"))
-        publication_ref = f"origin/{default}"
-        publication_tip = next(
-            (tip for branch, tip, remote in ref_entries if remote and branch == publication_ref),
-            None,
-        )
-
-        def ancestry(start: str) -> set[str]:
-            found: set[str] = set()
-            pending = [start]
-            while pending:
-                item = pending.pop()
-                if item in found or item not in by_hash:
-                    continue
-                found.add(item)
-                pending.extend(by_hash[item]["parents"])
-            return found
-
-        default_ancestry = ancestry(branch_tips[default]) if default in branch_tips else set()
-        publication_ancestry = ancestry(publication_tip) if publication_tip else set()
-        for commit in commits:
-            commit["published"] = commit["hash"] in publication_ancestry if publication_tip else None
-        claimed: set[str] = set()
-        for branch in sorted(branch_tips, key=lambda name: self._lane_priority(name, default)):
-            current = branch_tips[branch]
-            while current in by_hash and current not in claimed:
-                if branch != default and current in default_ancestry:
-                    break
-                by_hash[current]["lane"] = branch
-                claimed.add(current)
-                parents = by_hash[current]["parents"]
-                if not parents:
-                    break
-                current = parents[0]
-        for commit_hash in default_ancestry:
-            if commit_hash in by_hash and commit_hash not in claimed:
-                by_hash[commit_hash]["lane"] = default
-                claimed.add(commit_hash)
-
-        lane_names = {commit["lane"] for commit in commits}
-        lane_names.update(branch_tips)
-        lane_names.update(event["branch"] for event in event_rows)
-        if all(commit["lane"] != "其他" for commit in commits):
-            lane_names.discard("其他")
-        lanes = sorted(lane_names, key=lambda name: self._lane_priority(name, default))
-        if default in lanes:
-            lanes.remove(default)
-            lanes.insert(0, default)
-        edges = [
-            {"parent": parent, "child": commit["hash"]}
-            for commit in commits for parent in commit["parents"] if parent in by_hash
-        ]
-        branches = []
-        for name in lanes:
-            tip = branch_tips.get(name)
-            kind = self._branch_kind(name, default)
-            merged = bool(tip and tip in default_ancestry)
-            branches.append({
-                "name": name,
-                "tip": tip,
-                "refs": branch_refs.get(name, []),
-                "kind": kind,
-                "merged": merged,
-                "unmerged": kind in {"research", "experiment", "sandbox"} and bool(tip) and not merged,
-            })
-        result = {
-            "status": "passed",
-            "default_branch": default,
-            "publication": {
-                "ref": publication_ref,
-                "tip": publication_tip,
-                "available": publication_tip is not None,
-            },
-            "lanes": lanes,
-            "branches": branches,
-            "commits": commits,
-            "edges": edges,
-        }
-        self._timeline_signature = signature
-        self._timeline_cache = result
-        return result
-
-    def timeline(self) -> dict:
-        connection, _ = self._connection()
+                commit = by_hash.setdefault(commit_hash, {
+                    "hash": commit_hash, "task_ids": [], "parents": [], "published": None,
+                })
+                if task_id not in commit["task_ids"]:
+                    commit["task_ids"].append(task_id)
+        available = True
         try:
-            return self._build_timeline(connection)
-        finally:
-            connection.close()
+            published = set(self._git("rev-list", f"refs/remotes/{publication_ref}").splitlines())
+        except ReadModelError:
+            available = False
+            published = set()
+        for commit in by_hash.values():
+            commit["published"] = commit["hash"] in published if available else None
+        return {
+            "publication": {"ref": publication_ref, "available": available},
+            "commits": list(by_hash.values()),
+        }
+
+    def _branch_attempts(self) -> list[dict]:
+        try:
+            output = self._git(
+                "for-each-ref", "--format=%(refname)",
+                "refs/heads/research", "refs/heads/experiment", "refs/heads/sandbox",
+                "refs/heads/archive", "refs/remotes/origin/research",
+                "refs/remotes/origin/experiment", "refs/remotes/origin/sandbox",
+                "refs/remotes/origin/archive",
+            )
+        except ReadModelError:
+            return []
+        refs: dict[str, str] = {}
+        for ref in output.splitlines():
+            if ref.startswith("refs/heads/"):
+                branch = ref.removeprefix("refs/heads/")
+                refs[branch] = ref
+            elif ref.startswith("refs/remotes/origin/"):
+                branch = ref.removeprefix("refs/remotes/origin/")
+                refs.setdefault(branch, ref)
+        attempts: dict[str, dict] = {}
+        journal_relative = self.journal_path.relative_to(self.repo_path).as_posix()
+        for ref in refs.values():
+            try:
+                text = self._git("show", f"{ref}:{journal_relative}")
+            except ReadModelError:
+                continue
+            events = []
+            for raw in text.splitlines():
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    events.append(event)
+            events.sort(key=lambda item: (item.get("occurred_at", ""), item.get("event_id", "")))
+            for event in events:
+                payload = event.get("payload") or {}
+                kind = event.get("event_type")
+                if kind == "attempt.started":
+                    attempt_id = payload.get("attempt_id")
+                    if not attempt_id:
+                        continue
+                    attempts[attempt_id] = {
+                        "attempt_id": attempt_id, "branch": event.get("branch"),
+                        "track": payload.get("track"), "topic": payload.get("topic"),
+                        "base_commit": payload.get("base_commit"), "goal": payload.get("goal"),
+                        "acceptance": payload.get("acceptance", []), "stage_id": payload.get("stage_id"),
+                        "hypothesis": None, "conclusion": None, "current_step": None,
+                        "progress": None, "next_step": None, "state": "active", "pr": None,
+                        "archive_branch": None, "evidence": [],
+                        "created_at": event.get("occurred_at"), "updated_at": event.get("occurred_at"),
+                    }
+                    continue
+                attempt_id = payload.get("attempt_id")
+                attempt = attempts.get(attempt_id)
+                if not attempt:
+                    continue
+                if kind == "attempt.updated":
+                    for key in ("hypothesis", "conclusion", "current_step", "progress", "next_step"):
+                        if payload.get(key) is not None:
+                            attempt[key] = payload[key]
+                    for evidence in payload.get("evidence", []):
+                        if evidence not in attempt["evidence"]:
+                            attempt["evidence"].append(evidence)
+                elif kind == "attempt.state_changed":
+                    attempt["state"] = payload.get("state", attempt["state"])
+                    attempt["pr"] = payload.get("pr") or attempt["pr"]
+                    attempt["archive_branch"] = payload.get("archive_branch") or attempt["archive_branch"]
+                elif kind == "attempt.archived":
+                    attempt["archive_branch"] = payload.get("archive_branch")
+                attempt["updated_at"] = event.get("occurred_at") or attempt["updated_at"]
+        return list(attempts.values())
+
+    def attempts_across_branches(self) -> list[dict]:
+        return self._branch_attempts()
 
     def _connection(self) -> tuple[sqlite3.Connection, bool]:
         rebuilt = not self.database_path.exists()
@@ -516,12 +446,50 @@ class MaintenanceReadModel:
                 "state_updated": bool(active["state_updated"]),
                 "decisions_added": active["decisions_added"],
             }
+        profile = connection.execute(
+            "SELECT * FROM project_profile WHERE branch='main'"
+        ).fetchone()
+        stage_rows = connection.execute(
+            "SELECT * FROM stages ORDER BY sequence DESC"
+        ).fetchall()
+        stages = []
+        for row in stage_rows:
+            item = dict(row)
+            item["acceptance"] = json.loads(item.pop("acceptance_json"))
+            item["evidence"] = json.loads(item.pop("evidence_json"))
+            stages.append(item)
+        attempts = []
+        for row in connection.execute(
+            "SELECT * FROM attempts ORDER BY updated_at DESC, branch"
+        ).fetchall():
+            item = dict(row)
+            item["acceptance"] = json.loads(item.pop("acceptance_json"))
+            item["evidence"] = [evidence["evidence"] for evidence in rows(
+                connection,
+                "SELECT evidence FROM attempt_evidence WHERE attempt_id=? ORDER BY occurred_at, event_id",
+                (item["attempt_id"],),
+            )]
+            attempts.append(item)
+        by_attempt = {item["attempt_id"]: item for item in attempts}
+        for item in self._branch_attempts():
+            current = by_attempt.get(item["attempt_id"])
+            if current is None or item.get("updated_at", "") > current.get("updated_at", ""):
+                by_attempt[item["attempt_id"]] = item
+        attempts = sorted(
+            by_attempt.values(), key=lambda item: (item.get("updated_at", ""), item["attempt_id"]),
+            reverse=True,
+        )
         return {
             "branch": branch,
             "state": state_data,
             "git_state": self.git_state(),
             "recent_handoffs": handoffs,
             "active_task": active_data,
+            "project_profile": dict(profile) if profile else None,
+            "current_stage": next((item for item in stages if item["status"] == "active"), None),
+            "stages": stages,
+            "attempts": attempts,
+            "active_attempts": [item for item in attempts if item["state"] == "active"],
         }
 
     def context(self, branch: str | None = None) -> dict:
@@ -530,8 +498,8 @@ class MaintenanceReadModel:
         try:
             context = self._context(connection, branch)
             try:
-                timeline = self._build_timeline(connection)
-                task_details = self._task_details(connection, timeline)
+                publication = self._publication_projection(connection)
+                task_details = self._task_details(connection, publication)
             except (OSError, ReadModelError, subprocess.SubprocessError):
                 task_details = {}
             return self._apply_overview_state(context, task_details)
@@ -565,7 +533,7 @@ class MaintenanceReadModel:
             connection.close()
 
     @staticmethod
-    def _search_index(connection: sqlite3.Connection, timeline: dict) -> list[dict]:
+    def _search_index(connection: sqlite3.Connection) -> list[dict]:
         result: list[dict] = []
 
         def add(kind: str, label: str, target: str, record_id: str, occurred_at: str,
@@ -630,13 +598,6 @@ class MaintenanceReadModel:
                 [item["task_id"]] if item.get("task_id") else [],
             )
 
-        for commit in timeline.get("commits", []):
-            add("commit", "提交", "timeline", commit["hash"], commit["occurred_at"], commit["lane"],
-                commit["subject"], commit["short_hash"],
-                [commit["hash"], commit["short_hash"], commit["subject"], commit["author"], commit["lane"],
-                 *commit.get("refs", []), *commit.get("task_ids", []), *commit.get("event_branches", [])],
-                list(commit.get("task_ids", [])))
-
         return sorted(
             result,
             key=lambda item: (item["occurred_at"][:19].replace(" ", "T"), item["record_id"]),
@@ -644,7 +605,7 @@ class MaintenanceReadModel:
         )
 
     @staticmethod
-    def _task_details(connection: sqlite3.Connection, timeline: dict) -> dict[str, dict]:
+    def _task_details(connection: sqlite3.Connection, publication: dict) -> dict[str, dict]:
         event_rows = rows(
             connection,
             "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events "
@@ -679,7 +640,7 @@ class MaintenanceReadModel:
             decisions_by_task.setdefault(item["task_id"], []).append(item)
         for item in explorations:
             explorations_by_task.setdefault(item["task_id"], []).append(item)
-        for commit in timeline.get("commits", []):
+        for commit in publication.get("commits", []):
             for task_id in commit.get("task_ids", []):
                 commits_by_task.setdefault(task_id, []).append(commit)
 
@@ -723,12 +684,6 @@ class MaintenanceReadModel:
                     "title": item["goal"], "summary": item["result"], "target": "explorations",
                     "record_id": item["event_id"], "task_id": task_id,
                 })
-            for commit in commits_by_task.get(task_id, []):
-                related.append({
-                    "kind": "commit", "kind_label": "提交", "occurred_at": commit["occurred_at"],
-                    "title": commit["subject"], "summary": commit["short_hash"], "target": "timeline",
-                    "record_id": commit["hash"], "task_id": task_id,
-                })
             for event in task_events:
                 payload = event["payload"]
                 summary = next((payload.get(key) for key in ("summary", "scope", "goal", "decision", "state", "task") if payload.get(key)), "")
@@ -746,7 +701,7 @@ class MaintenanceReadModel:
             task_commits = commits_by_task.get(task_id, [])
             linked_commits = [commit["hash"] for commit in task_commits]
             published_commits = [commit["hash"] for commit in task_commits if commit.get("published")]
-            publication_available = timeline.get("publication", {}).get("available", False)
+            publication_available = publication.get("publication", {}).get("available", False)
             if not finish:
                 publication_status = "进行中"
             elif not linked_commits:
@@ -769,8 +724,6 @@ class MaintenanceReadModel:
                 "result": result,
                 "status": publication_status,
                 "publication_status": publication_status,
-                "linked_commits": linked_commits,
-                "publication_commits": published_commits,
                 "is_auxiliary": is_auxiliary_task_id(task_id),
                 "parent_task_id": None,
                 "auxiliary_tasks": [],
@@ -779,72 +732,6 @@ class MaintenanceReadModel:
                 "evidence": evidence,
                 "related": related,
             }
-        commits_by_hash = {
-            commit["hash"]: commit for commit in timeline.get("commits", [])
-        }
-
-        def task_time(task_id: str) -> str:
-            item = details.get(task_id, {})
-            return item.get("finished_at") or item.get("started_at") or ""
-
-        def choose_primary(task_ids: list[str], auxiliary_time: str) -> str | None:
-            candidates = [
-                task_id for task_id in task_ids
-                if task_id in details and not details[task_id]["is_auxiliary"]
-            ]
-            before = [task_id for task_id in candidates if task_time(task_id) <= auxiliary_time]
-            pool = before or candidates
-            return max(pool, key=task_time) if pool else None
-
-        for task_id, detail in details.items():
-            if not detail["is_auxiliary"]:
-                continue
-            candidate_ids: list[str] = []
-            linked = [
-                commits_by_hash[commit_hash]
-                for commit_hash in detail["linked_commits"]
-                if commit_hash in commits_by_hash
-            ]
-            for commit in linked:
-                candidate_ids.extend(commit.get("task_ids", []))
-            parent_task_id = choose_primary(candidate_ids, detail["started_at"])
-            if parent_task_id is None:
-                pending = [
-                    parent
-                    for commit in reversed(linked)
-                    for parent in commit.get("parents", [])[:1]
-                ]
-                visited: set[str] = set()
-                while pending and parent_task_id is None:
-                    commit_hash = pending.pop(0)
-                    if commit_hash in visited:
-                        continue
-                    visited.add(commit_hash)
-                    commit = commits_by_hash.get(commit_hash)
-                    if commit is None:
-                        continue
-                    parent_task_id = choose_primary(
-                        commit.get("task_ids", []), detail["started_at"],
-                    )
-                    if parent_task_id is None:
-                        pending.extend(commit.get("parents", [])[:1])
-            detail["parent_task_id"] = parent_task_id
-            if parent_task_id:
-                details[parent_task_id]["auxiliary_tasks"].append({
-                    "task_id": task_id,
-                    "goal": detail["goal"],
-                    "started_at": detail["started_at"],
-                    "finished_at": detail["finished_at"],
-                    "result": detail["result"],
-                    "status": detail["status"],
-                    "conclusion": detail["conclusion"],
-                    "evidence": detail["evidence"],
-                    "linked_commits": detail["linked_commits"],
-                })
-        for detail in details.values():
-            detail["auxiliary_tasks"].sort(
-                key=lambda item: (item["finished_at"], item["task_id"]),
-            )
         return details
 
     @staticmethod
@@ -909,13 +796,11 @@ class MaintenanceReadModel:
             events = rows(connection, "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             for event in events:
                 event["payload"] = json.loads(event.pop("payload_json"))
-            timeline_error = None
             try:
-                timeline = self._build_timeline(connection)
+                publication = self._publication_projection(connection)
             except (OSError, ReadModelError, subprocess.SubprocessError) as exc:
-                timeline = {"status": "unavailable", "lanes": [], "branches": [], "commits": [], "edges": []}
-                timeline_error = str(exc)
-            task_details = self._task_details(connection, timeline)
+                publication = {"publication": {"ref": "origin/main", "available": False}, "commits": []}
+            task_details = self._task_details(connection, publication)
             context = self._apply_overview_state(context, task_details)
             catalog_items = [
                 decode_item(item) for item in rows(
@@ -942,9 +827,7 @@ class MaintenanceReadModel:
                 "explorations": explorations,
                 "attempt": self._attempt(connection, branch),
                 "events": events,
-                "timeline": timeline,
-                "timeline_error": timeline_error,
-                "search_index": self._search_index(connection, timeline),
+                "search_index": self._search_index(connection),
                 "task_details": task_details,
                 "catalog_items": catalog_items,
                 "catalog_relations": catalog_relations,

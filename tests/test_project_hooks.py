@@ -23,6 +23,7 @@ from project_hooks.dashboard import (
     PRIMARY_TABS,
     RESEARCH_PROMPT_TEMPLATES,
     SOFTWARE_PROMPT_TEMPLATES,
+    StagePage,
     WORKBENCH_PROMPT_CATEGORIES,
     WORKBENCH_PROMPT_TEMPLATES,
     ResearchWorkbenchPage,
@@ -47,13 +48,11 @@ from project_hooks.dashboard import (
     result_label,
     short,
     sort_records,
-    timeline_layout,
     update_status_text,
     version_status_text,
 )
 from project_hooks.read_model import (
     MaintenanceReadModel,
-    ReadModelError,
     action_overview_text,
     git_state_summary,
     is_auxiliary_task_id,
@@ -123,7 +122,9 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.hooks("install")
         self.assertTrue(database.exists())
         overview = self.hooks().stdout
-        self.assertIn("项目行动概览", overview)
+        self.assertIn("项目概览", overview)
+        self.assertIn("项目描述：", overview)
+        self.assertIn("当前大阶段", overview)
         self.assertIn("状态：", overview)
         self.assertIn("活动任务：", overview)
         self.assertIn("当前阻塞：", overview)
@@ -192,7 +193,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             lambda: "main",
         ).dashboard_snapshot()["task_details"][task_id]
         self.assertEqual(partial["publication_status"], "部分发布")
-        self.assertEqual(partial["publication_commits"], [first_commit])
+        self.assertNotIn("publication_commits", partial)
 
         self.git("update-ref", "refs/remotes/origin/main", final_commit)
         published = MaintenanceReadModel(
@@ -288,7 +289,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(unpublished["visible_next_steps"], ["推送 main"])
         self.assertFalse(unpublished["publication_completed"])
 
-    def test_auxiliary_publication_tasks_fold_into_primary_details(self) -> None:
+    def test_auxiliary_publication_tasks_stay_hidden_without_commit_folding(self) -> None:
         primary_id = "20260723_primary_feature_001"
         publish_id = "20260723_publish_primary_feature_001"
         record_id = "20260723_record_primary_feature_publication_001"
@@ -312,12 +313,9 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             lambda: "main",
         ).dashboard_snapshot()
         details = snapshot["task_details"]
-        self.assertEqual(details[publish_id]["parent_task_id"], primary_id)
-        self.assertEqual(details[record_id]["parent_task_id"], primary_id)
-        self.assertEqual(
-            [item["task_id"] for item in details[primary_id]["auxiliary_tasks"]],
-            [publish_id, record_id],
-        )
+        self.assertIsNone(details[publish_id]["parent_task_id"])
+        self.assertIsNone(details[record_id]["parent_task_id"])
+        self.assertEqual(details[primary_id]["auxiliary_tasks"], [])
         self.assertNotIn(publish_id, dashboard_presets(snapshot)["recent"])
         self.assertNotIn(record_id, dashboard_presets(snapshot)["recent"])
         self.assertNotIn(publish_id, [item.get("task_id") for item in snapshot["context"]["recent_handoffs"]])
@@ -417,12 +415,11 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(snapshot["decisions"][0]["decision"], "read model")
         self.assertGreaterEqual(len(snapshot["events"]), 4)
         self.assertEqual(snapshot["health"]["status"], "passed")
-        self.assertEqual(snapshot["timeline"]["status"], "passed")
-        self.assertGreaterEqual(len(snapshot["timeline"]["commits"]), 1)
-        self.assertTrue({"task", "decision", "commit"}.issubset({item["kind"] for item in snapshot["search_index"]}))
-        self.assertEqual(snapshot["timeline"]["branches"][0]["name"], "main")
+        self.assertNotIn("timeline", snapshot)
+        self.assertTrue({"task", "decision"}.issubset({item["kind"] for item in snapshot["search_index"]}))
+        self.assertNotIn("commit", {item["kind"] for item in snapshot["search_index"]})
 
-    def test_task_details_aggregate_decisions_explorations_events_and_commits(self) -> None:
+    def test_task_details_aggregate_decisions_explorations_and_events(self) -> None:
         task_id = "20260723_task_detail_001"
         self.start(task_id, "--track", "research", "--topic", "task-detail")
         self.update_state("task details ready")
@@ -444,141 +441,99 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(detail["conclusion"], "aggregation is deterministic")
         self.assertIn("records share task id", detail["evidence"])
         kinds = {item["kind"] for item in detail["related"]}
-        self.assertTrue({"decision", "exploration", "event", "commit"}.issubset(kinds))
+        self.assertTrue({"decision", "exploration", "event"}.issubset(kinds))
+        self.assertNotIn("commit", kinds)
         self.assertTrue(all(item["task_id"] == task_id for item in detail["related"]))
 
-    def test_one_commit_can_link_to_multiple_task_details(self) -> None:
-        task_ids = ["20260723_multi_001", "20260723_multi_002"]
-        for task_id in task_ids:
-            self.start(task_id)
-            self.update_state(f"complete {task_id}")
-            self.end(task_id)
-        self.commit_all("complete two maintenance tasks")
-        commit_hash = self.git("rev-parse", "HEAD").stdout.strip()
-
-        model = MaintenanceReadModel(
-            self.root / ".project_hooks/maintenance.sqlite3",
-            self.root / "maintenance/events.jsonl",
-            lambda: "main",
+    def test_project_stage_and_attempt_progress_are_structured(self) -> None:
+        stable_id = "20260801_stage_setup_001"
+        self.start(stable_id)
+        profile = json.loads(self.hooks(
+            "project", "update", "--description", "A structured research project",
+            "--big-goal", "Keep research auditable",
+        ).stdout)
+        self.assertEqual(profile["big_goal"], "Keep research auditable")
+        stage = json.loads(self.hooks(
+            "stage", "start", "validation", "--title", "Validation",
+            "--goal", "Validate the workflow", "--acceptance", "All checks pass",
+        ).stdout)
+        self.assertEqual(stage["status"], "active")
+        self.hooks(
+            "stage", "update", "validation", "--summary", "Core path implemented",
+            "--current-step", "Run branch experiment", "--next-step", "Review evidence",
         )
-        details = model.dashboard_snapshot()["task_details"]
-        for task_id in task_ids:
-            commits = [item for item in details[task_id]["related"] if item["kind"] == "commit"]
-            self.assertEqual([item["record_id"] for item in commits], [commit_hash])
+        duplicate = self.hooks(
+            "stage", "start", "other", "--title", "Other", "--goal", "Other goal",
+            "--acceptance", "Done", check=False,
+        )
+        self.assertIn("已有 active 阶段", duplicate.stderr)
+        self.update_state("stage profile ready")
+        self.end(stable_id)
+        self.commit_all("record project profile and stage")
+        self.git("update-ref", "refs/remotes/origin/main", self.git("rev-parse", "HEAD").stdout.strip())
 
-    def test_timeline_maps_branches_tasks_unlinked_commits_and_squash(self) -> None:
-        note = self.root / "plain.txt"
-        note.write_text("ordinary commit\n", encoding="utf-8")
-        self.git("add", "plain.txt")
-        self.git("commit", "-m", "ordinary unlinked commit")
-        ordinary_hash = self.git("rev-parse", "HEAD").stdout.strip()
-
-        task_id = "20260722_timeline_001"
-        self.start(task_id, "--track", "research", "--topic", "timeline")
-        experiment = self.root / "experiment.txt"
-        experiment.write_text("timeline experiment\n", encoding="utf-8")
-        self.update_state("timeline branch complete")
-        self.end(task_id, state="active")
-        self.commit_all("record timeline experiment")
-        research_hash = self.git("rev-parse", "HEAD").stdout.strip()
-        self.git("update-ref", "refs/remotes/origin/research/timeline", research_hash)
-
+        attempt_id = "20260801_stage_attempt_001"
+        self.start(attempt_id, "--track", "research", "--topic", "stage-progress")
+        updated = json.loads(self.hooks(
+            "attempt", "update", "--current-step", "Calibrate model",
+            "--progress", "Baseline completed", "--next-step", "Run corner cases",
+        ).stdout)
+        self.assertEqual(updated["stage_id"], "validation")
+        self.assertEqual(updated["current_step"], "Calibrate model")
+        self.assertEqual(updated["progress"], "Baseline completed")
+        self.update_state("attempt progress recorded")
+        self.end(attempt_id, state="active")
+        self.commit_all("record active stage exploration")
         self.git("switch", "main")
-        self.git("merge", "--squash", "research/timeline")
-        self.git("commit", "-m", "squash timeline experiment")
-        squash_hash = self.git("rev-parse", "HEAD").stdout.strip()
 
-        model = MaintenanceReadModel(
+        context = MaintenanceReadModel(
             self.root / ".project_hooks/maintenance.sqlite3",
             self.root / "maintenance/events.jsonl",
             lambda: "main",
+        ).context()
+        self.assertEqual(context["project_profile"]["description"], "A structured research project")
+        self.assertEqual(context["current_stage"]["stage_id"], "validation")
+        projected = next(item for item in context["active_attempts"] if item["attempt_id"] == attempt_id)
+        self.assertEqual(projected["next_step"], "Run corner cases")
+
+        blocker_id = "20260801_stage_block_001"
+        self.start(blocker_id)
+        blocked = self.hooks(
+            "stage", "update", "validation", "--status", "completed",
+            "--summary", "Done", "--evidence", "tests", check=False,
         )
-        timeline = model.timeline()
-        commits = {item["hash"]: item for item in timeline["commits"]}
-        self.assertIn("main", timeline["lanes"])
-        self.assertIn("research/timeline", timeline["lanes"])
-        self.assertEqual(commits[ordinary_hash]["task_ids"], [])
-        self.assertIn(task_id, commits[research_hash]["task_ids"])
-        self.assertIn(task_id, commits[squash_hash]["task_ids"])
-        self.assertEqual(commits[research_hash]["lane"], "research/timeline")
-        self.assertEqual(commits[squash_hash]["lane"], "main")
+        self.assertIn("active 探索", blocked.stderr)
+        self.update_state("stage remains active")
+        self.end(blocker_id)
 
-        self.git("branch", "-D", "research/timeline")
-        remote_only = MaintenanceReadModel(
+    def test_stage_validation_and_legacy_projects_do_not_infer_profile(self) -> None:
+        context = MaintenanceReadModel(
             self.root / ".project_hooks/maintenance.sqlite3",
             self.root / "maintenance/events.jsonl",
             lambda: "main",
-        ).timeline()
-        self.assertIn(research_hash, {item["hash"] for item in remote_only["commits"]})
-        self.git("update-ref", "-d", "refs/remotes/origin/research/timeline")
-        after_delete = MaintenanceReadModel(
-            self.root / ".project_hooks/maintenance.sqlite3",
-            self.root / "maintenance/events.jsonl",
-            lambda: "main",
-        ).timeline()
-        self.assertIn("research/timeline", after_delete["lanes"])
-        visible = {item["hash"]: item for item in after_delete["commits"]}
-        self.assertNotIn(research_hash, visible)
-        self.assertIn("research/timeline", visible[squash_hash]["event_branches"])
+        ).context()
+        self.assertIsNone(context["project_profile"])
+        self.assertIsNone(context["current_stage"])
+        self.assertIn("project update", action_overview_text(context))
 
-    def test_timeline_git_failure_does_not_block_sqlite_snapshot(self) -> None:
-        model = MaintenanceReadModel(
-            self.root / ".project_hooks/maintenance.sqlite3",
-            self.root / "maintenance/events.jsonl",
-            lambda: "main",
+        task_id = "20260801_stage_rules_001"
+        self.start(task_id)
+        invalid = self.hooks(
+            "stage", "start", "Bad_Name", "--title", "Bad", "--goal", "Bad",
+            "--acceptance", "Bad", check=False,
         )
-        with patch.object(model, "_build_timeline", side_effect=ReadModelError("git unavailable")):
-            snapshot = model.dashboard_snapshot()
-        self.assertEqual(snapshot["health"]["status"], "passed")
-        self.assertEqual(snapshot["timeline"]["status"], "unavailable")
-        self.assertIn("git unavailable", snapshot["timeline_error"])
-        self.assertEqual(snapshot["task_details"], {})
-
-    def test_timeline_cache_invalidates_after_git_commit(self) -> None:
-        model = MaintenanceReadModel(
-            self.root / ".project_hooks/maintenance.sqlite3",
-            self.root / "maintenance/events.jsonl",
-            lambda: "main",
+        self.assertIn("stage_id", invalid.stderr)
+        too_long = self.hooks(
+            "project", "update", "--description", "x" * 501, check=False,
         )
-        before = model.timeline()
-        extra = self.root / "cache.txt"
-        extra.write_text("new tip\n", encoding="utf-8")
-        self.git("add", "cache.txt")
-        self.git("commit", "-m", "advance timeline tip")
-        after = model.timeline()
-        self.assertEqual(len(after["commits"]), len(before["commits"]) + 1)
-        self.assertNotEqual(after, before)
+        self.assertIn("500", too_long.stderr)
+        self.update_state("validation checked")
+        self.end(task_id)
 
-    def test_timeline_branch_metadata_marks_unmerged_and_excludes_archive(self) -> None:
-        self.git("switch", "-c", "research/open-model")
-        open_file = self.root / "open.txt"
-        open_file.write_text("open branch\n", encoding="utf-8")
-        self.git("add", "open.txt")
-        self.git("commit", "-m", "open research")
-        open_tip = self.git("rev-parse", "HEAD").stdout.strip()
-        self.git("update-ref", "refs/remotes/origin/research/open-model", open_tip)
-        self.git("branch", "archive/research/old-model", open_tip)
 
-        self.git("switch", "main")
-        self.git("switch", "-c", "experiment/merged-model")
-        merged_file = self.root / "merged.txt"
-        merged_file.write_text("merged branch\n", encoding="utf-8")
-        self.git("add", "merged.txt")
-        self.git("commit", "-m", "validated experiment")
-        self.git("switch", "main")
-        self.git("merge", "--no-ff", "experiment/merged-model", "-m", "merge validated experiment")
 
-        timeline = MaintenanceReadModel(
-            self.root / ".project_hooks/maintenance.sqlite3",
-            self.root / "maintenance/events.jsonl",
-            lambda: "main",
-        ).timeline()
-        branches = {item["name"]: item for item in timeline["branches"]}
-        self.assertTrue(branches["research/open-model"]["unmerged"])
-        self.assertIn("origin/research/open-model", branches["research/open-model"]["refs"])
-        self.assertTrue(branches["experiment/merged-model"]["merged"])
-        self.assertFalse(branches["experiment/merged-model"]["unmerged"])
-        self.assertFalse(branches["archive/research/old-model"]["unmerged"])
+
+
 
     def test_search_index_includes_exploration_records(self) -> None:
         task_id = "20260723_search_index_001"
@@ -594,7 +549,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             self.root / "maintenance/events.jsonl",
             lambda: "research/search-index",
         ).dashboard_snapshot()
-        self.assertEqual({"task", "decision", "exploration", "commit"}, {item["kind"] for item in snapshot["search_index"]})
+        self.assertEqual({"task", "decision", "exploration"}, {item["kind"] for item in snapshot["search_index"]})
 
     def test_legacy_migration_is_complete_idempotent_and_deletes_sources(self) -> None:
         maintenance = self.root / "maintenance"
@@ -871,7 +826,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(context["state"]["goal"], "legacy")
         connection = sqlite3.connect(database)
         try:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
         finally:
             connection.close()
 
@@ -1112,17 +1067,19 @@ class DashboardPresentationTests(unittest.TestCase):
             }],
         }
         text = action_overview_text(context)
-        self.assertLess(text.index("状态："), text.index("当前目标："))
+        self.assertLess(text.index("项目描述："), text.index("当前大阶段"))
+        self.assertLess(text.index("当前大阶段"), text.index("当前执行"))
         self.assertIn("活动任务：task-1（main）", text)
         self.assertIn("当前阻塞：无。", text)
         self.assertIn("1. 完成代码", text)
         self.assertIn("Git 同步：main 12345678 与 origin/main abcdef12：同步", text)
-        self.assertIn("当前目标：精简 维护体验", text)
         self.assertIn("最近完成：2026-07-23 10:00:00｜上一个任务｜完成", text)
-        self.assertNotIn("判断", text)
-        self.assertNotIn("断点", text)
+        self.assertIn("当前判决：不应出现在默认概览", text)
+        self.assertIn("工作断点：不应出现在默认概览", text)
+        self.assertGreaterEqual(text.count("─" * 32), 4)
         dashboard_text = DashboardApp.overview_text({"context": context, "catalog_items": []})
         self.assertTrue(dashboard_text.startswith(text.rstrip()))
+        self.assertIn("资料概览", dashboard_text)
         self.assertIn("科研资料：共 0", dashboard_text)
 
     def test_publication_classifiers_are_conservative(self) -> None:
@@ -1168,11 +1125,11 @@ class DashboardPresentationTests(unittest.TestCase):
     def test_record_navigation_handles_unlinked_and_multiple_tasks(self) -> None:
         self.assertEqual(linked_task_ids({"task_id": None}), [])
         self.assertEqual(linked_task_ids({"task_id": "task-1", "task_ids": ["task-1", "task-2"]}), ["task-1", "task-2"])
-        self.assertEqual(record_location({"target": "timeline", "record_id": "abc"}), ("timeline", "abc"))
+        self.assertEqual(record_location({"target": "events", "record_id": "abc"}), ("events", "abc"))
         self.assertEqual(record_identity({"event_id": "event-1", "task_id": "task-1"}), ("event_id", "event-1"))
         self.assertIsNone(record_identity({}))
 
-    def test_dashboard_presets_use_ten_negative_only_and_unmerged_explorations(self) -> None:
+    def test_dashboard_presets_use_ten_and_negative_explorations(self) -> None:
         snapshot = {
             "history": [{"task_id": f"task-{index}"} for index in range(15)],
             "explorations": [
@@ -1180,19 +1137,14 @@ class DashboardPresentationTests(unittest.TestCase):
                 {"event_id": "paused", "result": "paused"},
                 {"event_id": "inconclusive", "result": "inconclusive"},
             ],
-            "timeline": {"branches": [
-                {"name": "research/open", "unmerged": True},
-                {"name": "archive/research/old", "unmerged": False},
-                {"name": "experiment/done", "unmerged": False},
-            ]},
         }
         presets = dashboard_presets(snapshot)
         self.assertEqual(presets["recent"], [f"task-{index}" for index in range(10)])
         self.assertEqual(presets["negative"], ["negative"])
-        self.assertEqual(presets["unmerged"], ["research/open"])
+        self.assertEqual(set(presets), {"recent", "negative"})
 
     def test_seven_primary_tabs_and_normalized_records(self) -> None:
-        self.assertEqual(PRIMARY_TABS, ("概览", "搜索", "资料", "工作台", "任务", "时间线", "记录"))
+        self.assertEqual(PRIMARY_TABS, ("概览", "搜索", "资料", "工作台", "任务", "阶段", "记录"))
         records = normalize_records(
             [{"event_id": "d1", "occurred_at": "2026-07-23 10:00:00", "branch": "main",
               "decision": "keep five pages", "decision_id": "D-1", "task_id": "task-1"}],
@@ -1202,6 +1154,21 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual([item["record_type"] for item in records], ["exploration", "decision"])
         self.assertEqual(records[0]["title"], "test layout")
         self.assertEqual(records[1]["task_id"], "task-1")
+
+    def test_stage_page_text_shows_progress_and_related_explorations(self) -> None:
+        stage = {
+            "stage_id": "validation", "sequence": 2, "title": "Validation", "status": "active",
+            "goal": "Validate workflow", "summary": "Core path ready", "current_step": "Run tests",
+            "next_step": "Review evidence", "blocker": "", "acceptance": ["All tests pass"],
+            "evidence": ["unit tests"],
+        }
+        text = StagePage.stage_text(stage, [{
+            "stage_id": "validation", "branch": "research/model", "state": "active",
+            "current_step": "Calibrate model",
+        }])
+        self.assertIn("当前步骤：Run tests", text)
+        self.assertIn("下一步：Review evidence", text)
+        self.assertIn("research/model｜active｜Calibrate model", text)
 
     def test_search_catalog_and_records_use_horizontal_detail_without_changing_advanced_view(self) -> None:
         table_source = inspect.getsource(TablePage)
@@ -1563,7 +1530,6 @@ class DashboardPresentationTests(unittest.TestCase):
         text = advanced_summary({
             "health": {"status": "passed", "schema_version": 1, "events": 42,
                        "rebuilt": False, "journal_hash": "abc123"},
-            "timeline_error": None,
         })
         self.assertIn("数据库：passed", text)
         self.assertIn("Schema：1", text)
@@ -1588,74 +1554,8 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(second, first)
         self.assertIn("database unavailable", error)
 
-    def test_timeline_layout_filters_highlights_and_links_branches(self) -> None:
-        timeline = {
-            "lanes": ["main", "research/model"],
-            "commits": [
-                {"hash": "a" * 40, "short_hash": "aaaaaaaa", "parents": [], "lane": "main",
-                 "subject": "baseline", "task_ids": [], "event_branches": [], "events": []},
-                {"hash": "b" * 40, "short_hash": "bbbbbbbb", "parents": ["a" * 40], "lane": "research/model",
-                 "subject": "model task", "task_ids": ["task-1"], "event_branches": ["research/model"], "events": []},
-                {"hash": "c" * 40, "short_hash": "cccccccc", "parents": ["a" * 40], "lane": "main",
-                 "subject": "squash model", "task_ids": ["task-1"], "event_branches": ["research/model"], "events": []},
-            ],
-            "edges": [
-                {"parent": "a" * 40, "child": "b" * 40},
-                {"parent": "a" * 40, "child": "c" * 40},
-            ],
-        }
-        layout = timeline_layout(timeline, query="model task")
-        self.assertEqual(len(layout["nodes"]), 3)
-        self.assertEqual([item["match"] for item in layout["nodes"]], [False, True, False])
-        self.assertEqual(len(layout["associations"]), 1)
-        focused = timeline_layout(timeline, branch="research/model")
-        self.assertEqual({item["hash"] for item in focused["nodes"]}, {"b" * 40, "c" * 40})
-        self.assertEqual(focused["lanes"], ["main", "research/model"])
 
-    def test_timeline_layout_folds_after_fifty_and_can_expand(self) -> None:
-        commits = []
-        edges = []
-        for index in range(60):
-            commit_hash = f"{index:040x}"
-            parent = f"{index - 1:040x}" if index else None
-            commits.append({
-                "hash": commit_hash, "short_hash": commit_hash[:8], "parents": [parent] if parent else [],
-                "lane": "main", "subject": f"commit {index}", "task_ids": [], "event_branches": [], "events": [],
-            })
-            if parent:
-                edges.append({"parent": parent, "child": commit_hash})
-        timeline = {"lanes": ["main"], "commits": commits, "edges": edges}
-        folded = timeline_layout(timeline)
-        self.assertEqual(len(folded["nodes"]), 50)
-        self.assertEqual(folded["folded_count"], 10)
-        self.assertEqual(len(folded["truncated"]), 1)
-        expanded = timeline_layout(timeline, expanded=True)
-        self.assertEqual(len(expanded["nodes"]), 60)
-        self.assertEqual(expanded["folded_count"], 0)
-        subset = timeline_layout(timeline, branch_subset={"research/missing"})
-        self.assertEqual(subset["nodes"], [])
 
-    def test_timeline_refresh_error_preserves_previous_graph(self) -> None:
-        class Provider:
-            def __init__(self):
-                self.calls = 0
-
-            def load(self):
-                self.calls += 1
-                if self.calls == 1:
-                    return {"timeline": {"status": "passed", "commits": [{"hash": "abc"}]}, "timeline_error": None,
-                            "search_index": [{"kind": "commit", "record_id": "abc", "occurred_at": "2"}]}
-                return {"timeline": {"status": "unavailable", "commits": []}, "timeline_error": "git unavailable",
-                        "search_index": [{"kind": "task", "record_id": "task", "occurred_at": "3"}]}
-
-        controller = DashboardController(Provider())
-        first, error = controller.refresh()
-        self.assertIsNone(error)
-        second, error = controller.refresh()
-        self.assertIsNone(error)
-        self.assertEqual(second["timeline"]["commits"], first["timeline"]["commits"])
-        self.assertTrue(second["timeline"]["stale"])
-        self.assertEqual({item["kind"] for item in second["search_index"]}, {"task", "commit"})
 
     def test_tkinter_unavailable_has_cli_fallback(self) -> None:
         with patch("project_hooks.dashboard.import_tk", side_effect=DashboardError("missing\n" + CLI_FALLBACK)):

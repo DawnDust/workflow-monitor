@@ -61,6 +61,7 @@ ROOT = Path.cwd().resolve()
 MARKER = ROOT / PROJECT_MARKER
 TASK_ID_RE = re.compile(r"^\d{8}_[a-z0-9][a-z0-9_-]*_\d{3}$")
 TOPIC_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+STAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 MANAGED_HOOK_MARKER = "# project-maintenance-hooks managed"
 TRACKED_HOOKS_DIR = ".githooks"
 STATIC_READ_ORDER = [
@@ -113,7 +114,7 @@ usage: project-hooks [-h] [--help-all] [--project PATH] <command> ...
   init, install, update, version, check, status, branch-status
 
 状态与记录:
-  state, history, decisions, decision, explorations, catalog
+  project, stage, state, history, decisions, decision, explorations, catalog
 
 探索流程:
   attempt, exploration, prepare-pr, archive-attempt
@@ -128,6 +129,17 @@ usage: project-hooks [-h] [--help-all] [--project PATH] <command> ...
 
 class WorkflowError(RuntimeError):
     pass
+
+
+def clean_text(value: str | None, label: str, maximum: int) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        raise WorkflowError(f"{label}不能为空")
+    if len(text) > maximum:
+        raise WorkflowError(f"{label}最多允许 {maximum} 个字符")
+    return text
 
 
 def discover_project_root(start: Path | None = None) -> Path | None:
@@ -179,6 +191,10 @@ def command_is_read_only(args: argparse.Namespace) -> bool:
                         "history", "decisions", "explorations", "dashboard", "update"}:
         return True
     if args.command == "attempt" and args.attempt_command == "show":
+        return True
+    if args.command == "project" and args.project_command == "show":
+        return True
+    if args.command == "stage" and args.stage_command in {"list", "show"}:
         return True
     if args.command == "db" and args.db_command in {"status", "verify"}:
         return True
@@ -456,6 +472,183 @@ def get_attempt(branch: str) -> dict | None:
         raise WorkflowError(str(exc)) from exc
 
 
+def stable_write_context() -> tuple[dict, str]:
+    record = read_active()
+    branch = assert_active_branch(record)
+    default = branch_policy()["default_branch"]
+    if branch != default or record["git"]["track"] != "stable":
+        raise WorkflowError(f"项目资料和阶段只能在 {default} 的 stable 活动任务中更新")
+    return record, branch
+
+
+def decode_stage(row: sqlite3.Row | dict) -> dict:
+    item = dict(row)
+    item["acceptance"] = json.loads(item.pop("acceptance_json"))
+    item["evidence"] = json.loads(item.pop("evidence_json"))
+    return item
+
+
+def active_stage(connection: sqlite3.Connection) -> dict | None:
+    row = connection.execute(
+        "SELECT * FROM stages WHERE status='active' ORDER BY sequence DESC LIMIT 1"
+    ).fetchone()
+    return decode_stage(row) if row else None
+
+
+def project_command(args: argparse.Namespace) -> dict | str:
+    connection = database()
+    try:
+        row = connection.execute(
+            "SELECT * FROM project_profile WHERE branch=?",
+            (branch_policy()["default_branch"],),
+        ).fetchone()
+        current = dict(row) if row else {
+            "branch": branch_policy()["default_branch"], "description": "", "big_goal": "",
+            "updated_at": None, "task_id": None, "event_id": None,
+        }
+    finally:
+        connection.close()
+    if args.project_command == "show":
+        if args.format == "json":
+            return current
+        return (
+            "# 项目资料\n\n"
+            f"- 项目描述：{current.get('description') or '未设置'}\n"
+            f"- 大目标：{current.get('big_goal') or '未设置'}\n"
+            f"- 更新时间：{current.get('updated_at') or '未设置'}\n"
+        )
+    record, branch = stable_write_context()
+    description = clean_text(args.description, "项目描述", 500)
+    big_goal = clean_text(args.big_goal, "大目标", 500)
+    if description is None and big_goal is None:
+        raise WorkflowError("project update 至少提供 --description 或 --big-goal")
+    payload = {
+        "description": description if description is not None else current.get("description", ""),
+        "big_goal": big_goal if big_goal is not None else current.get("big_goal", ""),
+    }
+    persist([emit("project.profile_updated", branch=branch, task_id=record["task_id"], payload=payload)])
+    return payload
+
+
+def stage_command(args: argparse.Namespace) -> dict | list[dict] | str:
+    connection = database()
+    try:
+        if args.stage_command == "list":
+            items = [decode_stage(row) for row in connection.execute(
+                "SELECT * FROM stages ORDER BY sequence DESC"
+            ).fetchall()[:args.limit]]
+            if args.format == "json":
+                return items
+            lines = ["# 项目阶段", ""]
+            lines.extend(
+                f"- {item['sequence']}. `{item['stage_id']}`｜{item['title']}｜{item['status']}｜"
+                f"{item['current_step'] or '未记录当前步骤'}"
+                for item in items
+            )
+            if not items:
+                lines.append("没有阶段记录。")
+            return "\n".join(lines) + "\n"
+        if args.stage_command == "show":
+            if args.stage_id:
+                row = connection.execute("SELECT * FROM stages WHERE stage_id=?", (args.stage_id,)).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM stages WHERE status='active' ORDER BY sequence DESC LIMIT 1"
+                ).fetchone()
+            if row is None:
+                raise WorkflowError("找不到指定阶段" if args.stage_id else "当前没有 active 阶段")
+            item = decode_stage(row)
+            if args.format == "json":
+                return item
+            acceptance = "\n".join(f"- {value}" for value in item["acceptance"]) or "- 未设置"
+            evidence = "\n".join(f"- {value}" for value in item["evidence"]) or "- 无"
+            return (
+                f"# {item['title']}\n\n- ID：`{item['stage_id']}`\n- 状态：{item['status']}\n"
+                f"- 目标：{item['goal']}\n- 当前步骤：{item['current_step'] or '未设置'}\n"
+                f"- 下一步：{item['next_step'] or '未设置'}\n- 阻塞：{item['blocker'] or '无。'}\n\n"
+                f"## 验收条件\n\n{acceptance}\n\n## 总结\n\n{item['summary'] or '未设置'}\n\n"
+                f"## 证据\n\n{evidence}\n"
+            )
+    finally:
+        connection.close()
+
+    record, branch = stable_write_context()
+    connection = database()
+    try:
+        if args.stage_command == "start":
+            if not STAGE_ID_RE.fullmatch(args.stage_id):
+                raise WorkflowError("stage_id 只能使用小写字母、数字和连字符")
+            if connection.execute("SELECT 1 FROM stages WHERE stage_id=?", (args.stage_id,)).fetchone():
+                raise WorkflowError(f"阶段已存在: {args.stage_id}")
+            existing = active_stage(connection)
+            if existing:
+                raise WorkflowError(f"已有 active 阶段: {existing['stage_id']}")
+            title = clean_text(args.title, "阶段标题", 100)
+            goal = clean_text(args.goal, "阶段目标", 500)
+            acceptance = [clean_text(item, "验收条件", 1000) for item in args.acceptance]
+            sequence = connection.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM stages").fetchone()[0]
+            payload = {"stage_id": args.stage_id, "sequence": sequence, "title": title,
+                       "goal": goal, "acceptance": acceptance}
+            persist([emit("stage.started", branch=branch, task_id=record["task_id"], payload=payload)])
+            return payload | {"status": "active"}
+
+        row = connection.execute("SELECT * FROM stages WHERE stage_id=?", (args.stage_id,)).fetchone()
+        if row is None:
+            raise WorkflowError(f"找不到阶段: {args.stage_id}")
+        stage = decode_stage(row)
+        if stage["status"] in {"completed", "cancelled"}:
+            raise WorkflowError(f"{stage['status']} 阶段不能再更新")
+        fields = {
+            "summary": clean_text(args.summary, "阶段总结", 2000),
+            "current_step": clean_text(args.current_step, "当前步骤", 500),
+            "next_step": clean_text(args.next_step, "下一步", 500),
+            "blocker": clean_text(args.blocker, "阶段阻塞", 500),
+        }
+        evidence = [clean_text(item, "阶段证据", 1000) for item in (args.evidence or [])]
+        requested = {key: value for key, value in fields.items() if value is not None}
+        if evidence:
+            requested["evidence"] = evidence
+        status = args.status
+        if status is None and not requested:
+            raise WorkflowError("stage update 至少提供一个更新字段或 --status")
+        if status == "active" and stage["status"] != "paused":
+            raise WorkflowError("只有 paused 阶段可以恢复为 active")
+        if status == "active":
+            other = active_stage(connection)
+            if other and other["stage_id"] != stage["stage_id"]:
+                raise WorkflowError(f"已有 active 阶段: {other['stage_id']}")
+        final_summary = requested.get("summary", stage["summary"])
+        final_evidence = [*stage["evidence"], *evidence]
+        if status == "completed":
+            projected = read_model().attempts_across_branches()
+            local_attempts = [dict(item) for item in connection.execute(
+                "SELECT stage_id, branch, state FROM attempts"
+            ).fetchall()]
+            by_branch = {item["branch"]: item for item in [*projected, *local_attempts]}
+            active_branches = sorted(
+                item["branch"] for item in by_branch.values()
+                if item.get("stage_id") == stage["stage_id"] and item.get("state") == "active"
+            )
+            if active_branches:
+                raise WorkflowError("阶段仍有 active 探索: " + ", ".join(active_branches))
+            if not final_summary or not final_evidence:
+                raise WorkflowError("completed 阶段必须填写总结并至少记录一项证据")
+        events = []
+        if requested:
+            events.append(emit("stage.updated", branch=branch, task_id=record["task_id"],
+                               payload={"stage_id": stage["stage_id"], **requested}))
+        if status is not None and status != stage["status"]:
+            events.append(emit("stage.state_changed", branch=branch, task_id=record["task_id"],
+                               payload={"stage_id": stage["stage_id"], "status": status}))
+        if not events:
+            raise WorkflowError("阶段内容和状态均未变化")
+        persist(events)
+        return {"stage_id": stage["stage_id"], **requested,
+                "status": status or stage["status"]}
+    finally:
+        connection.close()
+
+
 def start_task(args: argparse.Namespace) -> dict:
     check_repository(raise_on_error=True)
     if active_row() is not None:
@@ -507,9 +700,15 @@ def start_task(args: argparse.Namespace) -> dict:
     }
     events = [emit("task.started", branch=branch, task_id=args.task_id, payload=record["declaration"])]
     if classification["kind"] == "exploration" and created_branch:
+        connection = database()
+        try:
+            linked_stage = active_stage(connection)
+        finally:
+            connection.close()
         events.append(emit("attempt.started", branch=branch, task_id=args.task_id, payload={
             "attempt_id": args.task_id, "track": classification["track"], "topic": classification["topic"],
             "base_commit": base_head, "goal": args.scope, "acceptance": args.acceptance,
+            "stage_id": linked_stage["stage_id"] if linked_stage else None,
         }))
     try:
         save_active(record)
@@ -595,10 +794,18 @@ def attempt_update(args: argparse.Namespace) -> dict:
     attempt = get_attempt(branch)
     if not attempt:
         raise WorkflowError("当前活动任务不属于探索尝试")
-    if args.hypothesis is None and args.conclusion is None and not args.evidence:
+    if (args.hypothesis is None and args.conclusion is None and not args.evidence
+            and args.current_step is None and args.progress is None and args.next_step is None):
         raise WorkflowError("attempt update 至少提供一个更新字段")
-    payload = {"attempt_id": attempt["attempt_id"], "hypothesis": args.hypothesis,
-               "conclusion": args.conclusion, "evidence": args.evidence or []}
+    payload = {
+        "attempt_id": attempt["attempt_id"],
+        "hypothesis": clean_text(args.hypothesis, "探索假设", 2000),
+        "conclusion": clean_text(args.conclusion, "探索结论", 2000),
+        "evidence": [clean_text(item, "探索证据", 1000) for item in (args.evidence or [])],
+        "current_step": clean_text(args.current_step, "探索当前步骤", 500),
+        "progress": clean_text(args.progress, "探索进展", 2000),
+        "next_step": clean_text(args.next_step, "探索下一步", 500),
+    }
     persist([emit("attempt.updated", branch=branch, task_id=record["task_id"], payload=payload)])
     return get_attempt(branch) or {}
 
@@ -824,9 +1031,19 @@ def context_data(branch: str | None = None) -> dict:
 
 def markdown_context(data: dict) -> str:
     state = data.get("overview_state") or data.get("state") or {}
+    profile = data.get("project_profile") or {}
+    stage = data.get("current_stage") or {}
     lines = ["# 动态维护上下文", "", f"- 当前分支：`{data['branch']}`",
              f"- 当前状态：{state.get('status', '未设置')}", f"- 主目标版本：{state.get('main_goal_version', '未设置')}",
-             "", "## 当前主目标", "", state.get("goal") or "未设置", "", "## 当前判决", "",
+             "", "## 项目资料", "", f"- 项目描述：{profile.get('description') or '未设置'}",
+             f"- 大目标：{profile.get('big_goal') or '未设置'}",
+             "", "## 当前大阶段", "", f"- 阶段：{stage.get('title') or '未设置'}",
+             f"- 阶段目标：{stage.get('goal') or '未设置'}",
+             f"- 阶段进展：{stage.get('summary') or '未设置'}",
+             f"- 当前步骤：{stage.get('current_step') or '未设置'}",
+             f"- 下一步：{stage.get('next_step') or '未设置'}",
+             f"- 阶段阻塞：{stage.get('blocker') or '无。'}",
+             "", "## 当前工作目标", "", state.get("goal") or "未设置", "", "## 当前判决", "",
              state.get("judgment") or "未设置", "", "## 工作断点", "", state.get("breakpoint") or "未设置",
              "", "## 真实断点", "", git_state_summary(data.get("git_state") or {}),
              "", "## 接下来三步", ""]
@@ -834,7 +1051,15 @@ def markdown_context(data: dict) -> str:
         lines.append(f"{index}. {item}")
     if not state.get("next_steps"):
         lines.append("无。")
-    lines += ["", "## 当前阻塞", "", state.get("blocker") or "无。", "", "## 最近交接", ""]
+    lines += ["", "## 当前阻塞", "", state.get("blocker") or "无。", "", "## 当前探索", ""]
+    for attempt in data.get("active_attempts") or []:
+        lines.append(
+            f"- `{attempt['branch']}`｜当前：{attempt.get('current_step') or '未设置'}｜"
+            f"下一步：{attempt.get('next_step') or '未设置'}｜阶段：{attempt.get('stage_id') or '未归属阶段'}"
+        )
+    if not data.get("active_attempts"):
+        lines.append("无。")
+    lines += ["", "## 最近交接", ""]
     for item in data["recent_handoffs"]:
         lines.append(f"- {item['occurred_at']}｜{item['task']}｜{item['result']}｜主目标：{item['main_goal_change']}")
     if not data["recent_handoffs"]:
@@ -1166,6 +1391,34 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard = sub.add_parser("dashboard", help="打开只读 SQLite 维护数据窗口")
     dashboard.add_argument("--refresh-seconds", type=non_negative_float, default=3.0)
     dashboard.add_argument("--branch")
+    project = sub.add_parser("project")
+    project_sub = project.add_subparsers(dest="project_command", required=True)
+    project_show = project_sub.add_parser("show")
+    project_show.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    project_update = project_sub.add_parser("update")
+    project_update.add_argument("--description")
+    project_update.add_argument("--big-goal")
+    stage = sub.add_parser("stage")
+    stage_sub = stage.add_subparsers(dest="stage_command", required=True)
+    stage_list = stage_sub.add_parser("list")
+    stage_list.add_argument("--limit", type=int, default=20)
+    stage_list.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    stage_show = stage_sub.add_parser("show")
+    stage_show.add_argument("stage_id", nargs="?")
+    stage_show.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    stage_start = stage_sub.add_parser("start")
+    stage_start.add_argument("stage_id")
+    stage_start.add_argument("--title", required=True)
+    stage_start.add_argument("--goal", required=True)
+    stage_start.add_argument("--acceptance", action="append", required=True)
+    stage_update = stage_sub.add_parser("update")
+    stage_update.add_argument("stage_id")
+    stage_update.add_argument("--summary")
+    stage_update.add_argument("--current-step")
+    stage_update.add_argument("--next-step")
+    stage_update.add_argument("--blocker")
+    stage_update.add_argument("--evidence", action="append")
+    stage_update.add_argument("--status", choices=("active", "completed", "paused", "cancelled"))
     state = sub.add_parser("state")
     state_sub = state.add_subparsers(dest="state_command", required=True)
     state_update_parser = state_sub.add_parser("update")
@@ -1185,6 +1438,9 @@ def build_parser() -> argparse.ArgumentParser:
     attempt_update_parser.add_argument("--hypothesis")
     attempt_update_parser.add_argument("--evidence", action="append")
     attempt_update_parser.add_argument("--conclusion")
+    attempt_update_parser.add_argument("--current-step")
+    attempt_update_parser.add_argument("--progress")
+    attempt_update_parser.add_argument("--next-step")
     for name in ("history", "decisions", "explorations"):
         query = sub.add_parser(name)
         query.add_argument("--limit", type=int, default=20)
@@ -1276,6 +1532,8 @@ def main(argv: list[str] | None = None) -> int:
             launch_dashboard(provider, args.refresh_seconds)
             output = {"status": "closed"}
         elif args.command == "state": output = state_update(args)
+        elif args.command == "project": output = project_command(args)
+        elif args.command == "stage": output = stage_command(args)
         elif args.command == "decision": output = decision_add(args)
         elif args.command == "attempt": output = get_attempt(current_branch()) if args.attempt_command == "show" else attempt_update(args)
         elif args.command in {"history", "decisions", "explorations"}:

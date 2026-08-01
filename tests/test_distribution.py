@@ -58,7 +58,7 @@ class DistributionTests(unittest.TestCase):
         manifest = {
             "version": CURRENT_VERSION,
             "launcher_min_version": "1.0.0",
-            "event_schema": {"minimum": 1, "maximum": 2},
+            "event_schema": {"minimum": 1, "maximum": 3},
             "windows_exe": {
                 "file": windows_exe.name,
                 "url": windows_exe.as_uri(),
