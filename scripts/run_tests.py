@@ -18,9 +18,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-MODULES = ("tests.test_diagnostics", "tests.test_project_hooks", "tests.test_distribution")
+MODULES = (
+    "tests.test_diagnostics", "tests.test_workflow_actions",
+    "tests.test_workbench", "tests.test_project_hooks", "tests.test_distribution",
+)
 FAST_CLASSES = (
     "tests.test_diagnostics.DiagnosticsTests",
+    "tests.test_workflow_actions.WorkflowActionTests",
+    "tests.test_workflow_actions.DashboardActionWidgetTests",
+    "tests.test_workbench.ExternalWorkbenchTests",
     "tests.test_project_hooks.DashboardPresentationTests",
 )
 CORE_SMOKE = (
@@ -148,6 +154,72 @@ def validate_release_tag(application_version: str, tag: str | None = None) -> No
         raise RuntimeError(f"release tag/version mismatch: tag={tag}, application={application_version}")
 
 
+def visible_window_title(process_id: int) -> str | None:
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.windll.kernel32
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    parent_by_pid: dict[int, int] = {}
+    entry = ProcessEntry()
+    entry.dwSize = ctypes.sizeof(ProcessEntry)
+    if snapshot not in (0, -1) and kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+        while True:
+            parent_by_pid[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                break
+        kernel32.CloseHandle(snapshot)
+    process_ids = {process_id}
+    changed = True
+    while changed:
+        changed = False
+        for child, parent in parent_by_pid.items():
+            if parent in process_ids and child not in process_ids:
+                process_ids.add(child)
+                changed = True
+
+    titles: list[str] = []
+    user32 = ctypes.windll.user32
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def collect(window, _parameter):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
+        if owner.value in process_ids and user32.IsWindowVisible(window):
+            length = user32.GetWindowTextLengthW(window)
+            if length:
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(window, buffer, length + 1)
+                titles.append(buffer.value)
+        return True
+
+    user32.EnumWindows(collect, 0)
+    return next((title for title in titles if title), None)
+
+
+def wait_for_dashboard_window(process: subprocess.Popen, timeout: float) -> tuple[str | None, float]:
+    started = time.monotonic()
+    deadline = started + timeout
+    title = None
+    while process.poll() is None and time.monotonic() < deadline:
+        title = visible_window_title(process.pid)
+        if title:
+            break
+        time.sleep(0.05)
+    return title, time.monotonic() - started
+
+
 def release_smoke() -> int:
     from project_hooks import __version__
     validate_release_tag(__version__)
@@ -177,6 +249,19 @@ def release_smoke() -> int:
         deadline = time.monotonic() + 20
         while not marker.is_file() and process.poll() is None and time.monotonic() < deadline:
             time.sleep(0.1)
+        if not marker.is_file():
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+            stdout, stderr = process.communicate(timeout=5)
+            raise RuntimeError(
+                "frozen empty-folder bootstrap failed: "
+                + (stderr or stdout).decode("utf-8", "replace")
+            )
+        if os.name == "nt":
+            title, _elapsed = wait_for_dashboard_window(process, 3.0)
+            if title != "Project Maintenance":
+                raise RuntimeError("frozen no-argument startup did not expose a Dashboard window within 3 seconds")
         if process.poll() is None:
             if os.name == "nt":
                 subprocess.run(
@@ -186,12 +271,6 @@ def release_smoke() -> int:
             else:
                 process.terminate()
             process.wait(timeout=5)
-        if not marker.is_file():
-            stdout, stderr = process.communicate(timeout=5)
-            raise RuntimeError(
-                "frozen empty-folder bootstrap failed: "
-                + (stderr or stdout).decode("utf-8", "replace")
-            )
         subprocess.run([str(copied), "check"], cwd=portable, check=True, capture_output=True)
         chinese = subprocess.run(
             [str(copied), "context", "--format", "markdown"], cwd=portable,
@@ -199,6 +278,29 @@ def release_smoke() -> int:
         ).stdout.decode("utf-8", "strict")
         if "项目" not in chinese:
             raise RuntimeError("frozen UTF-8 Chinese output smoke failed")
+        dashboard = subprocess.Popen(
+            [str(copied), "dashboard", "--refresh-seconds", "0"], cwd=portable,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        title, elapsed = wait_for_dashboard_window(dashboard, 2.0)
+        if dashboard.poll() is not None:
+            stdout, stderr = dashboard.communicate(timeout=5)
+            raise RuntimeError(
+                "frozen operational Dashboard exited early: "
+                + (stderr or stdout).decode("utf-8", "replace")
+            )
+        if os.name == "nt" and title != "Project Maintenance":
+            raise RuntimeError(
+                f"frozen Dashboard had no visible window after {elapsed:.2f}s"
+            )
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(dashboard.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            )
+        else:
+            dashboard.terminate()
+        dashboard.wait(timeout=5)
     return 0
 
 

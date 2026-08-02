@@ -50,14 +50,17 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - 所有命令使用仓库根目录的 `.\\project-hooks.exe`。
 - 新 clone 或 worktree 首次使用时，将 `project-hooks.exe` 放到仓库根目录并运行 `.\\project-hooks.exe install`。
 - 每次任务先运行 `.\\project-hooks.exe context --format markdown`，按 `core_read_order` 阅读规范，首次写入前运行 `start`。
-- 稳定维护只在 `main` 使用 `--track stable`；研究和实验使用独立探索分支。
+- 用户只需用自然语言描述任务；AI 提取目标、验收和证据，任务 ID、时间、分支、状态令牌和安全默认值由工作流代码处理。
+- 稳定维护只在 `main` 使用 `--track stable`；研究和实验使用独立探索分支；无法可靠判断轨道时必须在对话中询问用户。
 - 使用 `state update`、`decision add` 和 `attempt update` 保存进展，最后必须运行 `end`。
 - 项目资料和大阶段只通过 `project update` 与 `stage` 指令记录；探索进度使用 `attempt update` 的结构化步骤字段。
 - 科研资料文件只放在 `resources/` 的七个标准子目录，并通过 `catalog` 指令登记；`check` 必须保持通过。
+- 外置软件、Skill 和仓库提醒通过 `workbench external` 结构化登记；不得保存凭据或绝对路径，也不得仅因登记而自动启动或联网检查工具。
 - 只有 `validated` 尝试可准备 Squash PR；推送和合并必须由用户明确确认。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态或绕过 `end`。
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
 - 遇到故障时使用 `diagnostics status/export` 生成脱敏本地诊断；程序不自动上传数据。
+- Dashboard 只读展示任务、阶段、动作可用性和阻塞原因；搜索集中在搜索页，诊断页展示故障与导出覆盖，解释页说明中英文状态；工作台区分内置提示词和外置工具。生命周期与外置工具写入由 AI 调用结构化服务，高风险动作必须在对话中取得用户确认。
 <!-- project-maintenance-hooks:end -->"""
 
 GITIGNORE_BLOCK = """# project-maintenance-hooks:begin
@@ -101,7 +104,9 @@ MAINTENANCE_README = """# 项目维护规范
 项目说明和长期大目标通过 `.\\project-hooks.exe project update` 记录。全项目同一时间最多
 一个 active 大阶段，使用 `stage start` 和 `stage update` 推进。探索分支自动关联创建时的
 当前阶段，并通过 `attempt update --current-step ... --progress ... --next-step ...` 保存进度。
-Dashboard 对业务数据只读显示分区概览和“阶段”页，不直接写入维护数据；仅在用户明确操作时导出脱敏诊断 ZIP。
+Dashboard 是只读观察台：“工作流”页合并当前任务、当前阶段、探索、动作可用性和历史记录，
+顶部近实时显示当前周期、文件变化、进度、写锁和阻塞原因。用户只需在 AI 对话中描述任务，
+AI 按受管理规则调用结构化服务；搜索集中在搜索页，诊断页显示故障、导出覆盖和清理回执，解释页说明中英文状态；工作台按内置与外置折叠展示。Dashboard 不执行业务写入、push、创建 PR、合并或发布。
 
 稳定维护只在 `main` 使用 `--track stable`。新理论、算法、实验和不确定改动使用
 `--track research|experiment|sandbox --topic <slug>`。只有 `validated` 尝试可以准备
@@ -130,6 +135,14 @@ Squash PR，合并必须等待用户明确确认。
 运行 `.\\project-hooks.exe diagnostics status` 查看本地故障摘要，运行
 `.\\project-hooks.exe diagnostics export` 导出脱敏 ZIP。诊断记录位于被 Git 忽略的
 `.project_hooks/diagnostics/`，不包含项目文件、完整事件日志、环境变量或 Git 远程地址，且不会自动上传。
+
+Dashboard 只读显示诊断状态，并对不可执行动作提前显示稳定原因代码、证据和安全下一步；用户点击后可向所选位置导出脱敏诊断 ZIP，也可由 AI 或 CLI 执行导出。
+
+诊断导出保存不含绝对路径的本地回执，以便确认每个事件是否进入诊断包。升级成功且健康检查通过后，自动清理旧版本的输入校验和普通冲突；内部异常与数据完整性问题保留待复查。用户可在诊断页确认解决后原子删除对应指纹，故障再次出现时会重新记录。
+
+## 工作台外置工具
+
+外置工具通过 `.\\project-hooks.exe workbench external add/update/pause/restore/retire` 追加审计记录，列表与详情由 `list/show` 读取。记录只包含名称、类型、用途、使用提示、参考链接或产品标识和状态；不保存凭据与绝对路径，不自动检测安装、启动程序、执行脚本或联网验证。外置工具只在 Dashboard 工作台展示，不加入日常 `context`。
 
 ## 崩溃恢复
 
@@ -510,12 +523,20 @@ def apply_project_update(root: Path, target_version: str) -> dict:
         if integrity != "ok":
             raise ProjectManagerError(f"SQLite integrity_check: {integrity}")
         validate_project(root)
+        try:
+            from .diagnostics import cleanup_after_update
+            diagnostic_cleanup = cleanup_after_update(
+                root, from_version=str(old_version or "unknown"), to_version=target_version,
+            )
+        except Exception as exc:
+            diagnostic_cleanup = {"status": "failed", "error_type": type(exc).__name__, "records": 0}
         return {
             "status": "updated",
             "project": str(root),
             "application_version": target_version,
             "changed": sorted(set(changed)),
             "conflicts": conflicts,
+            "diagnostic_cleanup": diagnostic_cleanup,
             "commit": "请检查变更后自行执行 git add、git commit 和 git push",
         }
     except Exception:

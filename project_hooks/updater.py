@@ -203,7 +203,10 @@ def run_update(
             )
     if check_only:
         return check_update(root, manifest)
-    if project_version(root) == target and __version__ == target:
+    current_build = build_identity().get("build_id")
+    latest_build = (manifest.get("build_identity") or {}).get("build_id")
+    same_build = not latest_build or current_build == latest_build
+    if project_version(root) == target and __version__ == target and same_build:
         return {
             "status": "current",
             "project": str(root),

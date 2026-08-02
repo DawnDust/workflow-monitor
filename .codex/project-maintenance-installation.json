@@ -1,11 +1,11 @@
 {
   "format": 1,
-  "application_version": "1.4.1",
+  "application_version": "1.5.0",
   "build_identity": {
-    "build_id": "26a776bcf81b28e7",
-    "source_commit": "0026bb7709b3e7bd1701ca8516d564eb12d2fd1d",
-    "source_tree": "9c041e749232aec37fcc2fe65b8a8221cd2c0a06982507781036b0ab98227dde",
-    "built_at": "2026-08-01T10:13:59+00:00",
+    "build_id": "a97868de398c5b9a",
+    "source_commit": "f9632a2f4ee4b472da072e26eef369051946744f",
+    "source_tree": "d62a78c3de76a4eea43dc26a7d2c324b0d22eb496e9db2d6900aad5f69482744",
+    "built_at": "2026-08-02T11:16:12+00:00",
     "dirty": true,
     "mode": "frozen"
   },

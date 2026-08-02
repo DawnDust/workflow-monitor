@@ -8,6 +8,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from copy import deepcopy
 from datetime import datetime
@@ -24,6 +26,8 @@ from project_hooks.dashboard import (
     DashboardApp,
     DashboardController,
     DashboardError,
+    DiagnosticsPage,
+    ExplanationPage,
     PRIMARY_TABS,
     RESEARCH_PROMPT_TEMPLATES,
     SOFTWARE_PROMPT_TEMPLATES,
@@ -31,7 +35,6 @@ from project_hooks.dashboard import (
     WORKBENCH_PROMPT_CATEGORIES,
     WORKBENCH_PROMPT_TEMPLATES,
     ResearchWorkbenchPage,
-    RecordsPage,
     TablePage,
     AdvancedWindow,
     active_task_warning,
@@ -40,6 +43,8 @@ from project_hooks.dashboard import (
     catalog_overview_text,
     copy_research_prompt,
     dashboard_presets,
+    delivery_status,
+    delivery_status_text,
     filter_records,
     global_search,
     launch_dashboard,
@@ -692,6 +697,44 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertIn("active 探索", blocked.stderr)
         self.update_state("stage remains active")
         self.end(blocker_id)
+
+    def test_external_workbench_cli_is_event_backed_and_not_in_context(self) -> None:
+        task_id = "20260802_external_tools_001"
+        self.start(task_id, "--track", "stable")
+        added = json.loads(self.hooks(
+            "workbench", "external", "add", "obsidian",
+            "--name", "Obsidian", "--kind", "notes",
+            "--purpose", "管理笔记", "--usage-hint", "整理研究笔记",
+            "--reference", "Obsidian",
+        ).stdout)
+        self.assertEqual(added["status"], "active")
+        self.hooks(
+            "workbench", "external", "update", "obsidian",
+            "--purpose", "管理科研笔记",
+        )
+        self.hooks("workbench", "external", "pause", "obsidian", "--note", "暂不使用")
+        paused = json.loads(self.hooks(
+            "workbench", "external", "show", "obsidian", "--format", "json",
+        ).stdout)
+        self.assertEqual(paused["status"], "paused")
+        self.assertEqual(paused["purpose"], "管理科研笔记")
+        self.hooks("workbench", "external", "restore", "obsidian")
+        listed = json.loads(self.hooks(
+            "workbench", "external", "list", "--format", "json",
+        ).stdout)
+        self.assertEqual(listed[0]["status"], "active")
+        context = json.loads(self.hooks("context", "--format", "json").stdout)
+        self.assertNotIn("external_tools", context)
+        self.assertNotIn("Obsidian", json.dumps(context, ensure_ascii=False))
+        events = load_events(self.root / "maintenance/events.jsonl")
+        self.assertTrue(any(item["event_type"] == "workbench.external_upserted" for item in events))
+        connection = sqlite3.connect(self.root / ".project_hooks/maintenance.sqlite3")
+        try:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+        finally:
+            connection.close()
+        self.update_state("external tools recorded")
+        self.end(task_id)
 
     def test_stage_validation_and_legacy_projects_do_not_infer_profile(self) -> None:
         context = MaintenanceReadModel(
@@ -1505,10 +1548,58 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertIn("当前判决：不应出现在默认概览", text)
         self.assertIn("工作断点：不应出现在默认概览", text)
         self.assertGreaterEqual(text.count("─" * 32), 4)
-        dashboard_text = DashboardApp.overview_text({"context": context, "catalog_items": []})
-        self.assertTrue(dashboard_text.startswith(text.rstrip()))
+        dashboard_text = DashboardApp.overview_text({
+            "branch": "main", "health": {"status": "passed"},
+            "context": context, "catalog_items": [],
+        }, {
+            "application_version": "1.5.0", "dirty_paths": ["a.py"],
+            "changed_paths": ["a.py"], "active_task": {"base_head": "1234567890"},
+            "git": context["git_state"], "build_identity": {"dirty": True},
+        })
+        self.assertIn("项目概览", dashboard_text)
+        self.assertIn("当前状态", dashboard_text)
+        self.assertIn("当前阶段：稳定维护", dashboard_text)
+        self.assertIn("活动任务：task-1", dashboard_text)
+        self.assertIn("当前判决：不应出现在默认概览", dashboard_text)
+        self.assertIn("工作断点：不应出现在默认概览", dashboard_text)
+        self.assertIn("代码交付", dashboard_text)
+        self.assertIn("工作区：有 1 个未提交变更", dashboard_text)
+        self.assertIn("正式发布：v1.5.0 候选构建，尚未正式发布", dashboard_text)
         self.assertIn("资料概览", dashboard_text)
         self.assertIn("科研资料：共 0", dashboard_text)
+        self.assertGreaterEqual(dashboard_text.count("─" * 32), 3)
+
+    def test_delivery_status_separates_worktree_commit_push_and_release(self) -> None:
+        state = {
+            "application_version": "1.5.0",
+            "dirty_paths": ["a.py", "b.py"], "changed_paths": ["a.py"],
+            "active_task": {"base_head": "abc12345"},
+            "git": {
+                "head": "abc12345", "relation": "synced", "upstream_ref": "origin/main",
+            },
+            "build_identity": {"dirty": True},
+        }
+        value = delivery_status(state)
+        self.assertEqual(value["worktree"], "有 2 个未提交变更")
+        self.assertIn("尚未提交当前修改", value["commit"])
+        self.assertIn("origin/main", value["push"])
+        self.assertIn("候选构建", value["release"])
+
+        committed = delivery_status({
+            **state, "dirty_paths": [], "changed_paths": [],
+            "git": {"head": "def67890", "relation": "ahead", "ahead": 2},
+            "build_identity": {"dirty": False},
+        })
+        self.assertEqual(committed["commit"], "已提交到 def67890")
+        self.assertEqual(committed["push"], "待推送 2 个提交")
+        self.assertIn("尚未联网核对", committed["release"])
+        verified = delivery_status({
+            **state, "dirty_paths": [], "build_identity": {"dirty": False},
+        }, {"status": "current", "latest_version": "1.5.0"})
+        self.assertEqual(verified["release"], "已核对正式发布 v1.5.0")
+        self.assertIn("工作区：干净", delivery_status_text({
+            **state, "dirty_paths": [], "build_identity": {"dirty": False},
+        }))
 
     def test_publication_classifiers_are_conservative(self) -> None:
         self.assertTrue(is_publication_step("提交已验证改动"))
@@ -1571,8 +1662,8 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertEqual(presets["negative"], ["negative"])
         self.assertEqual(set(presets), {"recent", "negative"})
 
-    def test_seven_primary_tabs_and_normalized_records(self) -> None:
-        self.assertEqual(PRIMARY_TABS, ("概览", "搜索", "资料", "工作台", "任务", "阶段", "记录"))
+    def test_primary_tabs_and_normalized_records(self) -> None:
+        self.assertEqual(PRIMARY_TABS, ("工作流", "概览", "搜索", "资料", "工作台", "诊断", "解释"))
         records = normalize_records(
             [{"event_id": "d1", "occurred_at": "2026-07-23 10:00:00", "branch": "main",
               "decision": "keep five pages", "decision_id": "D-1", "task_id": "task-1"}],
@@ -1609,18 +1700,21 @@ class DashboardPresentationTests(unittest.TestCase):
             "task_id": "task-old", "occurred_at": "2026-07-22 10:00:00",
         }]))
 
-    def test_search_catalog_and_records_use_horizontal_detail_without_changing_advanced_view(self) -> None:
+    def test_search_catalog_and_workflow_use_horizontal_detail_without_changing_advanced_view(self) -> None:
         table_source = inspect.getsource(TablePage)
         self.assertIn("split_detail: bool = False", table_source)
         self.assertIn("Panedwindow", table_source)
         self.assertIn('orient="horizontal"', table_source)
-        self.assertIn("split_detail=True", inspect.getsource(CatalogPage))
         catalog_source = inspect.getsource(CatalogPage)
-        self.assertIn("资源目录", catalog_source)
+        self.assertIn("Panedwindow", catalog_source)
+        self.assertIn("Treeview", catalog_source)
+        self.assertIn("<<TreeviewOpen>>", catalog_source)
+        self.assertIn("_populate_directory", catalog_source)
+        self.assertNotIn("TablePage(", catalog_source)
+        self.assertIn("资料目录 / 索引", catalog_source)
         self.assertIn("open_resource_directory", catalog_source)
         self.assertNotIn("复制 Codex 扫描提示词", catalog_source)
         self.assertNotIn("text=\"标签\"", catalog_source)
-        self.assertIn("split_detail=True", inspect.getsource(RecordsPage))
         self.assertIn("split_detail=True", inspect.getsource(DashboardApp))
         self.assertNotIn("split_detail=True", inspect.getsource(AdvancedWindow))
 
@@ -1751,136 +1845,125 @@ class DashboardPresentationTests(unittest.TestCase):
         source = inspect.getsource(DashboardApp.check_for_updates)
         self.assertIn("threading.Thread", source)
         self.assertIn('state="disabled"', source)
-        self.assertIn("self.root.after", source)
+        self.assertIn("self.post_ui", source)
+        self.assertNotIn("self.root.after", source)
+
+    def test_dashboard_boot_is_readonly_background_and_combines_workflow_pages(self) -> None:
+        init_source = inspect.getsource(DashboardApp.__init__)
+        self.assertIn("WorkflowPage", init_source)
+        self.assertIn("ExplanationPage", init_source)
+        self.assertIn("DiagnosticsPage", init_source)
+        self.assertNotIn("RecordsPage", init_source)
+        self.assertNotIn("ActionCenterPage", init_source)
+        self.assertNotIn("TaskPage", init_source)
+        self.assertNotIn("StagePage", init_source)
+        self.assertNotIn("provider.version_info()", init_source)
+        self.assertIn("request_refresh", init_source)
+        self.assertIn("search_controls", init_source)
+        self.assertIn("self.search_frame", init_source)
+        self.assertNotIn("search_toolbar", init_source)
+        self.assertNotIn("快捷筛选", init_source)
+        self.assertNotIn('ttk.Button(toolbar, text="导出诊断包"', init_source)
+        update_source = inspect.getsource(DashboardApp.check_for_updates)
+        self.assertNotIn("self.apply_update", update_source)
+
+    def test_explanation_page_covers_all_user_facing_state_families(self) -> None:
+        sections = {name: items for name, items in ExplanationPage.SECTIONS}
+        self.assertEqual(set(sections), {
+            "工作流 Workflow", "任务 Task", "动作 Action", "阶段 Stage",
+            "探索 Exploration", "决策 Decision", "资料 Resource", "诊断 Diagnostics",
+            "外置工具 External tool", "Git 与发布 Git / Release",
+        })
+        action_codes = {item[0] for item in sections["动作 Action"]}
+        self.assertEqual(action_codes, {"available", "needs_input", "running", "blocked"})
+        exploration_codes = {item[0] for item in sections["探索 Exploration"]}
+        self.assertEqual(exploration_codes, {"active", "validated", "negative", "inconclusive", "paused"})
+        resource_codes = {item[0] for item in sections["资料 Resource"]}
+        self.assertTrue({"active", "missing", "archived", "ok", "attention"}.issubset(resource_codes))
+        for items in sections.values():
+            for code, meaning, implication, next_step in items:
+                self.assertTrue(all((code, meaning, implication, next_step)))
+
+    def test_diagnostic_export_is_user_triggered_and_not_automatically_uploaded(self) -> None:
+        source = inspect.getsource(DashboardApp.export_diagnostic_bundle)
+        self.assertIn("asksaveasfilename", source)
+        self.assertIn('initialdir=str(export_folder)', source)
+        self.assertIn("export_bundle", source)
+        self.assertNotIn("请让 AI 执行", source)
+        self.assertNotIn("open_dashboard_bug", source)
+
+    def test_dashboard_section_revisions_skip_unchanged_redraws(self) -> None:
+        app = object.__new__(DashboardApp)
+        app.section_revisions = {}
+        self.assertTrue(app._section_changed("tasks", {"a": 1}))
+        self.assertFalse(app._section_changed("tasks", {"a": 1}))
+        self.assertTrue(app._section_changed("tasks", {"a": 2}))
+
+    def test_dashboard_refresh_requests_are_single_flight(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        callbacks = []
+        calls = []
+
+        class Service:
+            def availability_matrix(self, **_kwargs):
+                calls.append("matrix")
+                entered.set()
+                release.wait(2)
+                return SimpleNamespace(state_token="token", state={})
+
+        class Provider:
+            action_service = Service()
+
+            @staticmethod
+            def load():
+                calls.append("load")
+                return {"health": {"rebuilt": False}}
+
+            @staticmethod
+            def version_info():
+                return {"application_version": "1.5.0"}
+
+        app = object.__new__(DashboardApp)
+        app.provider = Provider()
+        app.snapshot = None
+        app.refresh_running = False
+        app.refresh_pending = False
+        app.refresh_force_full = False
+        app.last_full_state_token = None
+        app.post_ui = callbacks.append
+        app.request_refresh(force_full=True)
+        self.assertTrue(entered.wait(1))
+        app.request_refresh(force_full=True)
+        self.assertEqual(calls.count("matrix"), 1)
+        self.assertTrue(app.refresh_pending)
+        release.set()
+        deadline = time.monotonic() + 2
+        while not callbacks and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(len(callbacks), 1)
 
     def test_research_workbench_uses_split_list_and_selection_does_not_copy(self) -> None:
         source = inspect.getsource(ResearchWorkbenchPage)
         self.assertIn("Panedwindow", source)
         self.assertIn("Treeview", source)
-        self.assertIn("Combobox", source)
-        self.assertIn('state="readonly"', source)
-        self.assertIn("WORKBENCH_PROMPT_CATEGORIES", source)
-        self.assertIn('"category", "label"', source)
+        self.assertNotIn("Combobox", source)
+        self.assertNotIn("筛选提示词", source)
+        self.assertIn('iid="workbench-builtin"', source)
+        self.assertIn('iid="workbench-external"', source)
+        self.assertIn("set_external_tools", source)
+        self.assertIn('self.copy_button.configure(state="disabled")', source)
+        self.assertIn("不检测安装、不启动程序、不执行脚本，也不联网验证", source)
         self.assertNotIn("LabelFrame", source)
 
-        class Tree:
-            def __init__(self):
-                self.selected = ("prompt-0",)
-
-            def selection(self):
-                return self.selected
-
-        class Preview:
-            def __init__(self):
-                self.value = ""
-
-            def delete(self, *_args):
-                self.value = ""
-
-            def insert(self, _index, value):
-                self.value = value
-
-            def get(self, *_args):
-                return self.value
-
-        class Frame:
-            def __init__(self):
-                self.copies = 0
-                self.value = ""
-
-            def clipboard_clear(self):
-                self.copies += 1
-                self.value = ""
-
-            def clipboard_append(self, value):
-                self.value += value
-
-        page = ResearchWorkbenchPage.__new__(ResearchWorkbenchPage)
-        page.visible = research_prompt_records()
-        page.current_template_id = None
-        page.tree = Tree()
-        page.preview = Preview()
-        page.frame = Frame()
-        page.notify = lambda _message: None
-        page.select_from_tree()
-        self.assertEqual(page.current_template_id, "literature_review")
-        self.assertIn("文献精读", page.preview.value)
-        self.assertEqual(page.frame.copies, 0)
-
-        original = deepcopy(RESEARCH_PROMPT_TEMPLATES)
-        page.preview.value = "临时编辑"
-        page.tree.selected = ("prompt-1",)
-        page.select_from_tree()
-        self.assertEqual(page.current_template_id, "literature_comparison")
-        self.assertEqual(page.preview.value, build_research_prompt("literature_comparison"))
-        self.assertEqual(RESEARCH_PROMPT_TEMPLATES, original)
-        page.copy_current()
-        self.assertEqual(page.frame.copies, 1)
-        self.assertEqual(page.frame.value, page.preview.value)
-
-    def test_research_workbench_defaults_to_first_prompt_and_handles_empty_filter(self) -> None:
-        class Query:
-            value = ""
-
-            def get(self):
-                return self.value
-
-        class Tree:
-            def __init__(self):
-                self.rows = []
-                self.selected = None
-
-            def get_children(self):
-                return tuple(row[0] for row in self.rows)
-
-            def delete(self, *_items):
-                self.rows = []
-
-            def insert(self, _parent, _where, *, iid, values):
-                self.rows.append((iid, values))
-
-            def selection_set(self, iid):
-                self.selected = iid
-
-            def focus(self, _iid):
-                pass
-
-            def see(self, _iid):
-                pass
-
-        class Preview:
-            def __init__(self):
-                self.value = ""
-
-            def delete(self, *_args):
-                self.value = ""
-
-            def insert(self, _index, value):
-                self.value = value
-
-        page = ResearchWorkbenchPage.__new__(ResearchWorkbenchPage)
-        page.query = Query()
-        page.category = Query()
-        page.category.value = "全部"
-        page.tree = Tree()
-        page.preview = Preview()
-        page.current_template_id = None
-        page.notify = lambda _message: None
-        page.render_list()
-        self.assertEqual(page.current_template_id, "literature_review")
-        self.assertEqual(page.tree.selected, "prompt-0")
-        self.assertEqual(page.preview.value, build_research_prompt("literature_review"))
-
-        page.query.value = ""
-        page.category.value = "软件诊断"
-        page.render_list()
-        self.assertEqual(page.current_template_id, "project_health_check")
-        self.assertEqual([row[1][0] for row in page.tree.rows], ["软件诊断", "软件诊断"])
-
-        page.query.value = "不存在的筛选词"
-        page.render_list()
-        self.assertIsNone(page.current_template_id)
-        self.assertEqual(page.preview.value, "没有匹配的提示词。")
+    def test_diagnostics_page_exposes_export_coverage_and_guarded_cleanup(self) -> None:
+        source = inspect.getsource(DiagnosticsPage)
+        self.assertIn("导出诊断包", source)
+        self.assertIn("报告 Bug", source)
+        self.assertIn("确认已解决并删除", source)
+        self.assertIn("last_export_id", source)
+        self.assertIn("askyesno", source)
+        self.assertIn("old_version_protected", source)
 
     def test_next_research_plan_is_actionable_and_does_not_auto_execute(self) -> None:
         prompt = build_research_prompt("next_research_plan")

@@ -51,13 +51,14 @@ class DistributionTests(unittest.TestCase):
     def init(self, version: str = CURRENT_VERSION) -> None:
         initialize_project(self.root, version)
 
-    def exe_release(self, *, digest_override: str | None = None) -> Path:
+    def exe_release(self, *, digest_override: str | None = None, build_id: str | None = None) -> Path:
         release = Path(self.temp.name) / "release"
         release.mkdir(exist_ok=True)
         windows_exe = release / "project-hooks.exe"
         windows_exe.write_bytes(b"test executable")
         manifest = {
             "version": CURRENT_VERSION,
+            "build_identity": {"build_id": build_id} if build_id else {},
             "launcher_min_version": "1.0.0",
             "event_schema": {"minimum": 1, "maximum": 3},
             "windows_exe": {
@@ -222,6 +223,7 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(after.startswith(before))
         self.assertIn(b"workflow.upgraded", after[len(before):])
         self.assertEqual(result["status"], "updated")
+        self.assertEqual(result["diagnostic_cleanup"]["status"], "cleaned")
         installation = json.loads((self.root / ".codex/project-maintenance-installation.json").read_text(encoding="utf-8"))
         self.assertEqual(installation["application_version"], CURRENT_VERSION)
         self.assertTrue(installation["build_identity"]["build_id"])
@@ -252,8 +254,10 @@ class DistributionTests(unittest.TestCase):
         journal = self.root / "maintenance/events.jsonl"
         journal.write_text("{broken\n", encoding="utf-8")
         self.commit("corrupt fixture")
-        with self.assertRaises(Exception):
-            apply_project_update(self.root, CURRENT_VERSION)
+        with patch("project_hooks.diagnostics.cleanup_after_update") as cleanup:
+            with self.assertRaises(Exception):
+                apply_project_update(self.root, CURRENT_VERSION)
+            cleanup.assert_not_called()
         self.assertEqual(hook.read_bytes(), before)
         self.assertEqual(journal.read_text(encoding="utf-8"), "{broken\n")
 
@@ -318,6 +322,30 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(selected.read_bytes(), b"test executable")
         self.assertTrue(selected.is_relative_to((self.root / ".project_hooks/runtime").resolve()))
         self.assertEqual(run.call_args.args[0][0], str(selected))
+
+    def test_same_version_different_build_is_reinstalled(self) -> None:
+        self.init()
+        self.commit()
+        manifest = self.exe_release(build_id="release-build")
+        migration = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=json.dumps({"status": "updated", "changed": [], "conflicts": []}),
+            stderr="",
+        )
+        real_run = subprocess.run
+
+        def run_portable(command, *args, **kwargs):
+            if str(command[0]).endswith("project-hooks.exe"):
+                return migration
+            return real_run(command, *args, **kwargs)
+
+        with patch("project_hooks.updater.build_identity", return_value={"build_id": "local-build"}):
+            with patch("project_hooks.updater.is_frozen", return_value=True):
+                with patch("project_hooks.updater.subprocess.run", side_effect=run_portable) as run:
+                    result = run_update(self.root, manifest_url=manifest.as_uri())
+        self.assertEqual(result["status"], "updated")
+        self.assertTrue(run.called)
+        self.assertTrue((self.root / ".project_hooks/runtime/current.json").is_file())
 
     def test_non_frozen_update_refuses_to_install_executable(self) -> None:
         self.init("0.9.0")
