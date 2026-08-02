@@ -9,18 +9,22 @@ import sys
 from pathlib import Path
 
 from project_hooks import __version__
-from project_hooks.diagnostics import execution_mode, format_failure, record_failure
-from project_hooks.store import SCHEMA_VERSION
-
-from project_hooks.cli import check_repository, classify_branch, read_model, set_project_root
-from project_hooks.dashboard import DashboardDataProvider, launch_dashboard
 from project_hooks.launcher import (
     PORTABLE_ROOT_ENV,
     configure_utf8_stdio,
     is_frozen,
     run_selected_executable,
 )
-from project_hooks.project_manager import CONFIG_PATH, initialize_project
+
+
+CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
+
+
+def initialize_project(*args, **kwargs):
+    """Lazy compatibility wrapper kept patchable by distribution tests."""
+    from project_hooks.project_manager import initialize_project as implementation
+
+    return implementation(*args, **kwargs)
 
 
 class PortableBootstrapError(RuntimeError):
@@ -108,6 +112,8 @@ def prepare_portable_project(root: Path, executable: Path | None = None) -> bool
         )
     git_created = not (root / ".git").exists()
     try:
+        from project_hooks.cli import check_repository, set_project_root
+
         if git_created:
             completed = subprocess.run(
                 ["git", "init", "-b", "main"], cwd=root, text=True,
@@ -144,14 +150,68 @@ def show_error(message: str) -> None:
             pass
 
 
-def run_portable_dashboard(root: Path | None = None) -> int:
+def run_portable_dashboard(root: Path | None = None, refresh_seconds: float = 3.0) -> int:
     project = (root or portable_root()).resolve()
-    prepare_portable_project(project)
-    set_project_root(project)
-    check_repository(raise_on_error=True)
-    provider = DashboardDataProvider(read_model(), classify_branch, None)
-    launch_dashboard(provider, 3.0)
-    return 0
+    import tkinter as tk
+    from tkinter import ttk
+
+    # Map a real window before importing the larger CLI/read-model graph or
+    # performing first-run Git initialization.  Frozen one-file extraction is
+    # then the only unavoidable delay visible to the user.
+    root_window = tk.Tk()
+    root_window.title("Project Maintenance")
+    root_window.geometry("560x150")
+    root_window.minsize(460, 130)
+    ttk.Label(
+        root_window, text="Project Maintenance", font=("TkDefaultFont", 13, "bold"),
+    ).pack(anchor="w", padx=18, pady=(18, 5))
+    ttk.Label(
+        root_window, text="正在读取项目并准备只读工作流视图…",
+    ).pack(anchor="w", padx=18, pady=(0, 12))
+    root_window.update_idletasks()
+    root_window.update()
+    try:
+        prepare_portable_project(project)
+        from project_hooks.cli import (
+            check_repository, classify_branch, dashboard_action_service, read_model, set_project_root,
+        )
+        from project_hooks.dashboard import DashboardDataProvider, launch_dashboard
+
+        set_project_root(project)
+        # The Dashboard itself explains version/install/health blockers and
+        # keeps read-only diagnostics/update checks available.
+        check_repository(raise_on_error=False)
+        for child in root_window.winfo_children():
+            child.destroy()
+        provider = DashboardDataProvider(
+            read_model(), classify_branch, None,
+            action_service=dashboard_action_service(),
+        )
+        launch_dashboard(provider, refresh_seconds, root_factory=lambda: root_window)
+        return 0
+    except Exception:
+        if root_window.winfo_exists():
+            root_window.destroy()
+        raise
+
+
+def _dashboard_project(args: list[str], default: Path) -> Path:
+    """Resolve the Dashboard project without importing the full CLI graph."""
+    try:
+        index = args.index("--project")
+    except ValueError:
+        return default
+    if index + 1 >= len(args):
+        return default
+    return Path(args[index + 1]).resolve()
+
+
+def _dashboard_refresh_seconds(args: list[str]) -> float:
+    try:
+        index = args.index("--refresh-seconds")
+        return max(0.0, float(args[index + 1]))
+    except (ValueError, IndexError):
+        return 3.0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -165,6 +225,25 @@ def main(argv: list[str] | None = None) -> int:
     delegated = run_selected_executable(args, portable_root=project)
     if delegated is not None:
         return delegated
+    if args and args[0] == "dashboard":
+        # The normal CLI parser imports most of the application before command
+        # dispatch.  Route Dashboard startup here so its loading window is
+        # mapped first; Dashboard-specific options are applied by the UI's
+        # shared refresh scheduler after startup.
+        try:
+            return run_portable_dashboard(
+                _dashboard_project(args, project), _dashboard_refresh_seconds(args),
+            )
+        except Exception as exc:
+            from project_hooks.diagnostics import execution_mode, format_failure, record_failure
+            from project_hooks.store import SCHEMA_VERSION
+
+            record = record_failure(
+                project, exc, command="dashboard.startup", application_version=__version__,
+                schema_version=SCHEMA_VERSION, execution_mode=execution_mode(),
+            )
+            show_error(format_failure(record))
+            return 1
     if args:
         from project_hooks.cli import main as cli_main
 
@@ -174,6 +253,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return run_portable_dashboard(project)
     except Exception as exc:
+        from project_hooks.diagnostics import execution_mode, format_failure, record_failure
+        from project_hooks.store import SCHEMA_VERSION
+
         record = record_failure(
             project, exc, command="dashboard.startup", application_version=__version__,
             schema_version=SCHEMA_VERSION, execution_mode=execution_mode(),

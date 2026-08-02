@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import sys
+import tempfile
 import threading
 import uuid
 import webbrowser
@@ -24,6 +25,9 @@ DIAGNOSTIC_SCHEMA_VERSION = 1
 MAX_RECORDS = 500
 MAX_BYTES = 2 * 1024 * 1024
 HISTORY_FILES = 3
+LEDGER_MAX_RECORDS = 200
+PROTECTED_CATEGORIES = {"internal_error", "data_integrity"}
+AUTO_CLEAN_CATEGORIES = {"validation", "conflict"}
 ISSUE_URL = "https://github.com/DawnDust/project-maintenance-template/issues/new"
 _LOCK = threading.RLock()
 
@@ -87,6 +91,53 @@ def diagnostic_directory(project_root: Path) -> Path:
 def _record_files(directory: Path) -> list[Path]:
     return [*(directory / f"events.{index}.jsonl" for index in range(HISTORY_FILES, 0, -1)),
             directory / "events.jsonl"]
+
+
+def _ledger_path(project_root: Path) -> Path:
+    return diagnostic_directory(project_root) / "ledger.jsonl"
+
+
+def load_ledger(project_root: Path) -> list[dict]:
+    path = _ledger_path(project_root)
+    if not path.is_file():
+        return []
+    records: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return records[-LEDGER_MAX_RECORDS:]
+
+
+def _atomic_jsonl(path: Path, records: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=path.stem + "-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def append_ledger(project_root: Path, record: dict) -> None:
+    """Append a bounded, path-free receipt without affecting the primary operation."""
+    try:
+        directory = diagnostic_directory(project_root)
+        with _LOCK:
+            with event_lock(directory, timeout=1.0):
+                records = load_ledger(project_root)
+                records.append(record)
+                _atomic_jsonl(_ledger_path(project_root), records[-LEDGER_MAX_RECORDS:])
+    except Exception:
+        pass
 
 
 def _rotate_if_needed(path: Path, incoming_size: int) -> None:
@@ -202,6 +253,139 @@ def diagnostics_status(project_root: Path) -> dict:
     }
 
 
+def diagnostics_overview(project_root: Path, *, application_version: str) -> dict:
+    """Return fingerprint-grouped issues plus export and cleanup receipts for the UI."""
+    records = load_records(project_root)
+    ledger = load_ledger(project_root)
+    exported: dict[str, dict] = {}
+    resolved: set[str] = set()
+    cleanups: list[dict] = []
+    for entry in ledger:
+        kind = entry.get("type")
+        if kind == "bundle_exported":
+            for incident_id in entry.get("incident_ids") or []:
+                exported[str(incident_id)] = entry
+        elif kind == "fingerprint_resolved":
+            resolved.add(str(entry.get("fingerprint") or ""))
+        elif kind in {"records_auto_cleaned", "records_cleaned"}:
+            cleanups.append(entry)
+    grouped: dict[str, list[dict]] = {}
+    for record in records:
+        fingerprint = str(record.get("fingerprint") or record.get("incident_id") or "unknown")
+        grouped.setdefault(fingerprint, []).append(record)
+    issues: list[dict] = []
+    for fingerprint, items in grouped.items():
+        latest = items[-1]
+        incident_ids = [str(item.get("incident_id") or "") for item in items]
+        export_entries = [exported[item] for item in incident_ids if item in exported]
+        category = str(latest.get("category") or "unknown")
+        versions = sorted({str(item.get("application_version") or "unknown") for item in items})
+        current = application_version in versions
+        is_resolved = fingerprint in resolved
+        if is_resolved:
+            status = "resolved"
+        elif category in PROTECTED_CATEGORIES and not current:
+            status = "old_version_protected"
+        elif current:
+            status = "current"
+        else:
+            status = "old_version"
+        last_export = max(export_entries, key=lambda item: str(item.get("exported_at") or "")) if export_entries else None
+        issues.append({
+            "fingerprint": fingerprint,
+            "category": category,
+            "code": latest.get("code") or "PH-UNKNOWN",
+            "summary": latest.get("summary") or "未知诊断",
+            "suggestion": latest.get("suggestion") or "请检查诊断详情。",
+            "count": len(items),
+            "incident_ids": incident_ids,
+            "versions": versions,
+            "latest_at": latest.get("occurred_at"),
+            "status": status,
+            "protected": category in PROTECTED_CATEGORIES,
+            "exported": bool(export_entries),
+            "last_export_id": last_export.get("export_id") if last_export else None,
+            "last_exported_at": last_export.get("exported_at") if last_export else None,
+        })
+    issues.sort(key=lambda item: str(item.get("latest_at") or ""), reverse=True)
+    return {
+        "status": "available",
+        "records": len(records),
+        "issues": issues,
+        "cleanups": cleanups[-20:][::-1],
+        "exports": [item for item in ledger if item.get("type") == "bundle_exported"][-20:][::-1],
+        "automatic_upload": False,
+    }
+
+
+def resolve_diagnostic(
+    project_root: Path, fingerprint: str, *, reason: str, application_version: str,
+) -> dict:
+    records = [item for item in load_records(project_root) if item.get("fingerprint") == fingerprint]
+    if not records:
+        raise ValueError("没有找到该诊断指纹")
+    append_ledger(project_root, {
+        "type": "fingerprint_resolved",
+        "resolved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "application_version": application_version,
+        "fingerprint": fingerprint,
+        "reason": sanitize_text(reason, project_root=project_root)[:500],
+    })
+    return {"status": "resolved", "fingerprint": fingerprint, "records": len(records)}
+
+
+def _prune_records(project_root: Path, fingerprints: set[str], *, receipt_type: str, metadata: dict) -> dict:
+    directory = diagnostic_directory(project_root)
+    removed: list[dict] = []
+    try:
+        with _LOCK:
+            with event_lock(directory, timeout=1.0):
+                records = load_records(project_root)
+                kept = []
+                for record in records:
+                    if str(record.get("fingerprint") or "") in fingerprints:
+                        removed.append(record)
+                    else:
+                        kept.append(record)
+                for path in _record_files(directory):
+                    path.unlink(missing_ok=True)
+                if kept:
+                    _atomic_jsonl(directory / "events.jsonl", kept)
+        receipt = {
+            "type": receipt_type,
+            "cleaned_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "records": len(removed),
+            "fingerprints": sorted({str(item.get("fingerprint") or "") for item in removed}),
+            **metadata,
+        }
+        append_ledger(project_root, receipt)
+        return {"status": "cleaned", **receipt}
+    except Exception as exc:
+        return {"status": "failed", "error_type": type(exc).__name__, "records": 0, **metadata}
+
+
+def cleanup_resolved_diagnostics(project_root: Path) -> dict:
+    resolved = {
+        str(item.get("fingerprint") or "") for item in load_ledger(project_root)
+        if item.get("type") == "fingerprint_resolved"
+    }
+    return _prune_records(project_root, resolved, receipt_type="records_cleaned", metadata={})
+
+
+def cleanup_after_update(project_root: Path, *, from_version: str, to_version: str) -> dict:
+    """Best-effort graded cleanup after a fully successful project migration."""
+    fingerprints = {
+        str(record.get("fingerprint") or "")
+        for record in load_records(project_root)
+        if record.get("application_version") != to_version
+        and record.get("category") in AUTO_CLEAN_CATEGORIES
+    }
+    return _prune_records(
+        project_root, fingerprints, receipt_type="records_auto_cleaned",
+        metadata={"from_version": from_version, "to_version": to_version},
+    )
+
+
 def bug_report_url(*, incident_id: str | None = None, version: str | None = None) -> str:
     body = (
         "## 复现步骤\n\n1. \n\n## 预期结果\n\n\n## 实际结果\n\n\n"
@@ -244,11 +428,20 @@ def export_diagnostics(
     except Exception as exc:
         check_result = {"status": "failed", "summary": sanitize_text(exc, project_root=project_root)}
     latest = records[-1] if records else None
+    export_id = uuid.uuid4().hex[:12]
+    incident_ids = [str(record.get("incident_id") or "") for record in records]
+    fingerprints = sorted({str(record.get("fingerprint") or "") for record in records})
+    categories: dict[str, int] = {}
+    for record in records:
+        category = str(record.get("category") or "unknown")
+        categories[category] = categories.get(category, 0) + 1
     report = (
         "# project-hooks 脱敏诊断报告\n\n"
         f"- 导出时间：{datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
         f"- 应用版本：{application_version}\n"
+        f"- 导出批次：{export_id}\n"
         f"- 诊断记录：{len(records)}\n"
+        f"- 故障指纹：{len(fingerprints)}\n"
         f"- 最近事件编号：{latest.get('incident_id') if latest else '无'}\n"
         "- 自动上传：否\n\n"
         "此文件包不包含维护 SQLite、完整事件日志、项目文件、环境变量或 Git 远程地址。"
@@ -256,6 +449,10 @@ def export_diagnostics(
     manifest = {
         "format": "project-hooks-diagnostics",
         "schema_version": DIAGNOSTIC_SCHEMA_VERSION,
+        "export_id": export_id,
+        "incident_ids": incident_ids,
+        "fingerprints": fingerprints,
+        "categories": categories,
         "files": ["manifest.json", "report.md", "environment.json", "checks.json", "diagnostics.jsonl"],
     }
     output = output.resolve()
@@ -269,8 +466,20 @@ def export_diagnostics(
             "".join(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records),
         )
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    exported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    append_ledger(project_root, {
+        "type": "bundle_exported",
+        "export_id": export_id,
+        "exported_at": exported_at,
+        "bundle_name": sanitize_text(output.name, project_root=project_root),
+        "records": len(records),
+        "incident_ids": incident_ids,
+        "fingerprints": fingerprints,
+        "categories": categories,
+    })
     return {
         "status": "exported",
+        "export_id": export_id,
         "output": str(output),
         "records": len(records),
         "latest_incident_id": latest.get("incident_id") if latest else None,

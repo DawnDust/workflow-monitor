@@ -32,12 +32,14 @@ from .catalog import (
 )
 from .dashboard import DashboardDataProvider, DashboardError, launch_dashboard
 from .diagnostics import (
+    cleanup_resolved_diagnostics,
     diagnostics_status,
     execution_mode,
     export_diagnostics,
     format_failure,
     open_bug_report,
     record_failure,
+    resolve_diagnostic,
 )
 from . import git_ops
 from .health import active_task_errors
@@ -71,8 +73,18 @@ from .project_manager import (
     write_json,
 )
 from .resource_layout import catalog_consistency_errors, ensure_resource_directories
-from .updater import UpdateError, run_update, version_report
+from .updater import UpdateError, check_latest_update, run_update, version_report
 from .transaction import MutationLockError, mutation_lock, read_writer_lock
+from .launcher import is_frozen
+from .build_identity import build_identity
+from .workflow_actions import ActionProgress, WorkflowActionService, action_spec
+from .workbench import (
+    EXTERNAL_TOOL_KINDS,
+    WorkbenchError,
+    external_tools_from_events,
+    normalize_external_tool,
+    validate_tool_id,
+)
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -135,7 +147,7 @@ usage: project-hooks [-h] [--help-all] [--project PATH] <command> ...
   init, install, update, version, check, status, branch-status
 
 状态与记录:
-  project, stage, state, history, decisions, decision, explorations, catalog
+  project, stage, state, history, decisions, decision, explorations, catalog, workbench
 
 探索流程:
   attempt, exploration, prepare-pr, archive-attempt
@@ -233,6 +245,8 @@ def command_is_read_only(args: argparse.Namespace) -> bool:
         or (args.catalog_command == "migrate-layout" and args.dry_run)
     ):
         return True
+    if args.command == "workbench" and args.workbench_command == "external":
+        return args.external_command in {"list", "show"}
     return False
 
 
@@ -732,13 +746,16 @@ def start_task(args: argparse.Namespace) -> dict:
         include_catalog_consistency=not repairing_on_main,
     )
     created_branch = False
-    base_head = run_git(["rev-parse", "HEAD"]).stdout.strip()
+    head_result = run_git(["rev-parse", "--verify", "HEAD"], check=False)
+    base_head = head_result.stdout.strip() if head_result.returncode == 0 else None
     if classification["kind"] == "stable":
         requested_track = requested_track or "stable"
         if requested_track == "stable":
             if requested_topic:
                 raise WorkflowError("stable 任务不能使用 --topic")
         else:
+            if not base_head:
+                raise WorkflowError("首次探索前需要先完成一个 stable 周期并建立 Git 基线提交")
             if not requested_topic or not TOPIC_RE.fullmatch(requested_topic):
                 raise WorkflowError("探索 topic 只能使用小写字母、数字和连字符")
             dirty = git_dirty_paths()
@@ -767,7 +784,7 @@ def start_task(args: argparse.Namespace) -> dict:
         "declaration": {"kind": args.kind, "scope": args.scope, "out_of_scope": args.out_of_scope,
                         "acceptance": args.acceptance, "task_size": args.task_size, "git_commit": args.git_commit},
         "baseline": snapshot(),
-        "git": {"is_repo": True, "dirty_paths": git_dirty_paths(), "head": run_git(["rev-parse", "HEAD"]).stdout.strip(),
+        "git": {"is_repo": True, "dirty_paths": git_dirty_paths(), "head": base_head,
                 "branch": branch, "base_branch": branch_policy()["default_branch"], "base_head": base_head,
                 "track": classification["track"], "topic": classification["topic"]},
     }
@@ -1051,7 +1068,10 @@ def auto_commit(record: dict, paths: list[str], result: str, message: str | None
     env, temp_index = os.environ.copy(), temp_dir / "index"
     env["GIT_INDEX_FILE"] = str(temp_index)
     try:
-        run_git(["read-tree", "HEAD"], env=env)
+        if run_git(["rev-parse", "--verify", "HEAD"], check=False).returncode == 0:
+            run_git(["read-tree", "HEAD"], env=env)
+        else:
+            run_git(["read-tree", "--empty"], env=env)
         run_git(["add", "-A", "--", *commit_paths], env=env)
         staged = run_git(["diff", "--cached", "--name-only"], env=env).stdout.splitlines()
         if not staged:
@@ -1668,6 +1688,12 @@ def diagnostic_check_snapshot() -> dict:
 def diagnostics_command(args: argparse.Namespace) -> dict:
     if args.diagnostics_command == "status":
         return diagnostics_status(ROOT)
+    if args.diagnostics_command == "resolve":
+        return resolve_diagnostic(
+            ROOT, args.fingerprint, reason=args.reason, application_version=__version__,
+        )
+    if args.diagnostics_command == "cleanup":
+        return cleanup_resolved_diagnostics(ROOT)
     output = args.output or (
         ROOT / "diagnostics-export" /
         f"project-hooks-diagnostics-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
@@ -1692,6 +1718,350 @@ def diagnostics_command(args: argparse.Namespace) -> dict:
             incident_id=result.get("latest_incident_id"), version=__version__,
         )
     return result
+
+
+def external_tools() -> list[dict]:
+    return external_tools_from_events(load_events(journal_path()))
+
+
+def _external_tool_text(items: list[dict]) -> str:
+    lines = ["# 外置工作台工具", ""]
+    if not items:
+        lines.append("尚未登记外置工具。")
+    for item in items:
+        lines.append(
+            f"- `{item['tool_id']}`｜{item['name']}｜{item['kind']}｜{item['status']}｜{item['purpose']}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def workbench_command(args: argparse.Namespace) -> dict | list[dict] | str:
+    if args.workbench_command != "external":
+        raise WorkflowError("未知工作台命令")
+    items = external_tools()
+    by_id = {item["tool_id"]: item for item in items}
+    command = args.external_command
+    if command == "list":
+        return items if args.format == "json" else _external_tool_text(items)
+    tool_id = validate_tool_id(args.tool_id)
+    current = by_id.get(tool_id)
+    if command == "show":
+        if current is None:
+            raise WorkflowError("没有找到该外置工具")
+        if args.format == "json":
+            return current
+        return _external_tool_text([current])
+    record, branch = stable_write_context()
+    if command == "add":
+        if current is not None:
+            raise WorkflowError("该外置工具已经存在；请使用 update")
+        payload = normalize_external_tool({
+            "tool_id": tool_id, "name": args.name, "kind": args.kind,
+            "purpose": args.purpose, "usage_hint": args.usage_hint,
+            "reference": args.reference, "status": "active",
+        })
+        event_type = "workbench.external_upserted"
+    elif command == "update":
+        if current is None:
+            raise WorkflowError("没有找到该外置工具；请先 add")
+        supplied = {
+            key: value for key, value in {
+                "tool_id": tool_id, "name": args.name, "kind": args.kind,
+                "purpose": args.purpose, "usage_hint": args.usage_hint,
+                "reference": args.reference,
+            }.items() if value is not None
+        }
+        if set(supplied) == {"tool_id"}:
+            raise WorkflowError("update 至少提供一个要修改的字段")
+        payload = normalize_external_tool(supplied, current=current)
+        event_type = "workbench.external_upserted"
+    else:
+        if current is None:
+            raise WorkflowError("没有找到该外置工具")
+        status = {"pause": "paused", "restore": "active", "retire": "retired"}[command]
+        payload = {
+            "tool_id": tool_id,
+            "status": status,
+            "note": clean_text(args.note, "说明", 500) or "",
+        }
+        event_type = "workbench.external_status_changed"
+    persist([emit(event_type, branch=branch, task_id=record["task_id"], payload=payload)])
+    return payload
+
+
+def _next_dashboard_task_id() -> str:
+    date = datetime.now(resolve_timezone(config()["timezone"])).strftime("%Y%m%d")
+    prefix = f"{date}_dashboard_"
+    connection = database()
+    try:
+        used = {
+            str(row[0]) for row in connection.execute(
+                "SELECT DISTINCT task_id FROM events WHERE task_id LIKE ? AND task_id IS NOT NULL",
+                (prefix + "%",),
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+    for index in range(1, 1000):
+        candidate = f"{prefix}{index:03d}"
+        if candidate not in used:
+            return candidate
+    raise WorkflowError("当天的 Dashboard 自动任务编号已用尽")
+
+
+def dashboard_action_state() -> dict:
+    """Return the small mutable-state projection used by Dashboard actions."""
+    branch = current_branch()
+    classification = classify_branch(branch)
+    writer = read_writer_lock(state_dir())
+    sidecar = None
+    try:
+        sidecar = load_active_state(state_dir())
+    except ActiveTaskError as exc:
+        sidecar = {"phase": "invalid", "error": str(exc)}
+    active: dict | None = None
+    changed_paths: list[str] = []
+    worktree_snapshot: dict = {}
+    try:
+        record = read_active()
+        worktree_snapshot = snapshot()
+        changed_paths = changed(record.get("baseline", {}), worktree_snapshot)
+        active = {
+            "task_id": record["task_id"],
+            "started_at": record["started_at"],
+            "branch": record.get("git", {}).get("branch"),
+            "track": record.get("git", {}).get("track"),
+            "kind": record.get("declaration", {}).get("kind"),
+            "scope": record.get("declaration", {}).get("scope"),
+            "state_updated": bool(record.get("state_updated")),
+            "decisions_added": int(record.get("decisions_added") or 0),
+            "base_head": record.get("git", {}).get("base_head"),
+        }
+    except WorkflowError as exc:
+        if "没有活动任务" not in str(exc):
+            sidecar = sidecar or {"phase": "invalid", "error": str(exc)}
+    dirty = git_dirty_paths()
+    if not worktree_snapshot:
+        head_result = run_git(["rev-parse", "--verify", "HEAD"], check=False)
+        worktree_material = {
+            "head": head_result.stdout.strip() if head_result.returncode == 0 else None,
+            "dirty": dirty,
+        }
+    else:
+        worktree_material = {
+            path: worktree_snapshot.get(path)
+            for path in changed_paths
+        }
+    git_state = MaintenanceReadModel(
+        database_path(), journal_path(), lambda: branch,
+    ).git_state(branch_policy()["default_branch"])
+    attempt = get_attempt(branch) if classification["kind"] == "exploration" else None
+    installed = installed_project_version()
+    hook = run_git(["config", "--local", "--get", "core.hooksPath"], check=False).stdout.strip()
+    try:
+        health_errors = check_repository()
+    except Exception as exc:
+        health_errors = [str(exc)]
+    connection = database()
+    try:
+        completed_row = connection.execute(
+            "SELECT task_id, occurred_at, summary, result FROM task_archive "
+            "ORDER BY occurred_at DESC, event_id DESC LIMIT 1"
+        ).fetchone()
+        last_completed = dict(completed_row) if completed_row else None
+    finally:
+        connection.close()
+    return {
+        "application_version": __version__,
+        "build_identity": build_identity(),
+        "project_version": installed,
+        "installed": hook == TRACKED_HOOKS_DIR,
+        "frozen": is_frozen(),
+        "branch": branch,
+        "classification": classification,
+        "active_task": active,
+        "sidecar": sidecar,
+        "writer_lock": writer,
+        "changed_paths": changed_paths,
+        "dirty_paths": dirty,
+        "worktree_signature": hashlib.sha256(canonical_json(worktree_material).encode("utf-8")).hexdigest(),
+        "journal_hash": journal_hash(journal_path()),
+        "git": git_state,
+        "attempt": attempt,
+        "health_errors": health_errors,
+        "last_completed": last_completed,
+    }
+
+
+def _action_namespace(fields: dict, **defaults) -> argparse.Namespace:
+    values = {**defaults, **fields}
+    for key, value in list(values.items()):
+        if value == "":
+            values[key] = None
+    return argparse.Namespace(**values)
+
+
+def dashboard_execute_action(
+    action_id: str,
+    fields: dict,
+    progress: callable,
+) -> dict | str | list[dict]:
+    """Execute a validated action in-process through the existing workflow functions."""
+    progress(ActionProgress(action_id, "dispatch", "正在调用共享工作流服务", 35))
+    if action_id == "task.start":
+        values = dict(fields)
+        requested_task_id = values.pop("_task_id", None)
+        return start_task(_action_namespace(
+            values,
+            task_id=requested_task_id or _next_dashboard_task_id(), out_of_scope=None, topic=None,
+            task_size="small", git_commit="auto", track="stable",
+        ))
+    if action_id == "state.update":
+        return state_update(_action_namespace(
+            fields, goal=None, judgment=None, breakpoint=None, blocker=None,
+            status=None, main_goal_version=None, next=None,
+        ))
+    if action_id == "decision.add":
+        return decision_add(_action_namespace(fields, id=None))
+    if action_id == "attempt.update":
+        return attempt_update(_action_namespace(
+            fields, hypothesis=None, evidence=None, conclusion=None,
+            current_step=None, progress=None, next_step=None,
+        ))
+    if action_id == "task.finish":
+        record = read_active()
+        values = dict(fields)
+        values.pop("writer_stopped", None)
+        requested_task_id = values.pop("_task_id", None)
+        return finish_task(_action_namespace(
+            values,
+            task_id=requested_task_id or record["task_id"], evidence=None, commit_message=None,
+            attempt_state=None, goal=None, judgment=None, breakpoint=None,
+            blocker=None, status=None, main_goal_version=None, next=None,
+        ))
+    if action_id == "task.recover":
+        return task_recover(_action_namespace({}, skip_auto_commit=False, reason=None))
+    if action_id == "task.recover_skip_commit":
+        return task_recover(_action_namespace(fields, skip_auto_commit=True))
+    if action_id == "task.abandon":
+        return task_abandon(_action_namespace(fields))
+    if action_id == "project.update":
+        return project_command(_action_namespace(fields, project_command="update", description=None, big_goal=None))
+    if action_id == "stage.start":
+        return stage_command(_action_namespace(fields, stage_command="start"))
+    if action_id == "stage.update":
+        return stage_command(_action_namespace(
+            fields, stage_command="update", summary=None, current_step=None,
+            next_step=None, blocker=None, evidence=None, status=None,
+        ))
+    if action_id == "exploration.prepare_pr":
+        return prepare_pr()
+    if action_id == "exploration.archive":
+        return archive_attempt()
+    if action_id == "exploration.import":
+        return exploration_import(_action_namespace(fields))
+    catalog_defaults = {
+        "id": None, "kind": None, "title": None, "summary": None, "path": None,
+        "source": None, "tag": None, "meta": None, "status": None,
+        "clear_path": False, "clear_summary": False, "clear_source": False,
+        "clear_tags": False, "clear_metadata": False, "note": None,
+        "root": None, "dry_run": False, "name": None, "query": None,
+        "related_to": None, "all": False, "add_tag": None, "remove_tag": None,
+    }
+    catalog_names = {
+        "catalog.add": "add", "catalog.update": "update", "catalog.archive": "archive",
+        "catalog.restore": "restore", "catalog.link": "link", "catalog.unlink": "unlink",
+        "catalog.scan": "scan", "catalog.ingest": "ingest",
+        "catalog.bulk_update": "bulk-update", "catalog.migrate": "migrate-layout",
+    }
+    if action_id in catalog_names:
+        values = {**catalog_defaults, **fields, "catalog_command": catalog_names[action_id]}
+        if action_id == "catalog.update":
+            values["item_id"] = fields["item_id"]
+        return catalog_command(argparse.Namespace(**values), catalog_runtime())
+    if action_id.startswith("workbench.external."):
+        command = action_id.rsplit(".", 1)[1]
+        values = {
+            "workbench_command": "external",
+            "external_command": command,
+            "tool_id": fields.get("tool_id"),
+            "name": fields.get("name"),
+            "kind": fields.get("kind") or None,
+            "purpose": fields.get("purpose"),
+            "usage_hint": fields.get("usage_hint"),
+            "reference": fields.get("reference"),
+            "note": fields.get("note"),
+        }
+        return workbench_command(argparse.Namespace(**values))
+    if action_id == "health.check":
+        check_repository(raise_on_error=True)
+        return {"status": "passed"}
+    if action_id == "db.verify":
+        return db_command(_action_namespace({}, db_command="verify", delete_legacy=False))
+    if action_id == "db.rebuild":
+        return db_command(_action_namespace({}, db_command="rebuild", delete_legacy=False))
+    if action_id == "db.migrate":
+        return db_command(_action_namespace(fields, db_command="migrate", delete_legacy=False))
+    if action_id == "install":
+        return {"status": install_git_hook(bool(fields.get("force")))}
+    if action_id == "update.check":
+        return check_latest_update(ROOT)
+    if action_id == "update.apply":
+        return run_update(ROOT)
+    raise WorkflowError(f"未实现的 Dashboard 动作：{action_id}")
+
+
+def dashboard_action_service() -> WorkflowActionService:
+    return WorkflowActionService(
+        ROOT, state_provider=dashboard_action_state, executor=dashboard_execute_action,
+    )
+
+
+def cli_shared_action(args: argparse.Namespace) -> tuple[str, dict] | None:
+    """Map compatible CLI mutations to the same in-process action executor as Dashboard."""
+    action_id: str | None = None
+    if args.command == "start":
+        action_id = "task.start"
+    elif args.command == "end":
+        action_id = "task.finish"
+    elif args.command == "state":
+        action_id = "state.update"
+    elif args.command == "decision":
+        action_id = "decision.add"
+    elif args.command == "attempt" and args.attempt_command == "update":
+        action_id = "attempt.update"
+    elif args.command == "project" and args.project_command == "update":
+        action_id = "project.update"
+    elif args.command == "stage" and args.stage_command in {"start", "update"}:
+        action_id = f"stage.{args.stage_command}"
+    elif args.command == "task":
+        if args.task_command == "abandon":
+            action_id = "task.abandon"
+        elif args.skip_auto_commit:
+            action_id = "task.recover_skip_commit"
+        else:
+            action_id = "task.recover"
+    elif args.command == "prepare-pr":
+        action_id = "exploration.prepare_pr"
+    elif args.command == "archive-attempt":
+        action_id = "exploration.archive"
+    elif args.command == "exploration":
+        action_id = "exploration.import"
+    elif args.command == "workbench" and args.workbench_command == "external" and args.external_command not in {"list", "show"}:
+        action_id = f"workbench.external.{args.external_command}"
+    if action_id is None:
+        return None
+    names = {field.name for field in action_spec(action_id).fields}
+    fields = {
+        name: getattr(args, name)
+        for name in names
+        if hasattr(args, name) and getattr(args, name) is not None
+    }
+    if args.command in {"start", "end"}:
+        fields["_task_id"] = args.task_id
+    if action_id == "task.finish":
+        fields["writer_stopped"] = True
+    return action_id, fields
 
 
 def non_negative_float(value: str) -> float:
@@ -1761,6 +2131,10 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics_export = diagnostics_sub.add_parser("export")
     diagnostics_export.add_argument("--output", type=Path)
     diagnostics_export.add_argument("--open-issue", action="store_true")
+    diagnostics_resolve = diagnostics_sub.add_parser("resolve")
+    diagnostics_resolve.add_argument("fingerprint")
+    diagnostics_resolve.add_argument("--reason", required=True)
+    diagnostics_sub.add_parser("cleanup")
     project = sub.add_parser("project")
     project_sub = project.add_subparsers(dest="project_command", required=True)
     project_show = project_sub.add_parser("show")
@@ -1819,6 +2193,33 @@ def build_parser() -> argparse.ArgumentParser:
     exploration_sub = exploration.add_subparsers(dest="exploration_command", required=True)
     exploration_import_parser = exploration_sub.add_parser("import")
     exploration_import_parser.add_argument("archive_branch")
+    workbench = sub.add_parser("workbench")
+    workbench_sub = workbench.add_subparsers(dest="workbench_command", required=True)
+    external = workbench_sub.add_parser("external")
+    external_sub = external.add_subparsers(dest="external_command", required=True)
+    external_list = external_sub.add_parser("list")
+    external_list.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    external_show = external_sub.add_parser("show")
+    external_show.add_argument("tool_id")
+    external_show.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    external_add = external_sub.add_parser("add")
+    external_add.add_argument("tool_id")
+    external_add.add_argument("--name", required=True)
+    external_add.add_argument("--kind", required=True, choices=EXTERNAL_TOOL_KINDS)
+    external_add.add_argument("--purpose", required=True)
+    external_add.add_argument("--usage-hint")
+    external_add.add_argument("--reference")
+    external_update = external_sub.add_parser("update")
+    external_update.add_argument("tool_id")
+    external_update.add_argument("--name")
+    external_update.add_argument("--kind", choices=EXTERNAL_TOOL_KINDS)
+    external_update.add_argument("--purpose")
+    external_update.add_argument("--usage-hint")
+    external_update.add_argument("--reference")
+    for external_state in ("pause", "restore", "retire"):
+        state_parser = external_sub.add_parser(external_state)
+        state_parser.add_argument("tool_id")
+        state_parser.add_argument("--note")
     configure_catalog_parser(sub)
     db = sub.add_parser("db")
     db_sub = db.add_subparsers(dest="db_command", required=True)
@@ -1846,6 +2247,7 @@ def main(argv: list[str] | None = None) -> int:
     args: argparse.Namespace | None = None
     root: Path | None = None
     writer_context = None
+    shared_action: tuple[str, dict] | None = None
     try:
         args = build_parser().parse_args(raw_args)
         if args.command == "init":
@@ -1855,6 +2257,7 @@ def main(argv: list[str] | None = None) -> int:
         if root is not None:
             set_project_root(root)
             assert_project_version_compatible(args)
+            shared_action = cli_shared_action(args)
             if not command_is_read_only(args):
                 lock_state_dir = root / ".project_hooks" if args.command == "init" else state_dir()
                 writer_context = mutation_lock(
@@ -1876,6 +2279,10 @@ def main(argv: list[str] | None = None) -> int:
             raise WorkflowError(
                 "当前目录不在 project-hooks 科研项目中；请先运行 `.\\project-hooks.exe init .`，"
                 "或使用 `--project <path>`"
+            )
+        elif shared_action is not None:
+            output = dashboard_execute_action(
+                shared_action[0], shared_action[1], lambda _progress: None,
             )
         elif args.command == "update":
             output = run_update(
@@ -1912,7 +2319,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "context":
             data = context_data(); output = data if args.format == "json" else markdown_context(data)
         elif args.command == "dashboard":
-            provider = DashboardDataProvider(read_model(), classify_branch, args.branch)
+            provider = DashboardDataProvider(
+                read_model(), classify_branch, args.branch,
+                action_service=dashboard_action_service(),
+            )
             launch_dashboard(provider, args.refresh_seconds)
             output = {"status": "closed"}
         elif args.command == "diagnostics": output = diagnostics_command(args)
@@ -1924,6 +2334,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command in {"history", "decisions", "explorations"}:
             output = render_records(query_output(args.command, args.limit), args.format)
         elif args.command == "exploration": output = exploration_import(args)
+        elif args.command == "workbench": output = workbench_command(args)
         elif args.command == "catalog": output = catalog_command(args, catalog_runtime())
         elif args.command == "db": output = db_command(args)
         else: output = finish_task(args)
@@ -1933,7 +2344,8 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         command_parts = [str((args.command if args is not None else (raw_args[0] if raw_args else None)) or "overview")]
         for attribute in ("diagnostics_command", "db_command", "catalog_command", "project_command",
-                          "stage_command", "attempt_command", "exploration_command", "task_command"):
+                          "stage_command", "attempt_command", "exploration_command", "task_command",
+                          "workbench_command", "external_command"):
             value = getattr(args, attribute, None) if args is not None else None
             if value:
                 command_parts.append(str(value))

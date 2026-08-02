@@ -1,0 +1,472 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from project_hooks.workflow_actions import (
+    AI_FORM_SCHEMA,
+    ActionProtocolError,
+    ActionRequest,
+    WorkflowActionService,
+    ai_form_template,
+    lifecycle_step,
+    parse_ai_form,
+    state_token,
+)
+
+
+def stable_state(**updates):
+    value = {
+        "application_version": "1.5.0",
+        "project_version": "1.5.0",
+        "installed": True,
+        "frozen": True,
+        "branch": "main",
+        "classification": {"kind": "stable", "track": "stable", "topic": None},
+        "active_task": None,
+        "sidecar": None,
+        "writer_lock": None,
+        "changed_paths": [],
+        "dirty_paths": [],
+        "worktree_signature": "clean",
+        "journal_hash": "journal",
+        "git": {"available": True, "relation": "synced", "head": "abc"},
+        "attempt": None,
+        "health_errors": [],
+    }
+    value.update(updates)
+    return value
+
+
+class WorkflowActionTests(unittest.TestCase):
+    def test_slow_snapshot_cache_starts_after_provider_finishes(self) -> None:
+        calls = []
+
+        def provider():
+            calls.append(time.monotonic())
+            time.sleep(0.3)
+            return stable_state()
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = WorkflowActionService(
+                Path(directory), state_provider=provider, executor=lambda *_args: {},
+            )
+            service.snapshot(force=True)
+            service.snapshot()
+            self.assertEqual(len(calls), 1)
+
+    def test_availability_matrix_uses_one_state_read_and_reports_readonly_statuses(self) -> None:
+        calls = []
+
+        def provider():
+            calls.append(True)
+            return stable_state()
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = WorkflowActionService(
+                Path(directory), state_provider=provider, executor=lambda *_args: {},
+            )
+            matrix = service.availability_matrix(force=True)
+            self.assertEqual(len(calls), 1)
+            statuses = {item.action_id: item.status for item in matrix.actions}
+            self.assertEqual(statuses["task.start"], "needs_input")
+            self.assertEqual(statuses["state.update"], "blocked")
+            self.assertNotIn("workbench.external.add", statuses)
+            self.assertEqual(len({item.availability.state_token for item in matrix.actions}), 1)
+
+    def test_ai_template_only_allows_natural_text_fields(self) -> None:
+        template = json.loads(ai_form_template("task.finish"))
+        self.assertEqual(template["schema"], AI_FORM_SCHEMA)
+        self.assertEqual(template["action"], "task.finish")
+        self.assertIn("note", template["fields"])
+        self.assertIn("evidence", template["fields"])
+        self.assertNotIn("result", template["fields"])
+        self.assertNotIn("writer_stopped", template["fields"])
+
+        parsed = parse_ai_form(json.dumps({
+            "schema": AI_FORM_SCHEMA,
+            "action": "task.finish",
+            "fields": {"note": "完成验证", "evidence": ["96 tests"]},
+        }), "task.finish")
+        self.assertEqual(parsed["note"], "完成验证")
+        with self.assertRaisesRegex(ActionProtocolError, "不允许填写字段"):
+            parse_ai_form(json.dumps({
+                "schema": AI_FORM_SCHEMA,
+                "action": "task.finish",
+                "fields": {"result": "completed"},
+            }), "task.finish")
+
+    def test_ai_protocol_rejects_wrong_action_unknown_and_invalid_json(self) -> None:
+        with self.assertRaisesRegex(ActionProtocolError, "动作与当前表单"):
+            parse_ai_form(json.dumps({
+                "schema": AI_FORM_SCHEMA, "action": "state.update", "fields": {},
+            }), "task.finish")
+        with self.assertRaisesRegex(ActionProtocolError, "合法 JSON"):
+            parse_ai_form("not-json", "task.finish")
+
+    def test_lifecycle_step_maps_sidecar_and_progress(self) -> None:
+        self.assertEqual(lifecycle_step({})["key"], "idle")
+        self.assertEqual(lifecycle_step({"sidecar": {"phase": "starting"}})["key"], "starting")
+        self.assertEqual(lifecycle_step({"sidecar": {"phase": "finishing"}})["key"], "finishing")
+        active = {"task_id": "task", "state_updated": False}
+        self.assertEqual(lifecycle_step({"active_task": active, "changed_paths": ["a"]})["key"], "working")
+        active["state_updated"] = True
+        self.assertEqual(lifecycle_step({
+            "active_task": active, "changed_paths": ["a"], "health_errors": [], "worktree_quiet": True,
+        })["key"], "ready")
+
+    def test_availability_explains_active_branch_version_and_update_blocks(self) -> None:
+        state = stable_state()
+        with tempfile.TemporaryDirectory() as directory:
+            service = WorkflowActionService(
+                Path(directory), state_provider=lambda: dict(state),
+                executor=lambda *_args: {"status": "ok"},
+            )
+            self.assertTrue(service.availability("task.start").enabled)
+            state["active_task"] = {
+                "task_id": "task-1", "branch": "main", "state_updated": False, "decisions_added": 0,
+            }
+            state["sidecar"] = {"phase": "active"}
+            blocked = service.availability("task.start", force=True)
+            self.assertIn("ACTIVE_TASK_EXISTS", {item.code for item in blocked.blockers})
+            state["project_version"] = "1.4.1"
+            mismatch = service.availability("state.update", force=True)
+            self.assertIn("VERSION_MISMATCH", {item.code for item in mismatch.blockers})
+
+    def test_availability_reports_writer_install_recovery_and_branch_rules(self) -> None:
+        state = stable_state(
+            installed=False,
+            writer_lock={"status": "active", "pid": 999999, "command": "state.update"},
+            classification={"kind": "exploration", "track": "research", "topic": "x"},
+            branch="research/x",
+            active_task={
+                "task_id": "task", "branch": "main", "state_updated": False, "decisions_added": 0,
+            },
+            sidecar={"phase": "finishing"},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            service = WorkflowActionService(
+                Path(directory), state_provider=lambda: dict(state), executor=lambda *_args: {},
+            )
+            blocked = service.availability("project.update", force=True)
+            codes = {item.code for item in blocked.blockers}
+            self.assertTrue({
+                "WRITER_BUSY", "WORKFLOW_NOT_INSTALLED", "STABLE_BRANCH_REQUIRED",
+                "ACTIVE_BRANCH_CHANGED", "RECOVERY_REQUIRED",
+            }.issubset(codes))
+            recover = service.availability("task.recover", force=True)
+            self.assertNotIn("RECOVERY_REQUIRED", {item.code for item in recover.blockers})
+
+    def test_finish_preflight_reports_health_decision_confirmation_and_activity(self) -> None:
+        state = stable_state(
+            active_task={
+                "task_id": "task", "branch": "main", "state_updated": True, "decisions_added": 0,
+            },
+            sidecar={"phase": "active"},
+            health_errors=["database mismatch"],
+        )
+        fields = {
+            "result": "completed", "route": "changed", "methods_action": "updated",
+            "main_goal": "unchanged", "note": "done", "writer_stopped": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            service = WorkflowActionService(
+                Path(directory), state_provider=lambda: dict(state), executor=lambda *_args: {},
+            )
+            blocked = service.availability("task.finish", fields, force=True)
+            codes = {item.code for item in blocked.blockers}
+            self.assertTrue({
+                "HEALTH_CHECK_FAILED", "DECISION_REQUIRED",
+                "WRITER_CONFIRMATION_REQUIRED", "WRITE_ACTIVITY_RECENT",
+            }.issubset(codes))
+
+    def test_update_preflight_explains_main_dirty_sync_and_frozen_requirements(self) -> None:
+        state = stable_state(
+            frozen=False, branch="research/x",
+            classification={"kind": "exploration", "track": "research", "topic": "x"},
+            dirty_paths=["paper.md"],
+            git={"available": True, "relation": "ahead", "head": "abc"},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            service = WorkflowActionService(
+                Path(directory), state_provider=lambda: dict(state), executor=lambda *_args: {},
+            )
+            blocked = service.availability("update.apply", force=True)
+            codes = {item.code for item in blocked.blockers}
+            self.assertTrue({
+                "FROZEN_EXE_REQUIRED", "STABLE_BRANCH_REQUIRED", "UPDATE_MAIN_REQUIRED",
+                "DIRTY_WORKTREE", "UPSTREAM_NOT_SYNCED",
+            }.issubset(codes))
+            self.assertIn("UPDATE_NOT_CHECKED", {item.code for item in blocked.warnings})
+
+    def test_field_validation_normalizes_lists_booleans_choices_and_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = WorkflowActionService(
+                Path(directory), state_provider=lambda: stable_state(), executor=lambda *_args: {},
+            )
+            fields = service.validate_fields("task.start", {
+                "kind": "code", "scope": " goal ", "acceptance": "one\n\ntwo",
+                "track": "stable", "task_size": "small", "git_commit": "never",
+            })
+            self.assertEqual(fields["scope"], "goal")
+            self.assertEqual(fields["acceptance"], ["one", "two"])
+            with self.assertRaisesRegex(ActionProtocolError, "不能为空"):
+                service.validate_fields("task.start", {"kind": "code", "scope": "", "acceptance": []})
+            with self.assertRaisesRegex(ActionProtocolError, "允许的选项"):
+                service.validate_fields("task.start", {
+                    "kind": "invalid", "scope": "x", "acceptance": ["y"],
+                })
+            with self.assertRaisesRegex(ActionProtocolError, "最多"):
+                service.validate_fields("project.update", {"description": "x" * 501})
+
+    def test_external_workbench_actions_require_active_stable_task(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = WorkflowActionService(
+                Path(directory), state_provider=lambda: stable_state(), executor=lambda *_args: {},
+            )
+            blocked = service.availability("workbench.external.add", force=True)
+            self.assertIn("ACTIVE_TASK_REQUIRED", {item.code for item in blocked.blockers})
+            fields = service.validate_fields("workbench.external.add", {
+                "tool_id": "obsidian", "name": "Obsidian", "kind": "notes",
+                "purpose": "管理笔记", "usage_hint": "整理研究笔记", "reference": "Obsidian",
+            })
+            self.assertEqual(fields["kind"], "notes")
+            state = stable_state(active_task={"task_id": "task", "branch": "main"})
+            service = WorkflowActionService(
+                Path(directory), state_provider=lambda: state, executor=lambda *_args: {},
+            )
+            self.assertTrue(service.availability("workbench.external.add", fields, force=True).enabled)
+
+    def test_blocked_request_does_not_execute_or_write_diagnostics(self) -> None:
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = WorkflowActionService(
+                root, state_provider=lambda: stable_state(active_task={
+                    "task_id": "active", "branch": "main", "state_updated": False, "decisions_added": 0,
+                }), executor=lambda *args: calls.append(args),
+            )
+            availability = service.availability("task.start", force=True)
+            result = service.execute(ActionRequest("task.start", {
+                "kind": "code", "scope": "x", "acceptance": ["y"], "track": "stable",
+            }, availability.state_token))
+            self.assertEqual(result.status, "blocked")
+            self.assertFalse(calls)
+            self.assertFalse((root / ".project_hooks/diagnostics/events.jsonl").exists())
+
+    def test_state_token_rejects_stale_form_and_success_uses_writer_lock(self) -> None:
+        state = stable_state()
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = WorkflowActionService(
+                root, state_provider=lambda: dict(state),
+                executor=lambda action, fields, _progress: calls.append((action, fields)) or {"changed": ["x"]},
+            )
+            token = service.snapshot(force=True)["state_token"]
+            state["git"] = {**state["git"], "head": "def"}
+            stale = service.execute(ActionRequest(
+                "health.check", {}, token,
+            ))
+            self.assertEqual(stale.code, "ACTION_STATE_CHANGED")
+            self.assertFalse(calls)
+            fresh = service.availability("health.check", force=True)
+            result = service.execute(ActionRequest("health.check", {}, fresh.state_token))
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.changed, ["x"])
+
+    def test_high_risk_requires_confirmation_and_failures_get_incident(self) -> None:
+        state = stable_state()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = WorkflowActionService(
+                root, state_provider=lambda: dict(state),
+                executor=lambda *_args: (_ for _ in ()).throw(RuntimeError("unexpected failure")),
+            )
+            availability = service.availability("db.rebuild", force=True)
+            unconfirmed = service.execute(ActionRequest("db.rebuild", {}, availability.state_token, False))
+            self.assertEqual(unconfirmed.code, "CONFIRMATION_REQUIRED")
+            failed = service.execute(ActionRequest("db.rebuild", {}, availability.state_token, True))
+            self.assertEqual(failed.status, "failed")
+            self.assertTrue(failed.incident_id)
+            self.assertTrue((root / ".project_hooks/diagnostics/events.jsonl").is_file())
+
+    def test_worktree_requires_three_second_quiet_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = WorkflowActionService(
+                Path(directory), state_provider=lambda: stable_state(),
+                executor=lambda *_args: {},
+            )
+            self.assertFalse(service.snapshot(force=True)["worktree_quiet"])
+            service._worktree_changed_at -= 4
+            self.assertTrue(service.snapshot(force=True)["worktree_quiet"])
+
+    def test_state_token_uses_task_git_and_worktree_identity(self) -> None:
+        first = stable_state()
+        second = stable_state(worktree_signature="changed")
+        self.assertNotEqual(state_token(first), state_token(second))
+
+
+class DashboardActionWidgetTests(unittest.TestCase):
+    def test_workflow_page_is_readonly_and_combines_task_stage_and_actions(self) -> None:
+        try:
+            import tkinter as tk
+            from tkinter import scrolledtext, ttk
+            root = tk.Tk()
+        except Exception as exc:
+            self.skipTest(f"Tk unavailable: {exc}")
+        root.withdraw()
+        try:
+            from project_hooks.dashboard import WorkflowPage
+
+            with tempfile.TemporaryDirectory() as directory:
+                service = WorkflowActionService(
+                    Path(directory), state_provider=lambda: stable_state(),
+                    executor=lambda *_args: {"status": "passed"},
+                )
+                page = WorkflowPage(root, tk, ttk, scrolledtext)
+                snapshot = {
+                    "context": {
+                        "active_task": {"task_id": "task-1", "branch": "main"},
+                        "current_stage": {"stage_id": "stage-1", "title": "稳定维护", "status": "active"},
+                        "stages": [], "attempts": [],
+                    },
+                    "task_details": {"task-1": {
+                        "task_id": "task-1", "goal": "修复面板", "branch": "main",
+                        "started_at": "now", "acceptance": ["starts"], "evidence": [],
+                    }},
+                    "events": [], "attempt": None,
+                    "decisions": [{
+                        "event_id": "decision-event", "decision_id": "D-1",
+                        "decision": "保持只读", "occurred_at": "now", "branch": "main",
+                    }],
+                    "explorations": [{
+                        "event_id": "exploration-event", "goal": "验证方案",
+                        "branch": "research/ui", "result": "validated",
+                    }],
+                }
+                page.set_data(snapshot, service.availability_matrix(force=True))
+                self.assertIn("current-task", page.records)
+                self.assertIn("current-stage", page.records)
+                self.assertTrue(page.tree.exists("group-tasks"))
+                self.assertTrue(page.tree.exists("group-task-history"))
+                self.assertTrue(page.tree.exists("group-actions-available"))
+                self.assertTrue(page.tree.exists("group-actions-needs_input"))
+                self.assertTrue(page.tree.exists("group-actions-running"))
+                self.assertTrue(page.tree.exists("group-actions-blocked"))
+                self.assertTrue(page.open_record("decisions", "decision-event"))
+                self.assertIn("保持只读", page.detail.get("1.0", "end"))
+                self.assertTrue(page.open_record("explorations", "exploration-event"))
+                self.assertIn("验证方案", page.detail.get("1.0", "end"))
+                self.assertTrue(page.open_action("state.update"))
+                self.assertIn("ACTIVE_TASK_REQUIRED", page.detail.get("1.0", "end"))
+                self.assertFalse(hasattr(page, "run_button"))
+                self.assertFalse(hasattr(page, "widgets"))
+        finally:
+            root.destroy()
+
+    def test_catalog_tree_loads_items_only_after_directory_expands(self) -> None:
+        try:
+            import tkinter as tk
+            from tkinter import scrolledtext, ttk
+            root = tk.Tk()
+        except Exception as exc:
+            self.skipTest(f"Tk unavailable: {exc}")
+        root.withdraw()
+        try:
+            from project_hooks.dashboard import CatalogPage
+
+            page = CatalogPage(
+                root, tk, ttk, scrolledtext, refresh=lambda: None,
+                project_root=Path.cwd(), notify=lambda _message: None,
+            )
+            page.set_data(
+                [{
+                    "item_id": "theory-1", "kind": "theory", "kind_label": "理论",
+                    "title": "理论索引", "status": "active", "path": "resources/theory/a.md",
+                }],
+                [],
+                [{
+                    "name": "theory", "label": "理论", "path": "resources/theory",
+                    "status": "ok", "indexed_files": 1, "actual_files": 1, "exists": True,
+                }],
+            )
+            self.assertTrue(page.tree.exists("catalog-directory-theory"))
+            self.assertTrue(page.tree.exists("catalog-placeholder-theory"))
+            self.assertFalse(page.tree.exists("catalog-item-theory-1"))
+            page.tree.focus("catalog-directory-theory")
+            page._populate_directory("theory")
+            self.assertTrue(page.tree.exists("catalog-item-theory-1"))
+            self.assertTrue(page.select_record("theory-1"))
+            self.assertIn("理论索引", page.title.cget("text"))
+        finally:
+            root.destroy()
+
+
+class WorkflowActionIntegrationTests(unittest.TestCase):
+    def test_dashboard_service_runs_real_stable_lifecycle_without_cli_subprocess(self) -> None:
+        from project_hooks import __version__, cli
+        from project_hooks.project_manager import initialize_project
+
+        original_root = cli.ROOT
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "project"
+            root.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Action Test"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "action@example.invalid"], cwd=root, check=True)
+            initialize_project(root, __version__)
+            try:
+                cli.set_project_root(root)
+                service = cli.dashboard_action_service()
+                start = service.availability("task.start", force=True)
+                started = service.execute(ActionRequest("task.start", {
+                    "kind": "analysis",
+                    "scope": "dashboard lifecycle",
+                    "acceptance": ["events recorded"],
+                    "task_size": "small",
+                    "git_commit": "auto",
+                    "track": "stable",
+                }, start.state_token))
+                self.assertEqual(started.status, "success")
+                progress = service.availability("state.update", force=True)
+                updated = service.execute(ActionRequest("state.update", {
+                    "status": "ready", "judgment": "validated", "breakpoint": "done",
+                    "next": ["finish"], "blocker": "none",
+                }, progress.state_token))
+                self.assertEqual(updated.status, "success")
+
+                finish_fields = {
+                    "result": "completed", "route": "unchanged",
+                    "methods_action": "reviewed-no-change", "main_goal": "unchanged",
+                    "note": "dashboard lifecycle complete", "evidence": ["integration test"],
+                    "writer_stopped": True,
+                }
+                service.snapshot(force=True)
+                service._worktree_changed_at -= 4
+                finish = service.availability("task.finish", finish_fields, force=True)
+                self.assertTrue(finish.enabled, [item.message for item in finish.blockers])
+                finished = service.execute(ActionRequest(
+                    "task.finish", finish_fields, finish.state_token, True,
+                ))
+                self.assertEqual(finished.status, "success", finished.summary)
+                self.assertEqual(finished.data["git"]["status"], "not-requested")
+                events = [
+                    json.loads(line) for line in (root / "maintenance/events.jsonl").read_text(encoding="utf-8").splitlines()
+                ]
+                types = [event["event_type"] for event in events]
+                self.assertIn("task.started", types)
+                self.assertIn("project_state.updated", types)
+                self.assertIn("task.finished", types)
+                self.assertFalse(service.snapshot(force=True)["active_task"])
+                self.assertEqual(service.snapshot()["lifecycle_step"]["key"], "completed")
+            finally:
+                cli.set_project_root(original_root)
+
+
+if __name__ == "__main__":
+    unittest.main()

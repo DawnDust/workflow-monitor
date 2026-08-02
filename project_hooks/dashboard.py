@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
+import queue
 import subprocess
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -13,8 +16,11 @@ from typing import Callable
 from . import __version__
 from .catalog import CATALOG_KIND_LABELS, render_context_markdown
 from .diagnostics import (
+    cleanup_resolved_diagnostics,
+    diagnostics_overview,
     execution_mode,
     record_failure,
+    resolve_diagnostic,
 )
 from .dashboard_actions import export_bundle, report_bug as open_dashboard_bug
 from .read_model import (
@@ -23,8 +29,20 @@ from .read_model import (
     action_overview_text,
     is_auxiliary_task_id,
 )
+from .resource_layout import RESOURCE_DIRECTORIES
 from .updater import check_latest_update, version_report
-from .store import SCHEMA_VERSION
+from .store import SCHEMA_VERSION, load_events
+from .launcher import ACTIVE_ENV, PORTABLE_ROOT_ENV, selected_executable
+from .workflow_actions import (
+    ActionProgress,
+    ActionProtocolError,
+    ActionRequest,
+    WorkflowActionService,
+    action_specs,
+    ai_form_template,
+    parse_ai_form,
+)
+from .workbench import EXTERNAL_TOOL_KINDS, external_tools_from_events
 
 
 CLI_FALLBACK = (
@@ -330,7 +348,7 @@ def copy_research_prompt(clipboard, prompt: str) -> str:
     return "工作台提示词已复制，请粘贴到当前 Codex 对话框并发送。"
 
 
-PRIMARY_TABS = ("概览", "搜索", "资料", "工作台", "任务", "阶段", "记录")
+PRIMARY_TABS = ("工作流", "概览", "搜索", "资料", "工作台", "诊断", "解释")
 
 RESULT_LABELS = {
     "completed": "完成",
@@ -553,16 +571,28 @@ def open_resource_directory(
 
 
 class DashboardDataProvider:
-    def __init__(self, model: MaintenanceReadModel, classifier: Callable[[str], dict], branch: str | None = None):
+    def __init__(
+        self,
+        model: MaintenanceReadModel,
+        classifier: Callable[[str], dict],
+        branch: str | None = None,
+        action_service: WorkflowActionService | None = None,
+    ):
         self.model = model
         self.classifier = classifier
         self.branch = branch
+        self.action_service = action_service
 
     def load(self) -> dict:
         snapshot = self.model.dashboard_snapshot(self.branch)
         snapshot["classification"] = self.classifier(snapshot["branch"])
         snapshot["active_task_warning"] = active_task_warning(
             snapshot.get("context", {}).get("active_task")
+        )
+        events = load_events(self.model.journal_path)
+        snapshot["external_tools"] = external_tools_from_events(events)
+        snapshot["diagnostics"] = diagnostics_overview(
+            self.project_root, application_version=__version__,
         )
         return snapshot
 
@@ -576,6 +606,11 @@ class DashboardDataProvider:
     def check_for_updates(self) -> dict:
         return check_latest_update(self.project_root)
 
+    def lifecycle_snapshot(self) -> dict:
+        if self.action_service is None:
+            return {"lifecycle_step": {"key": "unavailable", "label": "仅查看", "index": 0}}
+        return self.action_service.snapshot()
+
 
 def version_status_text(report: dict) -> str:
     project = report.get("project_version") or "未初始化"
@@ -583,6 +618,63 @@ def version_status_text(report: dict) -> str:
     warning = " ⚠ 构建不一致" if report.get("build_warning") else ""
     build_text = f" ({build_id[:12]})" if build_id else ""
     return f"版本：EXE {report['application_version']}{build_text} / 项目 {project}{warning}"
+
+
+def delivery_status(state: dict, update_result: dict | None = None) -> dict[str, str]:
+    """Render honest local delivery state without treating a push as a Release."""
+    dirty_count = len(state.get("dirty_paths") or [])
+    changed_count = len(state.get("changed_paths") or [])
+    git = state.get("git") or {}
+    active = state.get("active_task") or {}
+    head = str(git.get("head") or "")
+    base_head = str(active.get("base_head") or "")
+    head_changed = bool(active and head and base_head and head != base_head)
+
+    worktree = "干净" if dirty_count == 0 else f"有 {dirty_count} 个未提交变更"
+    if dirty_count and head_changed:
+        commit = f"部分已提交，仍有 {dirty_count} 个未提交变更"
+    elif dirty_count:
+        commit = f"尚未提交当前修改（任务变化 {changed_count} 个文件）"
+    elif head_changed:
+        commit = f"已提交到 {head[:8]}"
+    else:
+        commit = "没有待提交修改"
+
+    relation = git.get("relation")
+    if relation == "synced":
+        push = f"已与 {git.get('upstream_ref') or 'origin/main'} 同步"
+    elif relation == "ahead":
+        push = f"待推送 {git.get('ahead') or 0} 个提交"
+    elif relation == "behind":
+        push = f"本地落后 {git.get('behind') or 0} 个提交"
+    elif relation == "diverged":
+        push = f"已分叉（领先 {git.get('ahead') or 0} / 落后 {git.get('behind') or 0}）"
+    else:
+        push = "远端状态不可用"
+
+    identity = state.get("build_identity") or {}
+    version = state.get("application_version") or "未知版本"
+    if identity.get("dirty"):
+        release = f"v{version} 候选构建，尚未正式发布"
+    elif update_result is None:
+        release = f"v{version} 干净构建，尚未联网核对"
+    elif update_result.get("status") == "current":
+        release = f"已核对正式发布 v{update_result.get('latest_version') or version}"
+    elif update_result.get("status") == "different-build":
+        release = f"v{version} 构建与正式发布资产不同"
+    elif update_result.get("status") == "update-available":
+        release = f"最新正式版 v{update_result.get('latest_version') or '未知'}，当前 v{version}"
+    else:
+        release = "正式发布状态未确认"
+    return {"worktree": worktree, "commit": commit, "push": push, "release": release}
+
+
+def delivery_status_text(state: dict, update_result: dict | None = None) -> str:
+    status = delivery_status(state, update_result)
+    return (
+        f"工作区：{status['worktree']}　｜　提交：{status['commit']}　｜　"
+        f"推送：{status['push']}　｜　正式发布：{status['release']}"
+    )
 
 
 def active_task_warning(active: dict | None, now: datetime | None = None) -> dict | None:
@@ -782,6 +874,7 @@ class CatalogPage:
     def __init__(
         self, parent, tk, ttk, scrolledtext, *, refresh: Callable[[], None],
         project_root: Path, notify: Callable[[str], None],
+        open_action: Callable[[str, dict | None], None] | None = None,
     ):
         self.frame = ttk.Frame(parent, padding=8)
         self.tk = tk
@@ -789,75 +882,61 @@ class CatalogPage:
         self.scrolledtext = scrolledtext
         self.project_root = project_root
         self.notify = notify
+        self.open_action = open_action
+        del refresh, open_action
         self.items: list[dict] = []
         self.relations: list[dict] = []
         self.directories: list[dict] = []
-        self.directory_buttons: dict[str, object] = {}
+        self.directory_nodes: dict[str, str] = {}
+        self.items_by_directory: dict[str, list[dict]] = {}
+        self.item_nodes: dict[str, str] = {}
+        self.records: dict[str, tuple[str, dict]] = {}
 
-        directory_frame = ttk.LabelFrame(self.frame, text="资源目录", padding=6)
-        directory_frame.pack(fill="x", pady=(0, 8))
-        for index, name in enumerate((
-            "source", "data", "theory", "analysis", "outputs", "others", "reports",
-        )):
-            button = ttk.Button(
-                directory_frame,
-                text=name,
-                command=lambda selected=name: self.open_directory(selected),
-            )
-            button.grid(row=index // 4, column=index % 4, sticky="ew", padx=3, pady=3)
-            self.directory_buttons[name] = button
-        for column in range(4):
-            directory_frame.columnconfigure(column, weight=1)
+        controls = ttk.Frame(self.frame)
+        controls.pack(fill="x", pady=(0, 6))
+        ttk.Label(controls, text="按标准资料目录展开索引；折叠目录不会创建文件列表。").pack(side="left")
+        ttk.Button(controls, text="打开所在位置", command=self.open_location).pack(side="right")
+        ttk.Button(controls, text="复制 AI 上下文", command=self.copy_context).pack(side="right", padx=(0, 6))
 
-        filters = ttk.Frame(self.frame)
-        filters.pack(fill="x", pady=(0, 6))
-        ttk.Label(filters, text="类型").pack(side="left")
-        self.kind = tk.StringVar(value="全部")
-        kind_values = ("全部", *CATALOG_KIND_LABELS.values())
-        kind_box = ttk.Combobox(filters, textvariable=self.kind, values=kind_values, state="readonly", width=9)
-        kind_box.pack(side="left", padx=(5, 10))
-        ttk.Label(filters, text="状态").pack(side="left")
-        self.status = tk.StringVar(value="全部")
-        status_box = ttk.Combobox(
-            filters, textvariable=self.status,
-            values=("全部", "active", "missing", "archived"), state="readonly", width=10,
-        )
-        status_box.pack(side="left", padx=(5, 10))
-        ttk.Button(filters, text="打开所在位置", command=self.open_location).pack(side="left")
-        ttk.Button(filters, text="复制 AI 上下文", command=self.copy_context).pack(side="left", padx=(6, 0))
+        panes = ttk.Panedwindow(self.frame, orient="horizontal")
+        panes.pack(fill="both", expand=True)
+        left = ttk.Frame(panes, padding=(0, 0, 8, 0))
+        right = ttk.Frame(panes, padding=(8, 0, 0, 0))
+        panes.add(left, weight=2)
+        panes.add(right, weight=5)
 
-        self.table = TablePage(
-            self.frame, tk, ttk, scrolledtext,
-            columns=[
-                ("kind_label", "类型", 75), ("status", "状态", 85),
-                ("title", "标题", 300), ("path", "路径", 300), ("updated_at", "更新时间", 175),
-            ],
-            detail=self.detail_text, refresh=refresh, show_refresh=True, split_detail=True,
-        )
-        self.table.frame.pack(fill="both", expand=True)
-        self.kind.trace_add("write", lambda *_: self.apply_filters())
-        self.status.trace_add("write", lambda *_: self.apply_filters())
+        self.tree = ttk.Treeview(left, columns=("status",), show="tree headings", height=22)
+        self.tree.heading("#0", text="资料目录 / 索引")
+        self.tree.heading("status", text="状态")
+        self.tree.column("#0", width=330, minwidth=180, stretch=True)
+        self.tree.column("status", width=90, minwidth=70, stretch=False)
+        scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewOpen>>", self.expand_selected_directory)
+        self.tree.bind("<<TreeviewSelect>>", self.show_selected)
+
+        self.title = ttk.Label(right, text="选择资料目录或索引", font=("TkDefaultFont", 12, "bold"))
+        self.title.pack(fill="x", anchor="w")
+        self.subtitle = ttk.Label(right, text="", justify="left", wraplength=760)
+        self.subtitle.pack(fill="x", pady=(4, 8))
+        self.detail = scrolledtext.ScrolledText(right, wrap="word")
+        self.detail.pack(fill="both", expand=True)
+        self.detail.configure(state="disabled")
+        self._set_detail("展开左侧标准目录后选择资料索引。Dashboard 不修改科研资料。")
 
     def set_data(
         self, items: list[dict], relations: list[dict], directories: list[dict] | None = None,
     ) -> None:
+        opened = {
+            name for name, iid in self.directory_nodes.items()
+            if self.tree.exists(iid) and bool(self.tree.item(iid, "open"))
+        }
+        selected_item = (self.selected_item() or {}).get("item_id")
         self.items = [dict(item) for item in items]
         self.relations = [dict(relation) for relation in relations]
         self.directories = [dict(item) for item in directories or []]
-        by_name = {item["name"]: item for item in self.directories}
-        for name, button in self.directory_buttons.items():
-            directory = by_name.get(name)
-            if directory is None:
-                button.configure(text=name, state="disabled")
-                continue
-            marker = "" if directory["status"] == "ok" else " ⚠"
-            button.configure(
-                text=(
-                    f"{directory['label']}  {directory['indexed_files']}/"
-                    f"{directory['actual_files']}{marker}"
-                ),
-                state="normal" if directory["exists"] else "disabled",
-            )
         by_id = {item["item_id"]: item for item in self.items}
         for item in self.items:
             item["_relations"] = []
@@ -870,31 +949,110 @@ class CatalogPage:
                 source["_relations"].append({**relation, "_direction": "out"})
             if target:
                 target["_relations"].append({**relation, "_direction": "in"})
-        self.table.set_records(self.items)
-        self.apply_filters()
-
-    def apply_filters(self) -> None:
-        label = self.kind.get()
-        selected_kind = next(
-            (kind for kind, kind_label in CATALOG_KIND_LABELS.items() if kind_label == label),
-            None,
-        )
-        selected_status = None if self.status.get() == "全部" else self.status.get()
-        def predicate(item: dict) -> bool:
-            return (
-                (selected_kind is None or item.get("kind") == selected_kind)
-                and (selected_status is None or item.get("status") == selected_status)
+        kind_to_name = {item.kind: item.name for item in RESOURCE_DIRECTORIES}
+        self.items_by_directory = {item.name: [] for item in RESOURCE_DIRECTORIES}
+        for item in self.items:
+            name = kind_to_name.get(item.get("kind"), "others")
+            self.items_by_directory.setdefault(name, []).append(item)
+        self.records.clear()
+        self.directory_nodes.clear()
+        self.item_nodes.clear()
+        self.tree.delete(*self.tree.get_children())
+        by_name = {item.get("name"): item for item in self.directories}
+        for spec in RESOURCE_DIRECTORIES:
+            directory = by_name.get(spec.name, {
+                "name": spec.name, "label": spec.label, "path": spec.relative_path,
+                "status": "unknown", "indexed_files": 0, "actual_files": 0,
+            })
+            indexed = len(self.items_by_directory.get(spec.name, []))
+            actual = directory.get("actual_files", 0)
+            marker = "" if directory.get("status") == "ok" else " ⚠"
+            iid = f"catalog-directory-{spec.name}"
+            self.tree.insert(
+                "", "end", iid=iid,
+                text=f"{directory.get('label') or spec.label}（索引 {indexed} / 文件 {actual}）{marker}",
+                values=(directory.get("status") or "未知",), open=spec.name in opened,
             )
+            self.directory_nodes[spec.name] = iid
+            self.records[iid] = ("directory", directory)
+            if indexed:
+                self.tree.insert(iid, "end", iid=f"catalog-placeholder-{spec.name}", text="正在展开…")
+            if spec.name in opened:
+                self._populate_directory(spec.name)
+        if selected_item:
+            self.select_record(selected_item)
 
-        self.table.set_predicate(predicate)
+    def _populate_directory(self, name: str) -> None:
+        parent = self.directory_nodes.get(name)
+        if not parent or not self.tree.exists(parent):
+            return
+        placeholder = f"catalog-placeholder-{name}"
+        if not self.tree.exists(placeholder):
+            return
+        self.tree.delete(placeholder)
+        for item in sorted(
+            self.items_by_directory.get(name, []),
+            key=lambda value: (value.get("title") or "").casefold(),
+        ):
+            iid = f"catalog-item-{item['item_id']}"
+            self.tree.insert(parent, "end", iid=iid, text=item.get("title") or item["item_id"], values=(item.get("status"),))
+            self.item_nodes[item["item_id"]] = iid
+            self.records[iid] = ("item", item)
+
+    def expand_selected_directory(self, _event=None) -> None:
+        selected = self.tree.focus()
+        record = self.records.get(selected)
+        if record and record[0] == "directory":
+            self._populate_directory(record[1].get("name", ""))
+
+    def _set_detail(self, text: str) -> None:
+        self.detail.configure(state="normal")
+        self.detail.delete("1.0", "end")
+        self.detail.insert("1.0", text)
+        self.detail.configure(state="disabled")
+
+    def show_selected(self, _event=None) -> None:
+        selected = self.tree.selection()
+        record = self.records.get(selected[0]) if selected else None
+        if not record:
+            return
+        kind, value = record
+        if kind == "directory":
+            self.title.configure(text=value.get("label") or value.get("name") or "资料目录")
+            self.subtitle.configure(text=value.get("path") or "")
+            self._set_detail(
+                f"目录状态：{value.get('status') or '未知'}\n"
+                f"已登记索引：{value.get('indexed_files', 0)}\n"
+                f"实际文件：{value.get('actual_files', 0)}\n\n"
+                "点击左侧加号展开资料索引。"
+            )
+        else:
+            self.title.configure(text=value.get("title") or value.get("item_id") or "资料")
+            self.subtitle.configure(text=f"{value.get('kind_label') or value.get('kind')}｜{value.get('status')}")
+            self._set_detail(self.detail_text(value))
 
     def select_record(self, item_id: str) -> bool:
-        self.kind.set("全部")
-        self.status.set("全部")
-        return self.table.select_record("item_id", item_id)
+        item = next((value for value in self.items if value.get("item_id") == item_id), None)
+        if not item:
+            return False
+        name = next((spec.name for spec in RESOURCE_DIRECTORIES if spec.kind == item.get("kind")), "others")
+        parent = self.directory_nodes.get(name)
+        if parent:
+            self.tree.item(parent, open=True)
+        self._populate_directory(name)
+        iid = self.item_nodes.get(item_id)
+        if not iid:
+            return False
+        self.tree.selection_set(iid)
+        self.tree.focus(iid)
+        self.tree.see(iid)
+        self.show_selected()
+        return True
 
     def selected_item(self) -> dict | None:
-        return self.table.selected_record()
+        selected = self.tree.selection()
+        record = self.records.get(selected[0]) if selected else None
+        return record[1] if record and record[0] == "item" else None
 
     def open_directory(self, name: str) -> None:
         directory = next((item for item in self.directories if item.get("name") == name), None)
@@ -909,12 +1067,32 @@ class CatalogPage:
     def open_location(self) -> None:
         item = self.selected_item()
         if not item:
-            self.notify("没有选中科研资料。")
+            selected = self.tree.selection()
+            record = self.records.get(selected[0]) if selected else None
+            if record and record[0] == "directory":
+                self.open_directory(record[1].get("name", ""))
+                return
+            self.notify("没有选中科研资料或目录。")
             return
         try:
             self.notify(reveal_catalog_file(self.project_root, item))
         except DashboardError as exc:
             self.notify(str(exc))
+
+    def edit_selected(self) -> None:
+        item = self.selected_item()
+        if not item or self.open_action is None:
+            self.notify("没有选中科研资料。")
+            return
+        self.open_action("catalog.update", {
+            "item_id": item.get("item_id", ""),
+            "title": item.get("title", ""),
+            "summary": item.get("summary", ""),
+            "status": item.get("status", ""),
+            "path": item.get("path", ""),
+            "source": item.get("source", ""),
+            "tag": item.get("tags", []),
+        })
 
     def copy_context(self) -> None:
         item = self.selected_item()
@@ -963,29 +1141,9 @@ class ResearchWorkbenchPage:
     ):
         self.frame = ttk.Frame(parent, padding=8)
         self.notify = notify
-        self.visible: list[dict] = []
+        self.external_tools: list[dict] = []
+        self.records: dict[str, tuple[str, object]] = {}
         self.current_template_id: str | None = None
-
-        controls = ttk.Frame(self.frame)
-        controls.pack(fill="x", pady=(0, 6))
-        ttk.Label(controls, text="类型").pack(side="left")
-        self.category = tk.StringVar(value="全部")
-        ttk.Combobox(
-            controls,
-            textvariable=self.category,
-            values=WORKBENCH_PROMPT_CATEGORIES,
-            state="readonly",
-            width=10,
-        ).pack(side="left", padx=(6, 12))
-        ttk.Label(controls, text="筛选提示词").pack(side="left")
-        self.query = tk.StringVar()
-        ttk.Entry(controls, textvariable=self.query, width=34).pack(side="left", padx=(6, 8))
-        ttk.Label(
-            controls,
-            text="科研分析先选择文件；软件操作先确认目标仓库。",
-        ).pack(side="left")
-        self.category.trace_add("write", lambda *_: self.render_list())
-        self.query.trace_add("write", lambda *_: self.render_list())
 
         panes = ttk.Panedwindow(self.frame, orient="horizontal")
         panes.pack(fill="both", expand=True)
@@ -995,14 +1153,14 @@ class ResearchWorkbenchPage:
         panes.add(detail_frame, weight=3)
 
         self.tree = ttk.Treeview(
-            list_frame, columns=("category", "label"), show="headings", height=18,
+            list_frame, columns=("item", "status"), show="tree headings", height=18,
         )
-        for key, label, width in (
-            ("category", "类型", 105),
-            ("label", "提示词", 230),
-        ):
-            self.tree.heading(key, text=label)
-            self.tree.column(key, width=width, minwidth=80, stretch=True)
+        self.tree.heading("#0", text="工作台")
+        self.tree.heading("item", text="项目")
+        self.tree.heading("status", text="状态")
+        self.tree.column("#0", width=120, minwidth=85, stretch=False)
+        self.tree.column("item", width=230, minwidth=140, stretch=True)
+        self.tree.column("status", width=85, minwidth=70, stretch=False)
         vertical = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vertical.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -1013,38 +1171,68 @@ class ResearchWorkbenchPage:
 
         detail_controls = ttk.Frame(detail_frame)
         detail_controls.pack(fill="x", pady=(0, 4))
-        ttk.Label(detail_controls, text="完整提示词").pack(side="left")
-        ttk.Button(
+        self.detail_label = ttk.Label(detail_controls, text="完整提示词")
+        self.detail_label.pack(side="left")
+        self.copy_button = ttk.Button(
             detail_controls, text="复制提示词", command=self.copy_current,
-        ).pack(side="right")
+        )
+        self.copy_button.pack(side="right")
         self.preview = scrolledtext.ScrolledText(detail_frame, wrap="word")
         self.preview.pack(fill="both", expand=True)
-        self.render_list()
+        self.render_tree()
 
-    def render_list(self) -> None:
-        previous = self.current_template_id
-        self.visible = research_prompt_records(self.query.get(), self.category.get())
+    def render_tree(self) -> None:
+        selected = self.tree.selection()
+        previous = selected[0] if selected else None
+        self.records.clear()
         self.tree.delete(*self.tree.get_children())
-        selected_iid = None
-        for index, record in enumerate(self.visible):
-            iid = f"prompt-{index}"
-            self.tree.insert(
-                "", "end", iid=iid,
-                values=(record["category"], record["label"]),
+        builtin = self.tree.insert("", "end", iid="workbench-builtin", text=f"内置（{len(WORKBENCH_PROMPT_TEMPLATES)}）", open=True)
+        categories: dict[str, str] = {}
+        for template_id, template in WORKBENCH_PROMPT_TEMPLATES.items():
+            category = template["category"]
+            if category not in categories:
+                categories[category] = self.tree.insert(
+                    builtin, "end", iid=f"builtin-category-{len(categories)}", text=category, open=False,
+                )
+            iid = f"builtin-{template_id}"
+            self.tree.insert(categories[category], "end", iid=iid, values=(template["label"], "内置"))
+            self.records[iid] = ("builtin", template_id)
+        external = self.tree.insert("", "end", iid="workbench-external", text=f"外置（{len(self.external_tools)}）", open=True)
+        kind_labels = {
+            "notes": "笔记", "literature": "文献", "computation": "计算",
+            "skill": "Skill", "repository": "仓库", "other": "其他",
+        }
+        external_groups: dict[str, str] = {}
+        for kind in EXTERNAL_TOOL_KINDS:
+            matching = [item for item in self.external_tools if item.get("kind") == kind]
+            if not matching:
+                continue
+            group = self.tree.insert(
+                external, "end", iid=f"external-kind-{kind}",
+                text=f"{kind_labels[kind]}（{len(matching)}）", open=False,
             )
-            if record["template_id"] == previous:
-                selected_iid = iid
-        if selected_iid is None and self.visible:
-            selected_iid = "prompt-0"
-            self.current_template_id = self.visible[0]["template_id"]
-        if selected_iid is not None:
-            self.tree.selection_set(selected_iid)
-            self.tree.focus(selected_iid)
-            self.tree.see(selected_iid)
-            self.render_detail()
-        else:
-            self.current_template_id = None
-            self._set_preview("没有匹配的提示词。")
+            external_groups[kind] = group
+            for item in matching:
+                iid = f"external-{item['tool_id']}"
+                self.tree.insert(group, "end", iid=iid, values=(item["name"], item["status"]))
+                self.records[iid] = ("external", item)
+        target = previous if previous in self.records else "builtin-literature_review"
+        if target in self.records:
+            self.tree.selection_set(target)
+            self.tree.focus(target)
+            parent = self.tree.parent(target)
+            if parent:
+                self.tree.item(parent, open=True)
+            self.tree.see(target)
+            self.select_from_tree()
+
+    def set_external_tools(self, tools: list[dict]) -> None:
+        revision = json.dumps(tools, ensure_ascii=False, sort_keys=True, default=str)
+        if getattr(self, "external_revision", None) == revision:
+            return
+        self.external_revision = revision
+        self.external_tools = list(tools)
+        self.render_tree()
 
     def select_from_tree(self, _event=None) -> None:
         selection = self.tree.selection()
@@ -1052,14 +1240,32 @@ class ResearchWorkbenchPage:
             self.current_template_id = None
             self._set_preview("请选择左侧提示词。")
             return
-        try:
-            record = self.visible[int(selection[0].split("-", 1)[1])]
-        except (IndexError, ValueError):
+        record = self.records.get(selection[0])
+        if record is None:
             self.current_template_id = None
-            self._set_preview("请选择左侧提示词。")
+            self._set_preview("请选择左侧内置提示词或外置工具。")
             return
-        self.current_template_id = record["template_id"]
-        self.render_detail()
+        kind, value = record
+        if kind == "builtin":
+            self.current_template_id = str(value)
+            self.detail_label.configure(text="完整提示词")
+            self.copy_button.configure(state="normal")
+            self.render_detail()
+        else:
+            self.current_template_id = None
+            item = dict(value)
+            self.detail_label.configure(text="外置工具说明")
+            self.copy_button.configure(state="disabled")
+            status_note = f"\n状态说明：{item.get('status_note')}" if item.get("status_note") else ""
+            self._set_preview(
+                f"名称：{item.get('name')}\n工具 ID：{item.get('tool_id')}\n"
+                f"类型：{item.get('kind')}\n状态：{item.get('status')}\n"
+                f"更新时间：{item.get('updated_at') or '未知'}{status_note}\n\n"
+                f"用途\n{item.get('purpose') or '未记录'}\n\n"
+                f"使用提示\n{item.get('usage_hint') or '未记录'}\n\n"
+                f"参考链接或标识\n{item.get('reference') or '未记录'}\n\n"
+                "此处仅作项目提醒；Dashboard 不检测安装、不启动程序、不执行脚本，也不联网验证。"
+            )
 
     def render_detail(self) -> None:
         if self.current_template_id is None:
@@ -1288,54 +1494,6 @@ class TaskPage:
         self.frame.clipboard_append(self.summary.get("1.0", "end-1c"))
 
 
-class RecordsPage:
-    FILTERS = {"全部记录": None, "仅决策": "decision", "仅探索": "exploration"}
-
-    def __init__(self, parent, tk, ttk, scrolledtext, *, open_task: Callable[[dict], None],
-                 detail: Callable[[dict], str]):
-        self.frame = ttk.Frame(parent, padding=8)
-        self.records: list[dict] = []
-        controls = ttk.Frame(self.frame)
-        controls.pack(fill="x", pady=(0, 6))
-        ttk.Label(controls, text="类型").pack(side="left")
-        self.kind = tk.StringVar(value="全部记录")
-        kind_box = ttk.Combobox(controls, textvariable=self.kind, values=list(self.FILTERS), state="readonly", width=12)
-        kind_box.pack(side="left", padx=(6, 12))
-        kind_box.bind("<<ComboboxSelected>>", lambda _event: self.apply_filter())
-        self.table = TablePage(
-            self.frame, tk, ttk, scrolledtext,
-            columns=[("kind_label", "类型", 80), ("occurred_at", "时间", 180), ("branch", "分支", 150),
-                     ("title", "标题", 390), ("result", "结果", 110)],
-            detail=detail, refresh=lambda: None, activate=open_task, activate_label="打开关联任务",
-            split_detail=True,
-        )
-        self.table.frame.pack(fill="both", expand=True, padx=0, pady=0)
-
-    def set_records(self, records: list[dict]) -> None:
-        self.records = list(records)
-        self.apply_filter()
-
-    def apply_filter(self) -> None:
-        selected = self.FILTERS.get(self.kind.get())
-        self.table.predicate = None
-        self.table.set_records([
-            record for record in self.records if selected is None or record.get("record_type") == selected
-        ])
-
-    def select_record(self, event_id: str) -> bool:
-        record = next((item for item in self.records if item.get("event_id") == event_id), None)
-        if not record:
-            return False
-        self.kind.set("全部记录")
-        self.apply_filter()
-        return self.table.select_record("event_id", event_id)
-
-    def set_negative_only(self, event_ids: set[str] | None) -> None:
-        self.kind.set("全部记录" if event_ids is None else "仅探索")
-        self.apply_filter()
-        self.table.set_predicate(None if event_ids is None else lambda item, ids=event_ids: item.get("event_id") in ids)
-
-
 class AdvancedWindow:
     def __init__(self, root, tk, ttk, scrolledtext, *, open_task: Callable[[dict], None],
                  on_close: Callable[[], None]):
@@ -1375,7 +1533,10 @@ class AdvancedWindow:
 
 
 class StagePage:
-    def __init__(self, parent, tk, ttk, scrolledtext, *, open_task: Callable[[str], None]):
+    def __init__(
+        self, parent, tk, ttk, scrolledtext, *, open_task: Callable[[str], None],
+        open_action: Callable[[str, dict | None], None] | None = None,
+    ):
         self.tk, self.ttk = tk, ttk
         self.frame = ttk.Frame(parent, padding=8)
         self.open_task_callback = open_task
@@ -1384,6 +1545,11 @@ class StagePage:
 
         current_frame = ttk.LabelFrame(self.frame, text="当前阶段", padding=6)
         current_frame.pack(fill="x", pady=(0, 8))
+        if open_action:
+            controls = ttk.Frame(current_frame)
+            controls.pack(fill="x", pady=(0, 4))
+            ttk.Button(controls, text="更新当前阶段", command=lambda: open_action("stage.update", None)).pack(side="left")
+            ttk.Button(controls, text="开始新阶段", command=lambda: open_action("stage.start", None)).pack(side="left", padx=(6, 0))
         self.current = scrolledtext.ScrolledText(current_frame, height=9, wrap="word")
         self.current.pack(fill="x")
         self.current.configure(state="disabled")
@@ -1506,6 +1672,980 @@ class StagePage:
             self.open_task_callback(selected[0])
 
 
+class ActionCenterPage:
+    """Generic form UI backed by the shared workflow action registry."""
+
+    def __init__(
+        self,
+        parent,
+        tk,
+        ttk,
+        scrolledtext,
+        *,
+        service: WorkflowActionService | None,
+        notify: Callable[[str], None],
+        refresh: Callable[[], None],
+        progress: Callable[[ActionProgress], None],
+    ):
+        self.tk, self.ttk = tk, ttk
+        self.service = service
+        self.notify = notify
+        self.refresh_callback = refresh
+        self.progress_callback = progress
+        self.frame = ttk.Frame(parent, padding=8)
+        self.specs = action_specs()
+        self.current_action_id: str | None = None
+        self.widgets: dict[str, tuple[object, object]] = {}
+        self.current_token: str | None = None
+        self.running = False
+        self.worker_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+
+        panes = ttk.Panedwindow(self.frame, orient="horizontal")
+        panes.pack(fill="both", expand=True)
+        left = ttk.Frame(panes, padding=(0, 0, 6, 0))
+        right = ttk.Frame(panes, padding=(6, 0, 0, 0))
+        panes.add(left, weight=2)
+        panes.add(right, weight=4)
+
+        self.tree = ttk.Treeview(left, columns=("category", "label", "status"), show="headings", height=24)
+        for key, label, width in (
+            ("category", "分类", 100), ("label", "动作", 190), ("status", "状态", 90),
+        ):
+            self.tree.heading(key, text=label)
+            self.tree.column(key, width=width, minwidth=65)
+        scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", self.select_action)
+
+        self.title = ttk.Label(right, text="选择左侧动作", font=("TkDefaultFont", 11, "bold"))
+        self.title.pack(anchor="w")
+        self.description = ttk.Label(right, text="", wraplength=620, justify="left")
+        self.description.pack(fill="x", pady=(3, 5))
+        self.reason = scrolledtext.ScrolledText(right, height=5, wrap="word")
+        self.reason.pack(fill="x", pady=(0, 6))
+        self.reason.configure(state="disabled")
+
+        form_outer = ttk.Frame(right)
+        form_outer.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(form_outer, highlightthickness=0)
+        form_scroll = ttk.Scrollbar(form_outer, orient="vertical", command=self.canvas.yview)
+        self.form = ttk.Frame(self.canvas)
+        self.form_window = self.canvas.create_window((0, 0), window=self.form, anchor="nw")
+        self.canvas.configure(yscrollcommand=form_scroll.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        form_scroll.pack(side="right", fill="y")
+        self.form.bind("<Configure>", lambda _event: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda event: self.canvas.itemconfigure(self.form_window, width=event.width))
+
+        controls = ttk.Frame(right)
+        controls.pack(fill="x", pady=(8, 0))
+        self.copy_button = ttk.Button(controls, text="复制 AI 填写模板", command=self.copy_ai_template)
+        self.copy_button.pack(side="left")
+        self.paste_button = ttk.Button(controls, text="从剪贴板填入 AI JSON", command=self.paste_ai_json)
+        self.paste_button.pack(side="left", padx=(6, 0))
+        ttk.Button(controls, text="重新预检", command=self.refresh_availability).pack(side="left", padx=(6, 0))
+        self.run_button = ttk.Button(controls, text="执行动作", command=self.execute_current)
+        self.run_button.pack(side="right")
+
+        if service is None:
+            self._set_reason("当前 Dashboard 处于仅查看模式，动作服务不可用。")
+            self.run_button.configure(state="disabled")
+        else:
+            self.refresh_actions()
+
+    def _set_reason(self, text: str) -> None:
+        self.reason.configure(state="normal")
+        self.reason.delete("1.0", "end")
+        self.reason.insert("1.0", text)
+        self.reason.configure(state="disabled")
+
+    def refresh_actions(self) -> None:
+        if self.service is None:
+            return
+        selected = self.current_action_id
+        self.tree.delete(*self.tree.get_children())
+        for spec in self.specs:
+            availability = self.service.availability(spec.action_id)
+            status = "可执行" if availability.enabled else f"阻塞 {len(availability.blockers)}"
+            self.tree.insert("", "end", iid=spec.action_id, values=(spec.category, spec.label, status))
+        if selected and self.tree.exists(selected):
+            self.tree.selection_set(selected)
+        elif self.specs:
+            self.tree.selection_set(self.specs[0].action_id)
+            self.tree.focus(self.specs[0].action_id)
+            self.select_action()
+
+    def select_action(self, _event=None) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            return
+        self.current_action_id = selected[0]
+        spec = next(item for item in self.specs if item.action_id == self.current_action_id)
+        self.title.configure(text=spec.label)
+        self.description.configure(text=spec.description or f"动作 ID：{spec.action_id}")
+        self._build_form(spec)
+        self.refresh_availability()
+
+    def _build_form(self, spec) -> None:
+        for child in self.form.winfo_children():
+            child.destroy()
+        self.widgets = {}
+        for row, field_spec in enumerate(spec.fields):
+            label = field_spec.label + (" *" if field_spec.required else "")
+            self.ttk.Label(self.form, text=label).grid(row=row, column=0, sticky="nw", padx=(0, 8), pady=3)
+            if field_spec.kind == "bool":
+                variable = self.tk.BooleanVar(value=bool(field_spec.default))
+                widget = self.ttk.Checkbutton(self.form, variable=variable)
+                widget.grid(row=row, column=1, sticky="w", pady=3)
+            elif field_spec.kind == "choice":
+                variable = self.tk.StringVar(value=str(field_spec.default or ""))
+                widget = self.ttk.Combobox(
+                    self.form, textvariable=variable, values=field_spec.choices,
+                    state="readonly", width=48,
+                )
+                widget.grid(row=row, column=1, sticky="ew", pady=3)
+            elif field_spec.kind in {"multiline", "list"}:
+                variable = None
+                widget = self.tk.Text(self.form, height=3, wrap="word")
+                if field_spec.default:
+                    widget.insert("1.0", str(field_spec.default))
+                widget.grid(row=row, column=1, sticky="ew", pady=3)
+            else:
+                variable = self.tk.StringVar(value=str(field_spec.default or ""))
+                widget = self.ttk.Entry(self.form, textvariable=variable, width=60)
+                widget.grid(row=row, column=1, sticky="ew", pady=3)
+            self.widgets[field_spec.name] = (field_spec, variable or widget)
+        self.form.columnconfigure(1, weight=1)
+        self._prefill_context(spec.action_id)
+
+    def _prefill_context(self, action_id: str) -> None:
+        if self.service is None:
+            return
+        try:
+            state = self.service.snapshot()
+        except Exception:
+            return
+        values: dict[str, object] = {}
+        active = state.get("active_task") or {}
+        if action_id == "task.start":
+            values["track"] = (state.get("classification") or {}).get("track") or "stable"
+        if action_id == "stage.update":
+            try:
+                full = self.service.project_root
+                del full
+            except Exception:
+                pass
+        if action_id == "task.finish":
+            values["note"] = active.get("scope") or ""
+        for name, value in values.items():
+            self._set_field(name, value)
+
+    def open_action(self, action_id: str, preset: dict | None = None) -> None:
+        if not self.tree.exists(action_id):
+            self.notify(f"找不到动作：{action_id}")
+            return
+        self.tree.selection_set(action_id)
+        self.tree.focus(action_id)
+        self.tree.see(action_id)
+        self.select_action()
+        for name, value in (preset or {}).items():
+            self._set_field(name, value)
+        self.refresh_availability()
+
+    def _set_field(self, name: str, value: object) -> None:
+        pair = self.widgets.get(name)
+        if pair is None:
+            return
+        field_spec, target = pair
+        if field_spec.kind in {"multiline", "list"}:
+            target.delete("1.0", "end")
+            if isinstance(value, list):
+                target.insert("1.0", "\n".join(str(item) for item in value))
+            else:
+                target.insert("1.0", str(value or ""))
+        else:
+            target.set(value)
+
+    def fields(self) -> dict[str, object]:
+        values: dict[str, object] = {}
+        for name, (field_spec, source) in self.widgets.items():
+            if field_spec.kind in {"multiline", "list"}:
+                values[name] = source.get("1.0", "end-1c")
+            else:
+                values[name] = source.get()
+        return values
+
+    def refresh_availability(self) -> None:
+        if self.service is None or not self.current_action_id:
+            return
+        try:
+            try:
+                fields = self.service.validate_fields(self.current_action_id, self.fields())
+            except ActionProtocolError:
+                fields = None
+            availability = self.service.availability(self.current_action_id, fields)
+            self.current_token = availability.state_token
+            lines = []
+            if availability.blockers:
+                lines.append("当前不可执行：")
+                lines.extend(
+                    f"- [{item.code}] {item.message}" + (f"\n  证据：{item.evidence}" if item.evidence else "")
+                    for item in availability.blockers
+                )
+            else:
+                lines.append("安全预检：通过。填写必填字段后可以执行。")
+            if availability.warnings:
+                lines.append("\n提醒：")
+                lines.extend(f"- [{item.code}] {item.message}" for item in availability.warnings)
+            self._set_reason("\n".join(lines))
+            self.run_button.configure(state="normal" if availability.enabled and not self.running else "disabled")
+        except Exception as exc:
+            self._set_reason(f"无法完成预检：{exc}")
+            self.run_button.configure(state="disabled")
+
+    def copy_ai_template(self) -> None:
+        if not self.current_action_id:
+            return
+        text = ai_form_template(self.current_action_id)
+        self.frame.clipboard_clear()
+        self.frame.clipboard_append(text)
+        self.notify("AI 填写模板已复制；AI 只能填写允许的自然语言字段。")
+
+    def paste_ai_json(self) -> None:
+        if not self.current_action_id:
+            return
+        try:
+            text = self.frame.clipboard_get()
+            values = parse_ai_form(text, self.current_action_id)
+            for name, value in values.items():
+                self._set_field(name, value)
+            self.refresh_availability()
+            self.notify("AI JSON 已填入表单，尚未执行；请逐项检查。")
+        except Exception as exc:
+            self.notify(f"无法导入 AI JSON：{exc}")
+
+    def execute_current(self) -> None:
+        if self.service is None or not self.current_action_id or self.running:
+            return
+        try:
+            values = self.service.validate_fields(self.current_action_id, self.fields())
+            availability = self.service.availability(self.current_action_id, values, force=True)
+            if not availability.enabled:
+                self.refresh_availability()
+                self.notify("动作当前不可执行，请查看原因面板。")
+                return
+            if self.current_token and self.current_token != availability.state_token:
+                self.current_token = availability.state_token
+                self.refresh_availability()
+                self.notify("项目状态已经变化；草稿已保留，请检查后再次执行。")
+                return
+            confirmed = availability.confirmation_level != "high"
+            if availability.confirmation_level == "high":
+                from tkinter import messagebox
+                spec = next(item for item in self.specs if item.action_id == self.current_action_id)
+                confirmed = messagebox.askyesno(
+                    "确认高风险动作",
+                    f"确认执行“{spec.label}”吗？\n\n{spec.description}\n\n该动作会再次获得写锁并重新预检。",
+                    parent=self.frame,
+                )
+            if not confirmed:
+                self.notify("已取消动作。")
+                return
+            request = ActionRequest(self.current_action_id, values, availability.state_token, confirmed)
+        except Exception as exc:
+            self.notify(f"表单校验失败：{exc}")
+            return
+
+        self.running = True
+        self.run_button.configure(state="disabled")
+
+        def worker() -> None:
+            assert self.service is not None
+            result = self.service.execute(request, progress=self._thread_progress)
+            self.worker_queue.put(("result", result))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.frame.after(50, self._poll_worker_queue)
+
+    def _thread_progress(self, item: ActionProgress) -> None:
+        self.worker_queue.put(("progress", item))
+
+    def _poll_worker_queue(self) -> None:
+        result = None
+        while True:
+            try:
+                kind, value = self.worker_queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "progress":
+                self.progress_callback(value)
+            elif kind == "result":
+                result = value
+        if result is None:
+            if self.running and self.frame.winfo_exists():
+                self.frame.after(50, self._poll_worker_queue)
+            return
+        self.running = False
+        if result.status == "success":
+            self.notify(result.summary)
+            self.refresh_callback()
+            self.refresh_actions()
+        elif result.status == "blocked":
+            self.notify(f"无法执行 [{result.code}]：{result.summary}")
+            self.refresh_availability()
+        else:
+            self.notify(result.summary)
+            self.refresh_availability()
+
+
+class WorkflowPage:
+    """Read-only, expandable navigator for the complete user-facing workflow."""
+
+    STATUS_LABELS = {
+        "available": "可执行",
+        "needs_input": "等待 AI 文本",
+        "blocked": "暂不可用",
+        "running": "执行中",
+    }
+
+    def __init__(self, parent, tk, ttk, scrolledtext):
+        self.tk, self.ttk = tk, ttk
+        self.frame = ttk.Frame(parent, padding=8)
+        self.records: dict[str, tuple[str, dict | object]] = {}
+        self.snapshot: dict | None = None
+        self.matrix = None
+        self.revision: tuple | None = None
+
+        panes = ttk.Panedwindow(self.frame, orient="horizontal")
+        panes.pack(fill="both", expand=True)
+        left = ttk.Frame(panes, padding=(0, 0, 8, 0))
+        right = ttk.Frame(panes, padding=(8, 0, 0, 0))
+        panes.add(left, weight=2)
+        panes.add(right, weight=5)
+
+        self.tree = ttk.Treeview(
+            left, columns=("item", "status"), show="tree headings", height=24,
+        )
+        self.tree.heading("#0", text="工作流")
+        self.tree.heading("item", text="项目")
+        self.tree.heading("status", text="状态")
+        self.tree.column("#0", width=105, minwidth=80, stretch=False)
+        self.tree.column("item", width=255, minwidth=150, stretch=True)
+        self.tree.column("status", width=92, minwidth=75, stretch=False)
+        scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", self.select_item)
+
+        self.title = ttk.Label(right, text="正在读取当前工作…", font=("TkDefaultFont", 12, "bold"))
+        self.title.pack(fill="x", anchor="w")
+        self.subtitle = ttk.Label(right, text="", justify="left", wraplength=760)
+        self.subtitle.pack(fill="x", pady=(4, 8))
+        self.detail = scrolledtext.ScrolledText(right, wrap="word")
+        self.detail.pack(fill="both", expand=True)
+        self.detail.configure(state="disabled")
+        self._set_detail("Dashboard 仅观察工作流；任务操作由 AI 按项目内置规则执行。")
+
+    def _set_detail(self, text: str) -> None:
+        self.detail.configure(state="normal")
+        self.detail.delete("1.0", "end")
+        self.detail.insert("1.0", text)
+        self.detail.configure(state="disabled")
+
+    @staticmethod
+    def _task_text(task: dict) -> str:
+        acceptance = task.get("acceptance") or []
+        if isinstance(acceptance, str):
+            acceptance = [acceptance]
+        evidence = task.get("evidence") or []
+        return (
+            f"任务 ID：{task.get('task_id') or '未知'}\n"
+            f"分支：{task.get('branch') or '未知'}\n"
+            f"开始：{task.get('started_at') or '未知'}\n"
+            f"结束：{task.get('finished_at') or '进行中'}\n"
+            f"状态：{task.get('status') or ('已完成' if task.get('finished_at') else '活动中')}\n"
+            f"结果：{result_label(task.get('result'))}\n\n"
+            f"目标\n{task.get('goal') or '未记录'}\n\n"
+            "验收条件\n" + ("\n".join(f"- {item}" for item in acceptance) or "- 未记录") +
+            "\n\n结论\n" + (task.get("conclusion") or "未记录") +
+            "\n\n证据\n" + ("\n".join(f"- {item}" for item in evidence) or "- 无")
+        )
+
+    @staticmethod
+    def _stage_text(stage: dict, attempts: list[dict]) -> str:
+        acceptance = "\n".join(f"- {item}" for item in stage.get("acceptance", [])) or "- 未设置"
+        evidence = "\n".join(f"- {item}" for item in stage.get("evidence", [])) or "- 无"
+        related = [item for item in attempts if item.get("stage_id") == stage.get("stage_id")]
+        related_text = "\n".join(
+            f"- {item.get('branch')}｜{item.get('state')}｜{item.get('current_step') or '未记录当前步骤'}"
+            for item in related
+        ) or "- 无"
+        return (
+            f"阶段 ID：{stage.get('stage_id')}\n状态：{stage.get('status')}\n"
+            f"开始：{stage.get('started_at') or '未知'}\n更新：{stage.get('updated_at') or '未知'}\n\n"
+            f"目标\n{stage.get('goal') or '未设置'}\n\n"
+            f"进展\n{stage.get('summary') or '未设置'}\n\n"
+            f"当前步骤\n{stage.get('current_step') or '未设置'}\n\n"
+            f"下一步\n{stage.get('next_step') or '未设置'}\n\n"
+            f"阻塞\n{stage.get('blocker') or '无'}\n\n"
+            f"验收条件\n{acceptance}\n\n证据\n{evidence}\n\n关联探索\n{related_text}"
+        )
+
+    def _action_text(self, action) -> str:
+        spec = next(item for item in action_specs() if item.action_id == action.action_id)
+        availability = action.availability
+        lines = [
+            f"动作 ID：{action.action_id}",
+            f"状态：{self.STATUS_LABELS.get(action.status, action.status)}",
+            f"类别：{action.category}",
+            "",
+            spec.description or "无额外说明。",
+        ]
+        if action.missing_fields:
+            lines.extend(["", "需要 AI 根据用户意图补充："])
+            lines.extend(f"- {item}" for item in action.missing_fields)
+        if availability.blockers:
+            lines.extend(["", "当前阻塞："])
+            for blocker in availability.blockers:
+                lines.append(f"- [{blocker.code}] {blocker.message}")
+                if blocker.evidence:
+                    lines.append(f"  证据：{blocker.evidence}")
+                if blocker.next_action:
+                    lines.append(f"  安全下一步：{blocker.next_action}")
+        if availability.warnings:
+            lines.extend(["", "提醒："])
+            lines.extend(f"- [{item.code}] {item.message}" for item in availability.warnings)
+        if not availability.blockers:
+            lines.extend(["", "该动作由 AI 通过结构化工作流服务执行；Dashboard 不写入业务数据。"])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _decision_text(decision: dict) -> str:
+        return (
+            f"决策 ID：{decision.get('decision_id') or '未知'}\n"
+            f"时间：{decision.get('occurred_at') or '未知'}\n"
+            f"分支：{decision.get('branch') or '未知'}\n\n"
+            f"决策\n{decision.get('decision') or '未记录'}\n\n"
+            f"替代方案\n{decision.get('alternatives') or '未记录'}\n\n"
+            f"依据\n{decision.get('basis') or '未记录'}\n\n"
+            f"重开条件\n{decision.get('reopen_condition') or '未记录'}"
+        )
+
+    def set_data(self, snapshot: dict, matrix) -> None:
+        context = snapshot.get("context") or {}
+        latest_event = (snapshot.get("events") or [{}])[-1].get("event_id") if snapshot.get("events") else None
+        revision = (
+            matrix.state_token,
+            latest_event,
+            len(snapshot.get("task_details") or {}),
+            tuple((item.get("stage_id"), item.get("updated_at")) for item in context.get("stages") or []),
+            tuple(item.get("event_id") for item in snapshot.get("decisions") or []),
+            tuple(item.get("event_id") for item in snapshot.get("explorations") or []),
+        )
+        if revision == self.revision:
+            return
+        self.revision = revision
+        self.snapshot, self.matrix = snapshot, matrix
+        selected = self.tree.selection()
+        selected_id = selected[0] if selected else None
+        self.records.clear()
+        self.tree.delete(*self.tree.get_children())
+
+        active = context.get("active_task") or {}
+        task_details = snapshot.get("task_details") or {}
+        current_task = task_details.get(active.get("task_id")) or active
+
+        task_count = sum(
+            1 for item in task_details.values() if not item.get("is_auxiliary")
+        )
+        if current_task and active.get("task_id") not in task_details:
+            task_count += 1
+        task_group = self.tree.insert(
+            "", "end", iid="group-tasks", text=f"任务（{task_count}）", open=True,
+        )
+        if current_task:
+            iid = "current-task"
+            self.tree.insert(task_group, "end", iid=iid, text="当前", values=(
+                current_task.get("goal") or current_task.get("task_id"), "活动中",
+            ))
+            self.records[iid] = ("task", current_task)
+        active_id = active.get("task_id")
+        historical_tasks = [
+            (task_id, task) for task_id, task in sorted(
+                task_details.items(), key=lambda item: item[1].get("started_at") or "", reverse=True,
+            )
+            if task_id != active_id and not task.get("is_auxiliary")
+        ]
+        task_history_group = self.tree.insert(
+            task_group, "end", iid="group-task-history",
+            text=f"历史任务（{len(historical_tasks)}）", open=False,
+        )
+        for task_id, task in historical_tasks:
+            iid = f"history-task-{task_id}"
+            self.tree.insert(task_history_group, "end", iid=iid, values=(
+                task.get("goal") or task_id, result_label(task.get("result")),
+            ))
+            self.records[iid] = ("task", task)
+
+        action_counts = {
+            status: sum(1 for action in matrix.actions if action.status == status)
+            for status in self.STATUS_LABELS
+        }
+        action_group = self.tree.insert(
+            "", "end", iid="group-actions",
+            text=f"动作（可执行 {action_counts['available']} / 阻塞 {action_counts['blocked']}）",
+            open=True,
+        )
+        action_parents = {}
+        for status in ("available", "needs_input", "running", "blocked"):
+            action_parents[status] = self.tree.insert(
+                action_group, "end", iid=f"group-actions-{status}",
+                text=f"{self.STATUS_LABELS[status]}（{action_counts[status]}）", open=False,
+            )
+        for action in matrix.actions:
+            iid = f"action-{action.action_id}"
+            self.tree.insert(
+                action_parents[action.status], "end", iid=iid,
+                values=(action.label, self.STATUS_LABELS.get(action.status, action.status)),
+            )
+            self.records[iid] = ("action", action)
+
+        stage = context.get("current_stage")
+        stages = context.get("stages") or []
+        stage_count = len(stages) + (1 if stage and not any(
+            item.get("stage_id") == stage.get("stage_id") for item in stages
+        ) else 0)
+        stage_group = self.tree.insert(
+            "", "end", iid="group-stages", text=f"阶段（{stage_count}）", open=False,
+        )
+        if stage:
+            iid = "current-stage"
+            self.tree.insert(stage_group, "end", iid=iid, text="当前", values=(stage.get("title"), stage.get("status")))
+            self.records[iid] = ("stage", stage)
+        historical_stages = [
+            item for item in stages
+            if not stage or item.get("stage_id") != stage.get("stage_id")
+        ]
+        stage_history_group = self.tree.insert(
+            stage_group, "end", iid="group-stage-history",
+            text=f"历史阶段（{len(historical_stages)}）", open=False,
+        )
+        for historical_stage in historical_stages:
+            iid = f"history-stage-{historical_stage.get('stage_id')}"
+            self.tree.insert(stage_history_group, "end", iid=iid, values=(
+                historical_stage.get("title"), historical_stage.get("status"),
+            ))
+            self.records[iid] = ("stage", historical_stage)
+
+        attempt = snapshot.get("attempt")
+        explorations = snapshot.get("explorations") or []
+        attempt_group = self.tree.insert(
+            "", "end", iid="group-attempts", text=f"探索（{len(explorations) + (1 if attempt else 0)}）", open=False,
+        )
+        if attempt:
+            iid = "current-attempt"
+            self.tree.insert(attempt_group, "end", iid=iid, text="当前", values=(attempt.get("goal"), attempt.get("state")))
+            self.records[iid] = ("attempt", attempt)
+        exploration_history_group = self.tree.insert(
+            attempt_group, "end", iid="group-exploration-history",
+            text=f"历史探索（{len(explorations)}）", open=False,
+        )
+        for index, exploration in enumerate(explorations):
+            event_id = exploration.get("event_id") or f"index-{index}"
+            iid = f"exploration-{event_id}"
+            self.tree.insert(exploration_history_group, "end", iid=iid, values=(
+                exploration.get("goal") or exploration.get("branch") or event_id,
+                exploration.get("result") or exploration.get("state") or "未知",
+            ))
+            self.records[iid] = ("exploration", exploration)
+
+        decisions = snapshot.get("decisions") or []
+        decision_group = self.tree.insert(
+            "", "end", iid="group-decisions", text=f"决策（{len(decisions)}）", open=False,
+        )
+        for index, decision in enumerate(decisions):
+            record_id = decision.get("event_id") or decision.get("decision_id") or f"index-{index}"
+            iid = f"decision-{record_id}"
+            self.tree.insert(decision_group, "end", iid=iid, values=(
+                decision.get("decision") or decision.get("decision_id") or record_id,
+                decision.get("occurred_at") or "",
+            ))
+            self.records[iid] = ("decision", decision)
+
+        target = selected_id if selected_id in self.records else ("current-task" if "current-task" in self.records else "current-stage")
+        if target in self.records:
+            self.tree.selection_set(target)
+            self.tree.focus(target)
+            self.tree.see(target)
+            self.select_item()
+
+    def select_item(self, _event=None) -> None:
+        selected = self.tree.selection()
+        if not selected or selected[0] not in self.records:
+            return
+        kind, value = self.records[selected[0]]
+        if kind == "task":
+            self.title.configure(text=value.get("goal") or value.get("task_id") or "任务")
+            self.subtitle.configure(text=f"任务｜{value.get('task_id') or '未知'}")
+            text = self._task_text(value)
+        elif kind == "stage":
+            self.title.configure(text=value.get("title") or "阶段")
+            self.subtitle.configure(text=f"阶段｜{value.get('stage_id') or '未知'}")
+            text = self._stage_text(value, (self.snapshot or {}).get("context", {}).get("attempts") or [])
+        elif kind == "attempt":
+            self.title.configure(text=value.get("goal") or "当前探索")
+            self.subtitle.configure(text=f"探索｜{value.get('branch') or '未知'}｜{value.get('state') or '未知'}")
+            text = DashboardApp.exploration_detail({"_attempt": value})
+        elif kind == "exploration":
+            self.title.configure(text=value.get("goal") or value.get("branch") or "探索")
+            self.subtitle.configure(text=f"探索｜{value.get('branch') or '未知'}｜{value.get('result') or '未知'}")
+            text = DashboardApp.exploration_detail(value)
+        elif kind == "decision":
+            self.title.configure(text=value.get("decision") or value.get("decision_id") or "决策")
+            self.subtitle.configure(text=f"决策｜{value.get('decision_id') or '未知'}")
+            text = self._decision_text(value)
+        else:
+            self.title.configure(text=value.label)
+            self.subtitle.configure(text=f"工作流动作｜{value.action_id}")
+            text = self._action_text(value)
+        self._set_detail(text)
+
+    def open_task(self, task_id: str) -> bool:
+        candidates = ["current-task", f"history-task-{task_id}"]
+        for iid in candidates:
+            record = self.records.get(iid)
+            if record and record[0] == "task" and record[1].get("task_id") == task_id:
+                self.tree.selection_set(iid)
+                self.tree.focus(iid)
+                self.tree.see(iid)
+                self.select_item()
+                return True
+        return False
+
+    def open_action(self, action_id: str) -> bool:
+        iid = f"action-{action_id}"
+        if iid not in self.records:
+            return False
+        self.tree.selection_set(iid)
+        self.tree.focus(iid)
+        self.tree.see(iid)
+        self.select_item()
+        return True
+
+    def open_record(self, kind: str, record_id: str) -> bool:
+        expected = "decision" if kind == "decisions" else "exploration"
+        for iid, (record_kind, value) in self.records.items():
+            if record_kind != expected:
+                continue
+            identities = {value.get("event_id"), value.get("decision_id"), value.get("branch")}
+            if record_id not in identities:
+                continue
+            parent = self.tree.parent(iid)
+            if parent:
+                self.tree.item(parent, open=True)
+            self.tree.selection_set(iid)
+            self.tree.focus(iid)
+            self.tree.see(iid)
+            self.select_item()
+            return True
+        return False
+
+
+class DiagnosticsPage:
+    STATUS_LABELS = {
+        "current": "当前问题",
+        "old_version": "旧版本",
+        "old_version_protected": "待复查·受保护",
+        "resolved": "已确认解决",
+    }
+
+    def __init__(
+        self, parent, ttk, scrolledtext, *, refresh: Callable[[], None],
+        export: Callable[[], None], report_bug: Callable[[], None],
+        resolve_and_cleanup: Callable[[str], None],
+    ):
+        self.frame = ttk.Frame(parent, padding=8)
+        self.refresh = refresh
+        self.resolve_and_cleanup = resolve_and_cleanup
+        self.records: dict[str, tuple[str, dict]] = {}
+        controls = ttk.Frame(self.frame)
+        controls.pack(fill="x", pady=(0, 6))
+        ttk.Button(controls, text="重新读取", command=refresh).pack(side="left")
+        ttk.Button(controls, text="导出诊断包", command=export).pack(side="left", padx=(6, 0))
+        ttk.Button(controls, text="报告 Bug", command=report_bug).pack(side="left", padx=(6, 0))
+        self.resolve_button = ttk.Button(
+            controls, text="确认已解决并删除", command=self.confirm_resolve, state="disabled",
+        )
+        self.resolve_button.pack(side="left", padx=(6, 0))
+        ttk.Label(
+            controls, text="诊断仅保存在本地；导出不会自动上传。",
+        ).pack(side="left", padx=(14, 0))
+
+        panes = ttk.Panedwindow(self.frame, orient="horizontal")
+        panes.pack(fill="both", expand=True)
+        left = ttk.Frame(panes, padding=(0, 0, 8, 0))
+        right = ttk.Frame(panes, padding=(8, 0, 0, 0))
+        panes.add(left, weight=3)
+        panes.add(right, weight=5)
+        self.tree = ttk.Treeview(
+            left, columns=("code", "count", "export", "status"), show="tree headings", height=24,
+        )
+        self.tree.heading("#0", text="诊断问题")
+        for key, label, width in (
+            ("code", "代码", 80), ("count", "次数", 48),
+            ("export", "导出", 72), ("status", "状态", 120),
+        ):
+            self.tree.heading(key, text=label)
+            self.tree.column(key, width=width, minwidth=45, stretch=key == "status")
+        self.tree.column("#0", width=245, minwidth=150, stretch=True)
+        scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", self.show_selected)
+        self.title = ttk.Label(right, text="诊断概览", font=("TkDefaultFont", 12, "bold"))
+        self.title.pack(fill="x", anchor="w")
+        self.subtitle = ttk.Label(right, text="选择左侧问题查看导出覆盖和安全处理方式。", wraplength=760, justify="left")
+        self.subtitle.pack(fill="x", pady=(4, 8))
+        self.detail = scrolledtext.ScrolledText(right, wrap="word")
+        self.detail.pack(fill="both", expand=True)
+        self.detail.configure(state="disabled")
+        self.revision: str | None = None
+
+    def _set_detail(self, text: str) -> None:
+        self.detail.configure(state="normal")
+        self.detail.delete("1.0", "end")
+        self.detail.insert("1.0", text)
+        self.detail.configure(state="disabled")
+
+    def set_data(self, overview: dict) -> None:
+        revision = json.dumps(overview, ensure_ascii=False, sort_keys=True, default=str)
+        if revision == self.revision:
+            return
+        self.revision = revision
+        selected = self.tree.selection()
+        selected_id = selected[0] if selected else None
+        self.tree.delete(*self.tree.get_children())
+        self.records.clear()
+        issues = overview.get("issues") or []
+        issues_group = self.tree.insert("", "end", iid="diagnostics-issues", text=f"问题（{len(issues)}）", open=True)
+        for issue in issues:
+            iid = f"diagnostic-{issue['fingerprint']}"
+            self.tree.insert(issues_group, "end", iid=iid, text=short(issue.get("summary"), 42), values=(
+                issue.get("code"), issue.get("count"), "已导出" if issue.get("exported") else "未导出",
+                self.STATUS_LABELS.get(issue.get("status"), issue.get("status")),
+            ))
+            self.records[iid] = ("issue", issue)
+        cleanups = overview.get("cleanups") or []
+        cleanup_group = self.tree.insert("", "end", iid="diagnostics-cleanups", text=f"最近清理（{len(cleanups)}）", open=False)
+        for index, cleanup in enumerate(cleanups):
+            iid = f"diagnostic-cleanup-{index}"
+            self.tree.insert(cleanup_group, "end", iid=iid, text=cleanup.get("cleaned_at") or "未知时间", values=(
+                "cleanup", cleanup.get("records", 0), "—", "自动" if cleanup.get("type") == "records_auto_cleaned" else "手动",
+            ))
+            self.records[iid] = ("cleanup", cleanup)
+        target = selected_id if selected_id in self.records else next(iter(self.records), None)
+        if target:
+            self.tree.selection_set(target)
+            self.tree.focus(target)
+            self.tree.see(target)
+            self.show_selected()
+        else:
+            self.title.configure(text="当前没有诊断问题")
+            self.subtitle.configure(text="后续失败、冲突或异常会在这里出现。")
+            self._set_detail("诊断记录为空。\n\n导出诊断包仍会包含版本环境和只读健康检查结果。")
+            self.resolve_button.configure(state="disabled")
+
+    def show_selected(self, _event=None) -> None:
+        selected = self.tree.selection()
+        record = self.records.get(selected[0]) if selected else None
+        if record is None:
+            return
+        kind, value = record
+        if kind == "cleanup":
+            self.title.configure(text="诊断清理回执")
+            self.subtitle.configure(text=value.get("cleaned_at") or "未知时间")
+            self._set_detail(
+                f"方式：{'升级后自动清理' if value.get('type') == 'records_auto_cleaned' else '用户确认清理'}\n"
+                f"清理记录：{value.get('records', 0)}\n"
+                f"来源版本：{value.get('from_version') or '不适用'}\n"
+                f"目标版本：{value.get('to_version') or '不适用'}\n"
+                f"故障指纹：{', '.join(value.get('fingerprints') or []) or '无'}"
+            )
+            self.resolve_button.configure(state="disabled")
+            return
+        self.title.configure(text=f"[{value.get('code')}] {value.get('summary')}")
+        self.subtitle.configure(text=f"指纹 {value.get('fingerprint')}｜{self.STATUS_LABELS.get(value.get('status'), value.get('status'))}")
+        export_text = (
+            f"已导出：{value.get('last_export_id')}｜{value.get('last_exported_at')}"
+            if value.get("exported") else "尚未进入任何诊断包"
+        )
+        self._set_detail(
+            f"分类：{value.get('category')}\n重复次数：{value.get('count')}\n"
+            f"最近发生：{value.get('latest_at') or '未知'}\n涉及版本：{', '.join(value.get('versions') or [])}\n"
+            f"受保护：{'是' if value.get('protected') else '否'}\n{export_text}\n\n"
+            f"事件编号\n" + "\n".join(f"- {item}" for item in value.get("incident_ids") or []) +
+            f"\n\n建议\n{value.get('suggestion') or '请检查问题。'}\n\n"
+            "确认已解决并删除会先记录本地解决回执，再原子清理对应指纹；以后再次出现仍会作为新问题记录。"
+        )
+        self.resolve_button.configure(state="normal")
+
+    def confirm_resolve(self) -> None:
+        selected = self.tree.selection()
+        record = self.records.get(selected[0]) if selected else None
+        if record is None or record[0] != "issue":
+            return
+        issue = record[1]
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+            "确认解决并删除",
+            f"将删除指纹 {issue['fingerprint']} 对应的 {issue['count']} 条本地诊断记录。\n\n"
+            "不会修改项目文件、事件日志或数据库；若故障再次发生会重新记录。是否继续？",
+            parent=self.frame.winfo_toplevel(),
+        ):
+            return
+        self.resolve_and_cleanup(issue["fingerprint"])
+
+
+class ExplanationPage:
+    """Static bilingual glossary for states shown by the read-only Dashboard."""
+
+    SECTIONS = (
+        ("工作流 Workflow", (
+            ("idle", "未开始", "当前没有活动任务。", "可以根据用户的新意图建立任务周期。"),
+            ("starting", "正在建立周期", "start 事务尚未全部完成。", "等待完成；若进程异常退出，使用 task recover。"),
+            ("started", "周期已建立", "任务已经建立，但尚未产生文件变化或进度记录。", "开始工作并及时记录进展。"),
+            ("working", "工作中", "任务期间检测到工作树变化。", "继续工作，阶段性使用 state update。"),
+            ("progress-recorded", "进展已记录", "当前任务已经保存结构化进度。", "继续执行或补充决策、探索证据。"),
+            ("ready", "可完成", "主要完成前置条件已经满足。", "确认编辑停止并运行健康检查后结束任务。"),
+            ("finishing", "正在收尾", "完成事件、投影或自动提交正在处理。", "不要重复写入；异常退出后使用 task recover。"),
+            ("completed", "已完成", "最近任务已经产生完成回执，当前无活动任务。", "查看下一步，或开始新的任务周期。"),
+            ("recovery-required", "需要恢复", "sidecar、事件或投影表明事务中途停止。", "先执行 task recover，不要手工删除状态文件。"),
+        )),
+        ("任务 Task", (
+            ("active", "活动中", "当前项目唯一允许写入生命周期的任务。", "继续工作、更新进度，完成后运行 end。"),
+            ("completed", "完成", "目标按本次任务定义完成并留下证据。", "检查后续步骤以及是否需要提交、推送或发布。"),
+            ("blocked", "阻塞", "任务无法继续，但原因已经明确。", "记录阻塞条件，外部条件变化后恢复。"),
+            ("failed", "失败", "本次执行没有达到目标并明确失败。", "保留证据，建立修复任务或重新评估路线。"),
+            ("indeterminate", "待判定", "证据不足，暂时不能判断成功或失败。", "补充验证，不要把它当成已完成。"),
+            ("abandoned", "已放弃", "用户明确停止该任务，但文件和分支仍被保留。", "需要时从保留现场建立新任务；不会自动回滚。"),
+        )),
+        ("动作 Action", (
+            ("available", "可执行", "结构状态满足，AI 可以立即调用该动作。", "仍应按动作风险和用户意图执行。"),
+            ("needs_input", "等待 AI 文本", "安全前置条件满足，但缺少目标、原因或证据等自然语言。", "AI 从用户描述提取字段；Dashboard 不负责填写。"),
+            ("running", "执行中", "当前写锁对应这个生命周期动作。", "等待动作完成，不要并发执行其他写动作。"),
+            ("blocked", "暂不可用", "分支、活动任务、恢复、健康、版本或锁条件不满足。", "查看原因代码、证据和安全下一步。"),
+        )),
+        ("阶段 Stage", (
+            ("active", "进行中", "这是当前长期大阶段。", "持续更新摘要、当前步骤、下一步和证据。"),
+            ("paused", "已暂停", "方向仍有效，但当前暂不推进。", "恢复前先核对目标与阻塞是否仍然成立。"),
+            ("completed", "已完成", "原阶段验收条件已满足且证据完整。", "建立下一阶段，或进入发布与维护。"),
+            ("cancelled", "已取消", "原目标已经作废，不再继续。", "保留历史原因；不要伪装成 completed。"),
+        )),
+        ("探索 Exploration", (
+            ("active", "探索中", "假设或不确定路线仍在验证。", "持续记录当前步骤、进展、证据和下一步。"),
+            ("validated", "已验证", "假设、证据和结论完整，结果支持该路线。", "可以准备 Squash PR，但合并仍需用户确认。"),
+            ("negative", "负面结果", "证据表明路线不可行或不值得继续。", "保存失败价值并归档，不删除科研现场。"),
+            ("inconclusive", "无定论", "现有证据不足以支持或否定假设。", "补充实验，或记录限制后暂停。"),
+            ("paused", "已暂停", "探索暂时停止但没有得出最终结论。", "保留分支和证据，条件成熟后恢复。"),
+        )),
+        ("决策 Decision", (
+            ("decision", "选择", "最终采用的路线或判断。", "路线变化时必须记录。"),
+            ("alternatives", "替代方案", "曾考虑但没有采用的方案。", "用于理解为什么没有走其他路线。"),
+            ("basis", "依据", "支持选择的证据、约束和权衡。", "应尽量具体并可复核。"),
+            ("reopen_condition", "重开条件", "什么新证据出现时应重新讨论该决策。", "条件满足时建立新决策，不改写旧记录。"),
+            ("immutable", "不可改写", "决策是追加式审计记录，没有可变状态。", "需要纠正时追加新决策并引用旧决策。"),
+        )),
+        ("资料 Resource", (
+            ("active", "有效", "资料索引正常参与项目使用。", "保持路径、类型和实际文件一致。"),
+            ("missing", "文件缺失", "索引存在，但登记的项目文件当前找不到。", "恢复文件或运行扫描确认，不要静默删除索引。"),
+            ("archived", "已归档", "资料被软归档，不作为当前主要材料。", "需要时可以恢复，文件和历史仍保留。"),
+            ("ok", "目录正常", "目录存在，文件全部已索引且类型匹配。", "无需处理。"),
+            ("attention", "目录需关注", "存在未索引文件、类型错位或缺失状态不一致。", "让 AI 运行 catalog scan 或检查具体文件。"),
+            ("missing directory", "目录缺失", "七个标准资源目录之一不存在。", "运行 install 恢复目录结构，不要自行改变标准布局。"),
+        )),
+        ("诊断 Diagnostics", (
+            ("current", "当前问题", "该故障在当前应用版本中出现。", "检查建议；需要报告时先导出诊断包。"),
+            ("old_version", "旧版本问题", "该故障只在旧应用版本中出现。", "更新成功后普通校验和冲突会自动清理。"),
+            ("old_version_protected", "旧版本待复查", "旧版本的内部异常或数据完整性问题仍被保护。", "确认新版本不可复现且证据已保留后再删除。"),
+            ("resolved", "已确认解决", "用户已经明确确认该故障指纹不再需要保留。", "执行原子清理；以后复发会生成新记录。"),
+            ("exported", "已导出", "至少一个事件已经进入带 export_id 的诊断包。", "报告 Bug 时检查并手工附加对应 ZIP。"),
+        )),
+        ("外置工具 External tool", (
+            ("active", "正在使用", "该工具是当前项目的有效外部提醒。", "需要时由用户或 AI 主动选择使用；Dashboard 不自动运行。"),
+            ("paused", "暂时停用", "工具记录仍有效，但当前阶段不建议使用。", "重新需要时由 AI 追加 restore 记录。"),
+            ("retired", "已经停用", "工具不再作为当前工作方式，但历史用途仍保留。", "不要删除历史；重新采用时显式 restore。"),
+        )),
+        ("Git 与发布 Git / Release", (
+            ("clean", "工作区干净", "没有未提交的已跟踪或未跟踪修改。", "可以继续检查提交和推送状态。"),
+            ("dirty", "工作区有修改", "存在尚未提交的文件变化。", "先验证并提交；不要把远端同步误认为工作已发布。"),
+            ("synced", "已同步", "当前 HEAD 与已知 origin/main 相同。", "只代表提交已推送，不代表工作区修改或 Release 已发布。"),
+            ("ahead", "本地领先", "本地有尚未推送的提交。", "确认后推送，并重新核对远端。"),
+            ("behind", "本地落后", "远端有本地尚未包含的提交。", "停止发布，先安全同步。"),
+            ("diverged", "已经分叉", "本地与远端各自包含不同提交。", "人工审查并选择合并或变基策略。"),
+            ("unavailable", "远端不可用", "没有 origin/main、离线或 Git 检查失败。", "只能陈述未知，不能假定已经推送。"),
+            ("candidate build", "候选构建", "本地构建用于验收，可能包含未提交源码。", "不能称为正式发布。"),
+            ("verified release", "已核对正式发布", "正式 manifest 的版本与构建 ID 和当前程序一致。", "表示 Release 资产已核对，不等同于科研内容结论。"),
+        )),
+    )
+
+    def __init__(self, parent, ttk, scrolledtext):
+        self.frame = ttk.Frame(parent, padding=8)
+        self.records: dict[str, tuple[str, str, str, str, str]] = {}
+        panes = ttk.Panedwindow(self.frame, orient="horizontal")
+        panes.pack(fill="both", expand=True)
+        left = ttk.Frame(panes, padding=(0, 0, 8, 0))
+        right = ttk.Frame(panes, padding=(8, 0, 0, 0))
+        panes.add(left, weight=2)
+        panes.add(right, weight=5)
+        self.tree = ttk.Treeview(left, columns=("meaning",), show="tree headings", height=24)
+        self.tree.heading("#0", text="类别 / English status")
+        self.tree.heading("meaning", text="中文")
+        self.tree.column("#0", width=260, minwidth=150, stretch=True)
+        self.tree.column("meaning", width=110, minwidth=80, stretch=False)
+        scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", self.show_selected)
+        for section_index, (section, items) in enumerate(self.SECTIONS):
+            group = self.tree.insert(
+                "", "end", iid=f"explain-group-{section_index}", text=section,
+                open=section_index == 0,
+            )
+            for item_index, item in enumerate(items):
+                iid = f"explain-{section_index}-{item_index}"
+                self.tree.insert(group, "end", iid=iid, text=item[0], values=(item[1],))
+                self.records[iid] = (section, *item)
+        self.title = ttk.Label(right, text="状态解释", font=("TkDefaultFont", 12, "bold"))
+        self.title.pack(fill="x", anchor="w")
+        self.subtitle = ttk.Label(right, text="选择左侧英文状态查看它在项目中的实际含义。", wraplength=760, justify="left")
+        self.subtitle.pack(fill="x", pady=(4, 8))
+        self.detail = scrolledtext.ScrolledText(right, wrap="word")
+        self.detail.pack(fill="both", expand=True)
+        self.detail.configure(state="disabled")
+
+    def show_selected(self, _event=None) -> None:
+        selected = self.tree.selection()
+        record = self.records.get(selected[0]) if selected else None
+        if not record:
+            return
+        section, code, meaning, implication, next_step = record
+        self.title.configure(text=f"{code}｜{meaning}")
+        self.subtitle.configure(text=section)
+        text = (
+            f"英文状态\n{code}\n\n中文含义\n{meaning}\n\n"
+            f"意味着什么\n{implication}\n\n安全下一步\n{next_step}"
+        )
+        self.detail.configure(state="normal")
+        self.detail.delete("1.0", "end")
+        self.detail.insert("1.0", text)
+        self.detail.configure(state="disabled")
+
+
 class DashboardApp:
     def __init__(self, root, tk, ttk, scrolledtext, provider: DashboardDataProvider, refresh_seconds: float):
         self.root, self.tk, self.ttk = root, tk, ttk
@@ -1514,12 +2654,21 @@ class DashboardApp:
         self.provider = provider
         self.refresh_seconds = refresh_seconds
         self.snapshot: dict | None = None
-        self.active_preset: str | None = None
         self.advanced_window: AdvancedWindow | None = None
         self.last_refresh_error: str | None = None
+        self.lifecycle_polling = False
+        self.lifecycle_token: str | None = None
+        self.latest_update_result: dict | None = None
+        self.ui_queue: queue.Queue[Callable[[], None]] = queue.Queue()
+        self.refresh_running = False
+        self.refresh_pending = False
+        self.refresh_force_full = False
+        self.last_full_state_token: str | None = None
+        self.action_matrix = None
+        self.section_revisions: dict[str, str] = {}
         root.title("Project Maintenance")
-        root.geometry("1120x760")
-        root.minsize(800, 560)
+        root.geometry("1220x820")
+        root.minsize(900, 620)
 
         toolbar = ttk.Frame(root, padding=(10, 8))
         toolbar.pack(fill="x")
@@ -1527,35 +2676,34 @@ class DashboardApp:
         self.branch_label.pack(side="left")
         self.health_label = ttk.Label(toolbar, text="数据库：加载中")
         self.health_label.pack(side="left", padx=(18, 0))
-        self.version_label = ttk.Label(toolbar, text=version_status_text(provider.version_info()))
+        self.version_label = ttk.Label(toolbar, text="版本：加载中…")
         self.version_label.pack(side="left", padx=(18, 0))
         ttk.Button(toolbar, text="刷新", command=self.refresh).pack(side="right")
         ttk.Button(toolbar, text="高级查看", command=self.open_advanced).pack(side="right", padx=(0, 6))
-        ttk.Button(toolbar, text="报告 Bug", command=self.report_bug).pack(side="right", padx=(0, 6))
-        ttk.Button(toolbar, text="导出诊断包", command=self.export_diagnostic_bundle).pack(side="right", padx=(0, 6))
         self.update_button = ttk.Button(toolbar, text="检查更新", command=self.check_for_updates)
         self.update_button.pack(side="right", padx=(0, 6))
         self.update_label = ttk.Label(toolbar, text="")
         self.update_label.pack(side="right", padx=(0, 8))
 
-        search_toolbar = ttk.Frame(root, padding=(10, 0, 10, 8))
-        search_toolbar.pack(fill="x")
-        ttk.Label(search_toolbar, text="全局搜索").pack(side="left")
-        self.global_query = tk.StringVar()
-        global_entry = ttk.Entry(search_toolbar, textvariable=self.global_query, width=27)
-        global_entry.pack(side="left", padx=(6, 5))
-        global_entry.bind("<Return>", lambda _event: self.perform_global_search())
-        ttk.Button(search_toolbar, text="搜索", command=self.perform_global_search).pack(side="left")
-        ttk.Label(search_toolbar, text="快捷筛选").pack(side="left", padx=(18, 5))
-        self.preset_buttons = {}
-        for name, label in (("recent", "最近任务"), ("negative", "失败探索")):
-            button = ttk.Button(search_toolbar, text=label, command=lambda selected=name: self.toggle_preset(selected))
-            button.pack(side="left", padx=(0, 5))
-            self.preset_buttons[name] = button
-        ttk.Button(search_toolbar, text="清除", command=self.clear_preset).pack(side="left")
+        lifecycle = ttk.LabelFrame(root, text="当前工作周期（近实时）", padding=(10, 6))
+        lifecycle.pack(fill="x", padx=10, pady=(0, 7))
+        self.lifecycle_steps = ttk.Label(lifecycle, text="未开始 → 周期已建立 → 工作中 → 进展已记录 → 可完成 → 正在收尾 → 已完成")
+        self.lifecycle_steps.pack(anchor="w")
+        self.lifecycle_detail = ttk.Label(lifecycle, text="正在读取活动任务…", wraplength=1160, justify="left")
+        self.lifecycle_detail.pack(fill="x", pady=(3, 0))
+        self.lifecycle_action = ttk.Label(lifecycle, text="最近动作：无")
+        self.lifecycle_action.pack(fill="x", pady=(2, 0))
+        self.lifecycle_delivery = ttk.Label(
+            lifecycle, text="工作区：读取中　｜　提交：读取中　｜　推送：读取中　｜　正式发布：读取中",
+            wraplength=1160, justify="left",
+        )
+        self.lifecycle_delivery.pack(fill="x", pady=(2, 0))
 
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+
+        self.workflow_page = WorkflowPage(self.notebook, tk, ttk, scrolledtext)
+        self.notebook.add(self.workflow_page.frame, text="工作流")
 
         self.overview_frame = ttk.Frame(self.notebook, padding=8)
         overview_actions = ttk.Frame(self.overview_frame)
@@ -1566,19 +2714,34 @@ class DashboardApp:
         self.overview.configure(state="disabled")
         self.notebook.add(self.overview_frame, text="概览")
 
+        self.search_frame = ttk.Frame(self.notebook, padding=8)
+        search_controls = ttk.Frame(self.search_frame)
+        search_controls.pack(fill="x", pady=(0, 6))
+        ttk.Label(search_controls, text="全局搜索").pack(side="left")
+        self.global_query = tk.StringVar()
+        global_entry = ttk.Entry(search_controls, textvariable=self.global_query, width=42)
+        global_entry.pack(side="left", padx=(6, 6))
+        global_entry.bind("<Return>", lambda _event: self.perform_global_search())
+        ttk.Button(search_controls, text="搜索", command=self.perform_global_search).pack(side="left")
+        ttk.Button(search_controls, text="清除", command=self.clear_global_search).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            search_controls, text="搜索任务、阶段、决策、探索、资料和原始事件的只读索引。",
+        ).pack(side="left", padx=(14, 0))
         self.search_page = TablePage(
-            self.notebook, tk, ttk, scrolledtext,
+            self.search_frame, tk, ttk, scrolledtext,
             columns=[("kind_label", "类型", 80), ("occurred_at", "时间", 180), ("branch", "分支", 150),
                      ("title", "标题", 320), ("summary", "摘要", 250)],
             detail=self.search_result_detail, refresh=self.refresh,
             activate=self.open_search_result, show_query=False, split_detail=True,
         )
-        self.notebook.add(self.search_page.frame, text="搜索")
+        self.search_page.frame.pack(fill="both", expand=True, padx=0, pady=0)
+        self.notebook.add(self.search_frame, text="搜索")
 
         self.catalog_page = CatalogPage(
             self.notebook, tk, ttk, scrolledtext, refresh=self.refresh,
             project_root=provider.model.database_path.parent.parent,
             notify=self.notify,
+            open_action=None,
         )
         self.notebook.add(self.catalog_page.frame, text="资料")
 
@@ -1591,39 +2754,168 @@ class DashboardApp:
         )
         self.notebook.add(self.workbench_page.frame, text="工作台")
 
-        self.task_page = TaskPage(
-            self.notebook, tk, ttk, scrolledtext, open_related=self.open_related_record,
+        self.diagnostics_page = DiagnosticsPage(
+            self.notebook, ttk, scrolledtext, refresh=self.refresh,
+            export=self.export_diagnostic_bundle, report_bug=self.report_bug,
+            resolve_and_cleanup=self.resolve_diagnostic_issue,
         )
-        self.notebook.add(self.task_page.frame, text="任务")
+        self.notebook.add(self.diagnostics_page.frame, text="诊断")
 
-        self.stage_page = StagePage(
-            self.notebook, tk, ttk, scrolledtext, open_task=self.open_task,
-        )
-        self.notebook.add(self.stage_page.frame, text="阶段")
+        self.explanation_page = ExplanationPage(self.notebook, ttk, scrolledtext)
+        self.notebook.add(self.explanation_page.frame, text="解释")
 
-        self.records_page = RecordsPage(
-            self.notebook, tk, ttk, scrolledtext, open_task=self.open_record_task,
-            detail=self.record_detail,
-        )
-        self.notebook.add(self.records_page.frame, text="记录")
-
-        self.status = ttk.Label(root, text="准备刷新", padding=(10, 5))
+        self.status = ttk.Label(root, text="窗口已就绪，正在后台读取项目…", padding=(10, 5))
         self.status.pack(fill="x")
-        self.refresh()
-        if refresh_seconds > 0:
-            root.after(max(250, int(refresh_seconds * 1000)), self.auto_refresh)
+        root.after(50, self.drain_ui_queue)
+        root.after(0, lambda: self.request_refresh(force_full=True))
+        root.after(1000, self.auto_refresh)
 
     def auto_refresh(self) -> None:
         try:
             if self.root.state() != "iconic":
-                self.refresh()
+                self.request_refresh(force_full=False)
         finally:
-            if self.refresh_seconds > 0 and self.root.winfo_exists():
-                self.root.after(max(250, int(self.refresh_seconds * 1000)), self.auto_refresh)
+            if self.root.winfo_exists():
+                self.root.after(1000, self.auto_refresh)
 
     def notify(self, message: str) -> None:
         if hasattr(self, "status"):
             self.status.configure(text=message)
+
+    def post_ui(self, callback: Callable[[], None]) -> None:
+        self.ui_queue.put(callback)
+
+    def drain_ui_queue(self) -> None:
+        while True:
+            try:
+                callback = self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback()
+            except Exception as exc:
+                self.notify(f"界面回调失败：{exc}")
+        if self.root.winfo_exists():
+            self.root.after(50, self.drain_ui_queue)
+
+    def request_refresh(self, *, force_full: bool = False) -> None:
+        """Run one non-overlapping background refresh and coalesce later requests."""
+        if self.refresh_running:
+            self.refresh_pending = True
+            self.refresh_force_full = self.refresh_force_full or force_full
+            return
+        self.refresh_running = True
+        requested_full = force_full or self.snapshot is None
+
+        def worker() -> None:
+            matrix = None
+            snapshot = None
+            version = None
+            error = None
+            try:
+                service = self.provider.action_service
+                if service is not None:
+                    matrix = service.availability_matrix(
+                        force=requested_full, max_age=1.25,
+                    )
+                    requested = requested_full or matrix.state_token != self.last_full_state_token
+                else:
+                    requested = requested_full
+                if requested:
+                    snapshot = self.provider.load()
+                if self.snapshot is None:
+                    version = self.provider.version_info()
+            except Exception as exc:
+                error = str(exc)
+
+            self.post_ui(lambda: self._finish_refresh(matrix, snapshot, version, error))
+
+        threading.Thread(target=worker, daemon=True, name="dashboard-refresh").start()
+
+    def _finish_refresh(self, matrix, snapshot: dict | None, version: dict | None, error: str | None) -> None:
+        self.refresh_running = False
+        if matrix is not None:
+            self.action_matrix = matrix
+            self.apply_lifecycle(matrix.state)
+        if snapshot is not None:
+            self.snapshot = snapshot
+            self.last_refresh_error = None
+            self.last_full_state_token = matrix.state_token if matrix is not None else self.last_full_state_token
+            self.apply_snapshot(snapshot)
+            rebuilt = "；本次已重建" if snapshot["health"]["rebuilt"] else ""
+            self.status.configure(text=f"刷新成功：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{rebuilt}")
+        elif error:
+            self.status.configure(text=f"刷新失败，继续显示上一次数据：{error}")
+            if error != self.last_refresh_error:
+                record_failure(
+                    self.project_root, DashboardError(error), command="dashboard.refresh",
+                    application_version=__version__, schema_version=SCHEMA_VERSION,
+                    execution_mode=execution_mode(),
+                )
+                self.last_refresh_error = error
+        if version is not None:
+            self.version_label.configure(text=version_status_text(version))
+        if self.snapshot is not None and self.action_matrix is not None:
+            self.workflow_page.set_data(self.snapshot, self.action_matrix)
+        if self.refresh_pending:
+            pending_full = self.refresh_force_full
+            self.refresh_pending = False
+            self.refresh_force_full = False
+            self.root.after(0, lambda: self.request_refresh(force_full=pending_full))
+
+    def open_action(self, action_id: str, preset: dict | None = None) -> None:
+        del preset
+        if self.workflow_page.open_action(action_id):
+            self.notebook.select(self.workflow_page.frame)
+        else:
+            self.notify(f"找不到工作流动作：{action_id}")
+
+    def action_progress(self, item: ActionProgress) -> None:
+        self.lifecycle_action.configure(
+            text=f"当前动作：{item.action_id}｜{item.phase}｜{item.percent}%｜{item.message}"
+        )
+
+    def poll_lifecycle(self) -> None:
+        self.request_refresh(force_full=False)
+
+    def apply_lifecycle(self, state: dict) -> None:
+        step = state.get("lifecycle_step") or {"index": 0, "label": "未知"}
+        labels = ["未开始", "周期已建立", "工作中", "进展已记录", "可完成", "正在收尾", "已完成"]
+        rendered = [f"【{label}】" if index == step.get("index") else label for index, label in enumerate(labels)]
+        self.lifecycle_steps.configure(text=" → ".join(rendered))
+        active = state.get("active_task") or {}
+        writer = state.get("writer_lock") or {}
+        writer_text = (
+            f"写锁 PID {writer.get('pid')} / {writer.get('command')}"
+            if writer.get("status") == "active" else "写锁空闲"
+        )
+        if active:
+            detail = (
+                f"{active.get('task_id')}｜{active.get('kind') or 'other'}｜{active.get('branch')}｜"
+                f"开始 {active.get('started_at')}｜变化 {len(state.get('changed_paths') or [])} 个文件｜"
+                f"进度 {'已记录' if active.get('state_updated') else '未记录'}｜"
+                f"决策 {active.get('decisions_added') or 0}｜{writer_text}｜"
+                f"工作树稳定 {state.get('worktree_quiet_seconds', 0)} 秒"
+            )
+        else:
+            last = state.get("last_completed") or {}
+            if step.get("key") == "completed" and last:
+                detail = (
+                    f"最近完成 {last.get('task_id')}｜{last.get('result') or 'completed'}｜"
+                    f"{last.get('occurred_at')}｜分支 {state.get('branch') or '未知'}｜{writer_text}"
+                )
+            else:
+                detail = f"当前没有活动工作周期｜分支 {state.get('branch') or '未知'}｜{writer_text}"
+        if (state.get("sidecar") or {}).get("error"):
+            detail += f"｜需要恢复：{state['sidecar']['error']}"
+        self.lifecycle_detail.configure(text=detail)
+        self.lifecycle_delivery.configure(
+            text=delivery_status_text(state, self.latest_update_result),
+        )
+        token = state.get("state_token")
+        if self.lifecycle_token and token != self.lifecycle_token:
+            self.lifecycle_action.configure(text="项目状态已变化；只读工作流视图正在同步。")
+        self.lifecycle_token = token
 
     def check_for_updates(self) -> None:
         self.update_button.configure(state="disabled")
@@ -1631,6 +2923,7 @@ class DashboardApp:
 
         def worker() -> None:
             detail = ""
+            result = None
             try:
                 result = self.provider.check_for_updates()
                 message = update_status_text(result)
@@ -1641,14 +2934,91 @@ class DashboardApp:
             def finish() -> None:
                 self.update_label.configure(text=message)
                 self.update_button.configure(state="normal")
+                self.latest_update_result = result
+                if self.action_matrix is not None:
+                    self.apply_lifecycle(self.action_matrix.state)
+                if self.snapshot is not None:
+                    self.section_revisions.pop("overview", None)
+                    self.apply_snapshot(self.snapshot)
+                self.update_button.configure(text="检查更新", command=self.check_for_updates)
                 self.status.configure(text=detail or message)
 
-            try:
-                self.root.after(0, finish)
-            except Exception:
-                pass
+            self.post_ui(finish)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def apply_update(self) -> None:
+        self.notify("Dashboard 为只读观察台；请在 AI 对话中确认并执行软件更新。")
+        return
+        # Kept below for source compatibility with pre-release v1.5 tests; the
+        # read-only Dashboard has no control that can reach this legacy path.
+        service = self.provider.action_service
+        if service is None:
+            self.notify("当前 Dashboard 没有动作服务，无法执行更新。")
+            return
+        availability = service.availability("update.apply", force=True)
+        if not availability.enabled:
+            detail = "；".join(f"[{item.code}] {item.message}" for item in availability.blockers)
+            self.notify("无法一键更新：" + detail)
+            self.open_action("update.apply")
+            return
+        from tkinter import messagebox
+        target = (self.latest_update_result or {}).get("latest_version") or "最新稳定版"
+        if not messagebox.askyesno(
+            "确认软件更新",
+            f"将下载、校验并安装 {target}。\n\n要求 main、无活动任务、工作树干净且同步。"
+            "更新器会保留事件历史并在失败时回滚。是否继续？",
+            parent=self.root,
+        ):
+            return
+        self.update_button.configure(state="disabled")
+        request = ActionRequest("update.apply", {}, availability.state_token, True)
+
+        def worker() -> None:
+            result = service.execute(
+                request,
+                progress=lambda item: self.post_ui(lambda item=item: self.action_progress(item)),
+            )
+
+            def finish() -> None:
+                self.update_button.configure(state="normal")
+                if result.status != "success":
+                    self.notify(result.summary)
+                    return
+                data = result.data if isinstance(result.data, dict) else {}
+                changed = "\n".join(f"- {item}" for item in data.get("changed", [])) or "- 无"
+                conflicts = "\n".join(f"- {item}" for item in data.get("conflicts", [])) or "- 无"
+                restart = messagebox.askyesno(
+                    "更新完成",
+                    f"更新已完成。\n\n变更：\n{changed}\n\n模板冲突：\n{conflicts}\n\n"
+                    "是否现在启动新版 Dashboard 并关闭当前窗口？",
+                    parent=self.root,
+                )
+                if restart:
+                    self.restart_updated_dashboard()
+                else:
+                    self.notify("更新已完成；当前仍是旧窗口，稍后请重新打开 Dashboard。")
+            self.post_ui(finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def restart_updated_dashboard(self) -> None:
+        executable = selected_executable(self.project_root)
+        if executable is None:
+            self.notify("找不到已安装的新版 EXE，请手工重新打开项目根目录的 project-hooks.exe。")
+            return
+        env = os.environ.copy()
+        env[ACTIVE_ENV] = "1"
+        env[PORTABLE_ROOT_ENV] = str(self.project_root)
+        try:
+            subprocess.Popen(
+                [str(executable), "--project", str(self.project_root), "dashboard"],
+                env=env, close_fds=True,
+            )
+        except OSError as exc:
+            self.notify(f"新版已安装，但自动重启失败：{exc}")
+            return
+        self.root.destroy()
 
     @property
     def project_root(self) -> Path:
@@ -1673,7 +3043,10 @@ class DashboardApp:
             # Imported lazily to avoid a module cycle during CLI startup.
             from .cli import diagnostic_check_snapshot
             result = export_bundle(self.project_root, Path(selected), diagnostic_check_snapshot)
-            self.notify(f"诊断包已保存：{result['output']}（不会自动上传）")
+            self.notify(
+                f"诊断包已保存：{result['output']}｜导出批次 {result.get('export_id')}（不会自动上传）"
+            )
+            self.refresh()
         except Exception as exc:
             record = record_failure(
                 self.project_root, exc, command="dashboard.diagnostics.export",
@@ -1691,23 +3064,31 @@ class DashboardApp:
         except Exception as exc:
             self.notify(f"无法打开 Bug 报告：{exc}")
 
+    def resolve_diagnostic_issue(self, fingerprint: str) -> None:
+        try:
+            resolved = resolve_diagnostic(
+                self.project_root, fingerprint, reason="用户在 Dashboard 确认问题已解决",
+                application_version=__version__,
+            )
+            cleaned = cleanup_resolved_diagnostics(self.project_root)
+            if cleaned.get("status") != "cleaned":
+                raise DashboardError("诊断解决回执已保存，但清理失败")
+            self.notify(
+                f"已解决并删除指纹 {resolved['fingerprint']} 的 {cleaned.get('records', 0)} 条本地诊断记录"
+            )
+            self.refresh()
+        except Exception as exc:
+            self.notify(f"无法清理诊断：{exc}")
+
     def refresh(self) -> None:
-        snapshot, error = self.controller.refresh()
-        if error is None and snapshot is not None:
-            self.snapshot = snapshot
-            self.last_refresh_error = None
-            self.apply_snapshot(snapshot)
-            rebuilt = "；本次已重建" if snapshot["health"]["rebuilt"] else ""
-            self.status.configure(text=f"刷新成功：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{rebuilt}")
-        else:
-            self.status.configure(text=f"刷新失败，继续显示上一次数据：{error}")
-            if error and error != self.last_refresh_error:
-                record_failure(
-                    self.project_root, DashboardError(error), command="dashboard.refresh",
-                    application_version=__version__, schema_version=SCHEMA_VERSION,
-                    execution_mode=execution_mode(),
-                )
-                self.last_refresh_error = error
+        self.request_refresh(force_full=True)
+
+    def _section_changed(self, name: str, value: object) -> bool:
+        revision = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        if self.section_revisions.get(name) == revision:
+            return False
+        self.section_revisions[name] = revision
+        return True
 
     def apply_snapshot(self, snapshot: dict) -> None:
         branch_type = snapshot["classification"]["kind"]
@@ -1718,98 +3099,59 @@ class DashboardApp:
         if warning:
             health_text += f" | {warning['message']}"
         self.health_label.configure(text=health_text)
-        self.version_label.configure(text=version_status_text(self.provider.version_info()))
-        overview = self.overview_text(snapshot)
-        self.overview.configure(state="normal")
-        self.overview.delete("1.0", "end")
-        self.overview.insert("1.0", overview)
-        self.overview.configure(state="disabled")
-        self.stage_page.set_data(snapshot.get("context", {}))
-        self.catalog_page.set_data(
-            snapshot.get("catalog_items", []),
-            snapshot.get("catalog_relations", []),
+        overview_source = {
+            "profile": (snapshot.get("context") or {}).get("project_profile"),
+            "state": (snapshot.get("context") or {}).get("overview_state"),
+            "stage": (snapshot.get("context") or {}).get("current_stage"),
+            "attempts": (snapshot.get("context") or {}).get("active_attempts"),
+            "handoffs": (snapshot.get("context") or {}).get("recent_handoffs"),
+            "health": health,
+            "catalog": snapshot.get("catalog_items", []),
+            "delivery": (self.action_matrix.state if self.action_matrix is not None else None),
+            "update": self.latest_update_result,
+        }
+        if self._section_changed("overview", overview_source):
+            overview = self.overview_text(
+                snapshot,
+                self.action_matrix.state if self.action_matrix is not None else None,
+                self.latest_update_result,
+            )
+            self.overview.configure(state="normal")
+            self.overview.delete("1.0", "end")
+            self.overview.insert("1.0", overview)
+            self.overview.configure(state="disabled")
+        catalog_source = (
+            snapshot.get("catalog_items", []), snapshot.get("catalog_relations", []),
             snapshot.get("resource_directories", []),
         )
-        self.task_page.set_tasks(snapshot.get("task_details", {}))
-        exploration_records = list(snapshot["explorations"])
-        if snapshot.get("attempt"):
-            attempt = dict(snapshot["attempt"])
-            exploration_records.insert(0, {
-                "branch": attempt["branch"], "occurred_at": attempt["updated_at"], "result": attempt["state"],
-                "goal": attempt["goal"], "evidence": attempt["evidence"],
-                "disposition_ref": attempt.get("pr") or attempt.get("archive_branch") or "active attempt",
-                "task_id": attempt["attempt_id"],
-                "_attempt": attempt,
-            })
-        self.records_page.set_records(normalize_records(snapshot["decisions"], exploration_records))
-        if self.advanced_window is not None:
+        if self._section_changed("catalog", catalog_source):
+            self.catalog_page.set_data(*catalog_source)
+        if self._section_changed("workbench", snapshot.get("external_tools", [])):
+            self.workbench_page.set_external_tools(snapshot.get("external_tools", []))
+        if self._section_changed("diagnostics", snapshot.get("diagnostics", {})):
+            self.diagnostics_page.set_data(snapshot.get("diagnostics", {}))
+        if self.advanced_window is not None and self._section_changed("advanced", snapshot.get("events", [])):
             self.advanced_window.set_snapshot(snapshot)
-        self.update_preset_buttons()
-        if self.active_preset:
-            self.apply_active_preset(switch=False)
         if self.global_query.get().strip():
             self.update_search_results(switch=False)
 
     def perform_global_search(self) -> None:
-        self.clear_preset()
         self.update_search_results(switch=True)
+
+    def clear_global_search(self) -> None:
+        self.global_query.set("")
+        self.search_page.set_records([])
+        self.notebook.tab(self.search_frame, text="搜索")
 
     def update_search_results(self, *, switch: bool) -> None:
         records = global_search((self.snapshot or {}).get("search_index", []), self.global_query.get())
         self.search_page.set_records(records)
-        self.notebook.tab(self.search_page.frame, text=f"搜索（{len(records)}）" if self.global_query.get().strip() else "搜索")
+        self.notebook.tab(self.search_frame, text=f"搜索（{len(records)}）" if self.global_query.get().strip() else "搜索")
         if switch:
-            self.notebook.select(self.search_page.frame)
-
-    def toggle_preset(self, name: str) -> None:
-        if self.active_preset == name:
-            self.clear_preset()
-            return
-        self.active_preset = name
-        self.global_query.set("")
-        self.search_page.set_records([])
-        self.notebook.tab(self.search_page.frame, text="搜索")
-        self.task_page.query.set("")
-        self.records_page.table.query.set("")
-        self.apply_active_preset(switch=True)
-        self.update_preset_buttons()
-
-    def clear_preset(self) -> None:
-        self.active_preset = None
-        self.task_page.set_predicate(None)
-        self.records_page.set_negative_only(None)
-        self.update_preset_buttons()
-
-    def apply_active_preset(self, *, switch: bool) -> None:
-        if not self.snapshot or not self.active_preset:
-            return
-        self.task_page.set_predicate(None)
-        self.records_page.set_negative_only(None)
-        if self.active_preset == "recent":
-            recent_ids = set(dashboard_presets(self.snapshot)["recent"])
-            self.task_page.set_predicate(recent_ids)
-            target = self.task_page.frame
-        elif self.active_preset == "negative":
-            negative_ids = set(dashboard_presets(self.snapshot)["negative"])
-            self.records_page.set_negative_only(negative_ids)
-            target = self.records_page.frame
-        if switch:
-            self.notebook.select(target)
-
-    def update_preset_buttons(self) -> None:
-        if not hasattr(self, "preset_buttons"):
-            return
-        snapshot = self.snapshot or {}
-        values = dashboard_presets(snapshot)
-        counts = {name: len(items) for name, items in values.items()}
-        labels = {"recent": "最近任务", "negative": "失败探索"}
-        for name, button in self.preset_buttons.items():
-            prefix = "✓ " if self.active_preset == name else ""
-            button.configure(text=f"{prefix}{labels[name]}（{counts[name]}）")
+            self.notebook.select(self.search_frame)
 
     def open_search_result(self, record: dict) -> None:
         target, record_id = record_location(record)
-        self.clear_preset()
         self.open_target_record(target, record_id)
 
     def open_target_record(self, target: str | None, record_id: str | None) -> bool:
@@ -1820,8 +3162,8 @@ class DashboardApp:
                 return True
             found = False
         elif target in {"decisions", "explorations"} and record_id:
-            found = self.records_page.select_record(record_id)
-            self.notebook.select(self.records_page.frame)
+            found = self.workflow_page.open_record(target, record_id)
+            self.notebook.select(self.workflow_page.frame)
             return found
         elif target == "catalog" and record_id:
             found = self.catalog_page.select_record(record_id)
@@ -1850,7 +3192,6 @@ class DashboardApp:
         self.advanced_window = None
 
     def open_related_record(self, record: dict) -> None:
-        self.clear_preset()
         self.open_target_record(*record_location(record))
 
     def open_record_task(self, record: dict) -> None:
@@ -1861,9 +3202,8 @@ class DashboardApp:
         self.open_task(task_ids[0])
 
     def open_task(self, task_id: str) -> None:
-        self.clear_preset()
-        if self.task_page.open_task(task_id):
-            self.notebook.select(self.task_page.frame)
+        if self.workflow_page.open_task(task_id):
+            self.notebook.select(self.workflow_page.frame)
             self.root.deiconify()
             self.root.lift()
             self.root.focus_force()
@@ -1871,9 +3211,71 @@ class DashboardApp:
             self.status.configure(text=f"找不到关联任务：{task_id}")
 
     @staticmethod
-    def overview_text(snapshot: dict) -> str:
-        base = action_overview_text(snapshot["context"]).rstrip()
-        return base + "\n\n资料概览\n" + catalog_overview_text(snapshot.get("catalog_items", []))
+    def overview_text(
+        snapshot: dict, delivery_state: dict | None = None,
+        update_result: dict | None = None,
+    ) -> str:
+        context = snapshot.get("context") or {}
+        profile = context.get("project_profile") or {}
+        health = snapshot.get("health") or {}
+        state = context.get("overview_state") or context.get("state") or {}
+        active = context.get("active_task") or {}
+        stage = context.get("current_stage") or {}
+        attempts = context.get("active_attempts") or []
+        separator = "─" * 32
+        steps = state.get("next_steps") or []
+        step_text = "\n".join(
+            f"{index}. {item}" for index, item in enumerate(steps, 1)
+        ) or "无。"
+        attempt_text = "；".join(
+            f"{item.get('branch')}（{item.get('current_step') or '未记录当前步骤'}）"
+            for item in attempts
+        ) or "无 active 探索"
+        handoffs = context.get("recent_handoffs") or []
+        if handoffs:
+            latest = handoffs[0]
+            latest_text = (
+                f"{latest.get('occurred_at') or '未知时间'}｜"
+                f"{latest.get('task') or latest.get('task_id') or '未知任务'}｜"
+                f"{latest.get('result') or '未知结果'}"
+            )
+        else:
+            latest_text = "无"
+        if delivery_state is None:
+            fallback_git = context.get("git_state") or {}
+            delivery_state = {
+                "application_version": __version__, "dirty_paths": [], "changed_paths": [],
+                "git": fallback_git, "active_task": active, "build_identity": {},
+            }
+        return "\n".join([
+            "项目概览",
+            f"项目描述：{profile.get('description') or '未设置'}",
+            f"大目标：{profile.get('big_goal') or '未设置'}",
+            f"当前分支：{snapshot.get('branch') or '未知'}",
+            f"项目健康：{health.get('status') or '未知'}",
+            separator,
+            "",
+            "当前状态",
+            f"状态：{state.get('status') or '未设置'}",
+            f"活动任务：{active.get('task_id') or '无'}",
+            f"当前阶段：{stage.get('title') or '无 active 阶段'}",
+            f"活动探索：{attempt_text}",
+            f"当前判决：{state.get('judgment') or '未设置'}",
+            f"工作断点：{state.get('breakpoint') or '未设置'}",
+            f"当前阻塞：{state.get('blocker') or '无'}",
+            "下一步：",
+            step_text,
+            separator,
+            "",
+            "代码交付",
+            delivery_status_text(delivery_state, update_result),
+            f"最近完成：{latest_text}",
+            separator,
+            "",
+            "资料概览",
+            catalog_overview_text(snapshot.get("catalog_items", [])),
+            separator,
+        ]) + "\n"
 
     def copy_overview(self) -> None:
         if not self.snapshot:

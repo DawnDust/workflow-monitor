@@ -12,9 +12,13 @@ from project_hooks.diagnostics import (
     append_record,
     bug_report_url,
     create_failure_record,
+    cleanup_after_update,
+    cleanup_resolved_diagnostics,
+    diagnostics_overview,
     diagnostics_status,
     export_diagnostics,
     load_records,
+    resolve_diagnostic,
     sanitize_text,
 )
 
@@ -93,6 +97,12 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(checks["status"], "failed")
             combined = b"".join(archive.read(name) for name in archive.namelist())
             self.assertNotIn(b"corrupt but untouched", combined)
+            manifest = json.loads(archive.read("manifest.json"))
+            self.assertEqual(manifest["export_id"], result["export_id"])
+            self.assertEqual(manifest["incident_ids"], [result["latest_incident_id"]])
+        overview = diagnostics_overview(self.root, application_version="1.3.0")
+        self.assertTrue(overview["issues"][0]["exported"])
+        self.assertEqual(overview["issues"][0]["last_export_id"], result["export_id"])
 
     def test_status_and_issue_url_do_not_upload(self) -> None:
         append_record(self.root, self.record(RuntimeError("unexpected")))
@@ -111,6 +121,44 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(conflict["code"], "PH-C200")
         self.assertEqual(integrity["code"], "PH-D300")
         self.assertEqual(internal["code"], "PH-I500")
+
+    def test_update_cleanup_removes_only_old_validation_and_conflict(self) -> None:
+        validation = self.record(ValueError("bad input"))
+        conflict = self.record(RuntimeError("branch conflict"))
+        protected = self.record(RuntimeError("unexpected renderer failure"))
+        current = create_failure_record(
+            self.root, ValueError("new bad input"), command="check",
+            application_version="1.5.0", schema_version=3, execution_mode="source",
+        )
+        for record in (validation, conflict, protected, current):
+            append_record(self.root, record)
+        result = cleanup_after_update(self.root, from_version="1.3.0", to_version="1.5.0")
+        remaining = load_records(self.root)
+        self.assertEqual(result["status"], "cleaned")
+        self.assertEqual(result["records"], 2)
+        self.assertEqual(
+            {item["incident_id"] for item in remaining},
+            {protected["incident_id"], current["incident_id"]},
+        )
+        overview = diagnostics_overview(self.root, application_version="1.5.0")
+        old = next(item for item in overview["issues"] if item["fingerprint"] == protected["fingerprint"])
+        self.assertEqual(old["status"], "old_version_protected")
+
+    def test_resolve_then_cleanup_is_explicit_and_recurrence_reappears(self) -> None:
+        record = self.record(RuntimeError("unexpected renderer failure"))
+        append_record(self.root, record)
+        resolve_diagnostic(
+            self.root, record["fingerprint"], reason="升级后已复核",
+            application_version="1.5.0",
+        )
+        overview = diagnostics_overview(self.root, application_version="1.5.0")
+        self.assertEqual(overview["issues"][0]["status"], "resolved")
+        cleaned = cleanup_resolved_diagnostics(self.root)
+        self.assertEqual(cleaned["records"], 1)
+        self.assertEqual(load_records(self.root), [])
+        recurrent = self.record(RuntimeError("unexpected renderer failure"))
+        append_record(self.root, recurrent)
+        self.assertEqual(len(load_records(self.root)), 1)
 
 
 if __name__ == "__main__":
