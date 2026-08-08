@@ -1,0 +1,1 @@
+"""System adapter integration tests."""
