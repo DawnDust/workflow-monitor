@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import shutil
 import subprocess
@@ -19,10 +20,8 @@ from project_hooks.ui.web.bridge import (
 )
 from project_hooks.ui.web.glossary import STATUS_GLOSSARY
 from project_hooks.ui.web.projections import (
-    bfs_neighborhood,
     evidence_matrix,
-    research_graph,
-    version_timeline,
+    research_stages,
     web_snapshot,
 )
 from project_hooks.ui.windows.main import _hide_loader_window
@@ -32,7 +31,19 @@ def sample_snapshot() -> dict:
     return {
         "branch": "experiment/web-dashboard-v2",
         "health": {"status": "passed", "events": 3},
-        "context": {"active_task": {"task_id": "task-1", "goal": "Build web UI"}},
+        "context": {
+            "active_task": {"task_id": "task-1", "goal": "Build web UI"},
+            "stages": [
+                {"stage_id": "stage-1", "sequence": 1, "title": "Foundation", "status": "completed",
+                 "goal": "Build the foundation", "summary": "Foundation completed",
+                 "current_step": "Legacy fallback", "started_at": "2026-01-01 00:00:00",
+                 "finished_at": "2026-01-31 23:59:59"},
+                {"stage_id": "stage-2", "sequence": 2, "title": "Web", "status": "active",
+                 "goal": "Build the workbench", "summary": "", "current_step": "Implement cards",
+                 "started_at": "2026-02-01 00:00:00", "finished_at": None},
+            ],
+            "current_stage": {"stage_id": "stage-2", "sequence": 2, "title": "Web", "status": "active"},
+        },
         "history": [], "decisions": [], "events": [
             {"event_id":"v5","occurred_at":"2026-01-01 00:00:00","event_type":"project_state.updated","task_id":"task-0","payload":{"main_goal_version":"v5","goal":"Foundation","judgment":"Foundation accepted"}},
             {"event_id":"v6","occurred_at":"2026-02-01 00:00:00","event_type":"project_state.updated","task_id":"task-1","payload":{"main_goal_version":"v6","goal":"Web","judgment":"Web started","status":"active"}},
@@ -41,24 +52,30 @@ def sample_snapshot() -> dict:
         ], "search_index": [],
         "resource_directories": [{"name":"theory","kind":"theory","path":"resources/theory","label":"理论","description":"理论、假设、定义和推导","actual_files":1,"indexed_files":1,"status":"ok"}], "external_tools": [], "diagnostics": {},
         "task_details": {
-            "task-1": {"goal": "Build web UI", "branch": "experiment/web-dashboard-v2"},
+            "task-1": {"goal": "Build web UI", "branch": "experiment/web-dashboard-v2",
+                       "started_at": "2026-02-02 00:00:00", "finished_at": "2026-02-02 12:00:00"},
         },
         "attempt": {
             "attempt_id": "attempt-1", "goal": "Try WebView2", "state": "active",
             "branch": "experiment/web-dashboard-v2", "stage_id": "stage-2",
             "hypothesis": "A local bridge is sufficient", "evidence": ["contract test"],
         },
+        "attempts": [{
+            "attempt_id": "attempt-1", "goal": "Try WebView2", "state": "active", "track": "experiment",
+            "branch": "experiment/web-dashboard-v2", "stage_id": "stage-2", "created_at": "2026-02-03 00:00:00",
+            "conclusion": "", "progress": "Bridge contract works",
+        }],
         "explorations": [{
             "event_id": "explore-1", "goal": "Prior experiment", "result": "negative",
             "branch": "experiment/web-dashboard-v2", "task_id": "task-1", "occurred_at":"2026-02-03 00:00:00", "evidence": "too large",
         }],
         "catalog_items": [
             {"item_id": "t1", "kind": "theory", "kind_label": "理论", "title": "Theory",
-             "status": "active", "branch": "main", "task_id": "task-1", "path":"resources/theory/theory.md", "tags": [], "metadata": {}},
+             "status": "active", "branch": "main", "task_id": "task-1", "path":"resources/theory/theory.md", "created_at":"2026-01-15 00:00:00", "tags": [], "metadata": {}},
             {"item_id": "p1", "kind": "literature", "kind_label": "文献", "title": "Paper",
-             "status": "active", "branch": "main", "task_id": "task-1", "tags": [], "metadata": {}},
+             "status": "active", "branch": "main", "task_id": "", "created_at":"2026-01-15 00:00:00", "path":"resources/source/paper.pdf", "tags": [], "metadata": {}},
             {"item_id": "s1", "kind": "simulation", "kind_label": "仿真", "title": "Simulation",
-             "status": "active", "branch": "main", "task_id": "task-1", "tags": [], "metadata": {}},
+             "status": "active", "branch": "main", "task_id": "missing-task", "created_at":"2025-12-01 00:00:00", "path":"resources/analysis/sim.py", "tags": [], "metadata": {}},
         ],
         "catalog_relations": [{
             "relation_id": "r1", "source_id": "p1", "target_id": "t1",
@@ -90,22 +107,53 @@ class FakeProvider:
 
 
 class WebProjectionTests(unittest.TestCase):
-    def test_graph_distinguishes_explicit_evidence_from_derived_process_edges(self) -> None:
-        graph = research_graph(sample_snapshot())
-        explicit = [edge for edge in graph["edges"] if edge["provenance"] == "explicit"]
-        derived = [edge for edge in graph["edges"] if edge["provenance"] == "derived"]
-        self.assertEqual([edge["relation"] for edge in explicit], ["supports"])
-        self.assertTrue(any(edge["relation"] == "task_id" for edge in derived))
-        self.assertNotIn("supports", {edge["relation"] for edge in derived})
+    def test_research_stages_sort_current_and_summary_fallback(self) -> None:
+        projection = research_stages(sample_snapshot())
+        self.assertEqual([row["sequence"] for row in projection["items"]], [2, 1])
+        self.assertEqual(projection["current"]["stage_id"], "stage-2")
+        self.assertEqual(projection["items"][0]["work_summary"], "Implement cards")
+        self.assertEqual(projection["items"][1]["work_summary"], "Foundation completed")
 
-    def test_bfs_focus_returns_only_requested_neighborhood(self) -> None:
-        graph = research_graph(sample_snapshot())
-        focused = bfs_neighborhood(graph, "catalog:t1", 1)
-        ids = {node["id"] for node in focused["nodes"]}
-        self.assertIn("catalog:t1", ids)
-        self.assertIn("catalog:p1", ids)
-        self.assertIn("task:task-1", ids)
-        self.assertNotIn("exploration:explore-1", ids)
+    def test_research_stages_assign_materials_by_task_then_created_time(self) -> None:
+        projection = research_stages(sample_snapshot())
+        by_id = {row["stage_id"]: row for row in projection["items"]}
+        self.assertEqual([item["item_id"] for item in by_id["stage-2"]["materials"]], ["t1"])
+        self.assertEqual([item["item_id"] for item in by_id["stage-1"]["materials"]], ["p1"])
+        self.assertEqual([item["item_id"] for item in projection["unassigned_materials"]], ["s1"])
+
+    def test_research_stages_assign_attempts_explicitly_then_by_time(self) -> None:
+        source = sample_snapshot()
+        source["attempts"] += [
+            {"attempt_id":"historic", "goal":"Historic", "state":"negative", "track":None,
+             "branch":"research/historic", "stage_id":None, "created_at":"2026-01-10 00:00:00",
+             "conclusion":"No effect", "progress":""},
+            {"attempt_id":"orphan", "goal":"Orphan", "state":"paused", "track":"sandbox",
+             "branch":"sandbox/orphan", "stage_id":None, "created_at":"2025-01-10 00:00:00",
+             "conclusion":"", "progress":"Waiting"},
+        ]
+        projection = research_stages(source)
+        by_id = {row["stage_id"]: row for row in projection["items"]}
+        self.assertEqual(by_id["stage-2"]["explorations"][0]["conclusion"], "Bridge contract works")
+        self.assertEqual(by_id["stage-1"]["explorations"][0]["attempt_id"], "historic")
+        self.assertEqual(by_id["stage-1"]["explorations"][0]["track"], "research")
+        self.assertEqual(projection["unassigned_explorations"][0]["attempt_id"], "orphan")
+
+    def test_research_stages_choose_highest_sequence_for_overlapping_intervals(self) -> None:
+        source = sample_snapshot()
+        source["context"]["stages"][0]["finished_at"] = None
+        source["catalog_items"][1]["created_at"] = "2026-02-03 00:00:00"
+        projection = research_stages(source)
+        by_id = {row["stage_id"]: row for row in projection["items"]}
+        self.assertEqual([item["item_id"] for item in by_id["stage-2"]["materials"]], ["t1", "p1"])
+        self.assertEqual(by_id["stage-1"]["materials"], [])
+
+    def test_research_stages_without_active_stage_has_no_current(self) -> None:
+        source = sample_snapshot()
+        for stage in source["context"]["stages"]:
+            stage["status"] = "completed"
+        projection = research_stages(source)
+        self.assertIsNone(projection["current"])
+        self.assertFalse(any(stage["is_current"] for stage in projection["items"]))
 
     def test_evidence_matrix_uses_only_registered_evidence(self) -> None:
         matrix = evidence_matrix(sample_snapshot())
@@ -116,52 +164,14 @@ class WebProjectionTests(unittest.TestCase):
 
     def test_web_snapshot_does_not_mutate_source(self) -> None:
         source = sample_snapshot()
+        original = copy.deepcopy(source)
         projected = web_snapshot(source)
+        self.assertEqual(source, original)
         self.assertNotIn("research", source)
         self.assertIn("research", projected)
-        self.assertIn("timeline", projected["research"])
+        self.assertIn("stages", projected["research"])
         self.assertNotIn("graph", projected["research"])
         self.assertNotIn("explorations", projected["research"])
-
-    def test_version_timeline_aggregates_tasks_and_has_no_isolated_nodes(self) -> None:
-        timeline = version_timeline(sample_snapshot())
-        self.assertEqual([row["version"] for row in timeline["versions"]], ["v5", "v6"])
-        version = timeline["versions"][1]
-        self.assertEqual(version["task_count"], 1)
-        self.assertEqual(version["initial_goal"], "Web")
-        self.assertEqual(version["final_judgment"], "Web delivered")
-        self.assertEqual(version["latest_status"], "completed")
-        self.assertEqual(timeline["explorations"][0]["version"], "v6")
-        self.assertEqual(timeline["files"][0]["version"], "v6")
-        endpoints = {value for edge in timeline["edges"] for value in (edge["source"], edge["target"])}
-        node_ids = {row["id"] for key in ("versions", "explorations", "files") for row in timeline[key]}
-        self.assertEqual(node_ids, endpoints)
-
-    def test_version_timeline_strict_files_and_groups_more_than_five(self) -> None:
-        source = sample_snapshot()
-        source["catalog_relations"] = []
-        source["catalog_items"] = [
-            {"item_id": f"f{i}", "title": f"File {i}", "path": f"resources/theory/{i}.md",
-             "status": "active", "task_id": "task-1", "branch": "main",
-             "kind": "theory", "tags": ["core"]} for i in range(6)
-        ] + [{"item_id":"ignored","title":"Ignored","path":"resources/theory/x.md",
-              "status":"active","task_id":"unrelated-task","branch":"main","kind":"theory","tags":[]}]
-        timeline = version_timeline(source)
-        self.assertEqual(len(timeline["files"]), 1)
-        self.assertEqual(timeline["files"][0]["kind"], "file-group")
-        self.assertEqual(len(timeline["files"][0]["items"]), 6)
-
-    def test_version_timeline_keeps_missing_summary_fields_explicit(self) -> None:
-        source = sample_snapshot()
-        source["events"].append({
-            "event_id": "v7", "occurred_at": "2026-03-01 00:00:00",
-            "event_type": "project_state.updated", "task_id": "task-2",
-            "payload": {"main_goal_version": "v7"},
-        })
-        version = version_timeline(source)["versions"][-1]
-        self.assertIsNone(version["initial_goal"])
-        self.assertIsNone(version["final_judgment"])
-        self.assertIsNone(version["latest_status"])
 
 
 class WebDashboardBridgeTests(unittest.TestCase):
@@ -277,26 +287,36 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn("compositionstart", script)
         self.assertIn("changed_sections", script)
         self.assertNotIn('i===0?"open"', script)
-        self.assertIn("research?.timeline", script)
+        self.assertIn("research?.stages", script)
+        self.assertIn('"research-stages"', script)
+        self.assertIn("科研阶段", script)
+        self.assertIn("stageOpen", script)
+        self.assertIn("stageExpansionInitialized", script)
+        self.assertIn("details[data-stage-id]", script)
+        self.assertIn("当前没有进行中的科研阶段", script)
+        self.assertIn("尚未建立科研阶段", script)
+        self.assertNotIn("research-map", script)
+        self.assertNotIn("data-timeline-node", script)
+        self.assertNotIn("<svg", script)
         self.assertNotIn("exploration-compare", script)
         self.assertNotIn("function comparison", script)
         self.assertIn("advancedOpen", script)
         self.assertIn("updateAdvanced", script)
         self.assertIn("selectedResourceKind", script)
         self.assertIn("data-open-resource", script)
-        self.assertIn('n.initial_goal||"未登记"', script)
-        self.assertIn('n.final_judgment||"未登记"', script)
+        self.assertIn("x.work_summary", script)
+        self.assertIn("x.material_count", script)
+        self.assertIn("x.exploration_count", script)
 
     @unittest.skipUnless(shutil.which("node"), "Node is a development-only optional test runtime")
     def test_frontend_state_helpers_without_browser(self) -> None:
         source = (asset_root() / "state.js").read_bytes()
         module_url = "data:text/javascript;base64," + base64.b64encode(source).decode("ascii")
         script = f"""
-          import {{filterRecords, graphNeighborhood, evidenceLabel, paginate}} from {json.dumps(module_url)};
+          import {{filterRecords, evidenceLabel, paginate}} from {json.dumps(module_url)};
           const rows = filterRecords([{{title:'Alpha'}},{{title:'Beta'}}], 'alp', ['title']);
-          const graph = graphNeighborhood({{nodes:[{{id:'a'}},{{id:'b'}},{{id:'c'}}],edges:[{{source:'a',target:'b'}},{{source:'b',target:'c'}}]}}, 'a', 1);
           const page = paginate(Array.from({{length: 21}}, (_, i) => i), 3, 10);
-          if (rows.length !== 1 || graph.nodes.length !== 2 || evidenceLabel({{status:'unregistered'}}) !== '未登记' || page.items.length !== 1) process.exit(1);
+          if (rows.length !== 1 || evidenceLabel({{status:'unregistered'}}) !== '未登记' || page.items.length !== 1) process.exit(1);
         """
         subprocess.run(["node", "--input-type=module", "-e", script], check=True)
 
