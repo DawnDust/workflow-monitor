@@ -1349,26 +1349,10 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(result["git"]["status"], "committed")
         self.assertEqual(self.git("status", "--porcelain=v1").stdout.splitlines(), ["M  user_note.txt"])
 
-    def test_dashboard_cli_help_and_refresh_validation(self) -> None:
-        help_result = self.hooks("dashboard", "--help")
-        self.assertIn("--refresh-seconds", help_result.stdout)
-        self.assertIn("--branch", help_result.stdout)
-        invalid = self.hooks("dashboard", "--refresh-seconds", "-1", check=False)
-        self.assertNotEqual(invalid.returncode, 0)
-        self.assertIn("必须大于或等于 0", invalid.stderr)
-        legacy_env = os.environ.copy()
-        legacy_env["PYTHONUTF8"] = "0"
-        legacy_env["PYTHONIOENCODING"] = "cp1252"
-        legacy = subprocess.run(
-            [sys.executable, "-m", "project_hooks", "dashboard", "--refresh-seconds", "-1"],
-            cwd=self.root,
-            text=True,
-            encoding="utf-8",
-            capture_output=True,
-            check=False,
-            env=legacy_env,
-        )
-        self.assertIn("必须大于或等于 0", legacy.stderr)
+    def test_dashboard_cli_is_removed(self) -> None:
+        result = self.hooks("dashboard", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid choice", result.stderr)
 
     def test_diagnostics_cli_skips_expected_rejection_and_exports_allowlisted_bundle(self) -> None:
         self.start("20260722_diag_001")
@@ -1395,7 +1379,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertIn("context", basic)
         self.assertIn("start", basic)
         self.assertIn("end", basic)
-        self.assertIn("dashboard", basic)
+        self.assertNotIn("dashboard", basic)
         self.assertNotIn("prepare-pr", basic)
         self.assertNotIn("pre-commit", basic)
         advanced = self.hooks("--help-all").stdout

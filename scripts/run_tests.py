@@ -295,29 +295,12 @@ def release_smoke() -> int:
         ).stdout.decode("utf-8", "strict")
         if "项目" not in chinese:
             raise RuntimeError("frozen UTF-8 Chinese output smoke failed")
-        dashboard = subprocess.Popen(
-            [str(copied), "dashboard", "--refresh-seconds", "0"], cwd=portable,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        title, elapsed = wait_for_dashboard_window(dashboard, 2.0)
-        if dashboard.poll() is not None:
-            stdout, stderr = dashboard.communicate(timeout=5)
-            raise RuntimeError(
-                "frozen operational Dashboard exited early: "
-                + (stderr or stdout).decode("utf-8", "replace")
-            )
-        if os.name == "nt" and title != "Workflow Monitor":
-            stop_smoke_process(dashboard)
-            raise RuntimeError(
-                f"frozen Dashboard had no visible window after {elapsed:.2f}s"
-            )
-        stop_smoke_process(dashboard)
         if os.name == "nt":
             bridge_marker = portable / ".bridge-ready"
             web_env = os.environ.copy()
             web_env["WORKFLOW_MONITOR_BRIDGE_READY_FILE"] = str(bridge_marker)
             web_dashboard = subprocess.Popen(
-                [str(copied), "dashboard", "--ui", "web", "--refresh-seconds", "0"],
+                [str(copied)],
                 cwd=portable, env=web_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
             title, elapsed = wait_for_dashboard_window(web_dashboard, 2.0)

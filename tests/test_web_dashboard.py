@@ -16,8 +16,8 @@ from project_hooks.web_dashboard import (
     WEBVIEW2_DOWNLOAD_URL,
     WebDashboardBridge,
     asset_root,
-    launch_dashboard_mode,
 )
+from project_hooks.status_glossary import STATUS_GLOSSARY
 from project_hooks.web_projection import (
     bfs_neighborhood,
     evidence_matrix,
@@ -33,7 +33,7 @@ def sample_snapshot() -> dict:
         "health": {"status": "passed", "events": 3},
         "context": {"active_task": {"task_id": "task-1", "goal": "Build web UI"}},
         "history": [], "decisions": [], "events": [], "search_index": [],
-        "resource_directories": [], "external_tools": [], "diagnostics": {},
+        "resource_directories": [{"name":"theory","path":"resources/theory","label":"理论","actual_files":1,"indexed_files":1,"status":"ok"}], "external_tools": [], "diagnostics": {},
         "task_details": {
             "task-1": {"goal": "Build web UI", "branch": "experiment/web-dashboard-v2"},
         },
@@ -48,7 +48,7 @@ def sample_snapshot() -> dict:
         }],
         "catalog_items": [
             {"item_id": "t1", "kind": "theory", "kind_label": "理论", "title": "Theory",
-             "status": "active", "branch": "main", "task_id": "task-1", "tags": [], "metadata": {}},
+             "status": "active", "branch": "main", "task_id": "task-1", "path":"resources/theory/theory.md", "tags": [], "metadata": {}},
             {"item_id": "p1", "kind": "literature", "kind_label": "文献", "title": "Paper",
              "status": "active", "branch": "main", "task_id": "task-1", "tags": [], "metadata": {}},
             {"item_id": "s1", "kind": "simulation", "kind_label": "仿真", "title": "Simulation",
@@ -126,6 +126,7 @@ class WebDashboardBridgeTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         (self.root / "resources" / "theory").mkdir(parents=True)
+        (self.root / "resources" / "theory" / "theory.md").write_text("x", encoding="utf-8")
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -163,11 +164,14 @@ class WebDashboardBridgeTests(unittest.TestCase):
         self.assertEqual(len(results), 4)
         self.assertTrue(all(result["ok"] for result in results))
 
-    def test_path_allowlist_rejects_escape_and_unlisted_root(self) -> None:
+    def test_resource_open_contract_rejects_unlisted_and_reveals_registered_file(self) -> None:
         bridge = WebDashboardBridge(FakeProvider(self.root))
-        self.assertEqual(bridge.open_project_path("../secret.txt")["error"]["code"], "invalid_path")
-        (self.root / "other.txt").write_text("x", encoding="utf-8")
-        self.assertEqual(bridge.open_project_path("other.txt")["error"]["code"], "invalid_path")
+        self.assertEqual(bridge.open_resource_directory("../secret")["error"]["code"], "invalid_path")
+        with patch("project_hooks.web_dashboard.subprocess.Popen") as runner:
+            self.assertTrue(bridge.open_resource_directory("resources/theory")["ok"])
+            self.assertTrue(bridge.reveal_resource_file("t1")["ok"])
+            self.assertEqual(runner.call_count, 2)
+        self.assertEqual(bridge.reveal_resource_file("fake")["error"]["code"], "not_found")
 
     def test_diagnostic_export_rejects_path_components(self) -> None:
         bridge = WebDashboardBridge(FakeProvider(self.root))
@@ -182,38 +186,14 @@ class WebDashboardBridgeTests(unittest.TestCase):
 
 
 class WebDashboardIntegrationTests(unittest.TestCase):
-    def test_cli_accepts_all_ui_modes_and_auto_defaults(self) -> None:
+    def test_dashboard_command_and_legacy_modes_are_removed(self) -> None:
         parser = build_parser()
-        self.assertEqual(parser.parse_args(["dashboard"]).ui, "auto")
-        for mode in ("auto", "web", "legacy"):
-            self.assertEqual(parser.parse_args(["dashboard", "--ui", mode]).ui, mode)
-
-    def test_explicit_web_failure_notifies_and_falls_back(self) -> None:
-        calls: list[str] = []
-        notices: list[str] = []
-        result = launch_dashboard_mode(
-            object(), 0, "web",
-            web_launcher=lambda *_: (_ for _ in ()).throw(RuntimeError("runtime missing")),
-            legacy_launcher=lambda *_, **__: calls.append("legacy"),
-            fallback_notifier=notices.append,
-        )
-        self.assertTrue(result["fallback"])
-        self.assertEqual(calls, ["legacy"])
-        self.assertIn("runtime missing", notices[0])
-        self.assertIn(WEBVIEW2_DOWNLOAD_URL, notices[0])
-
-    def test_auto_remains_legacy_during_experiment(self) -> None:
-        calls: list[str] = []
-        launch_dashboard_mode(
-            object(), 0, "auto",
-            web_launcher=lambda *_: calls.append("web"),
-            legacy_launcher=lambda *_, **__: calls.append("legacy"),
-        )
-        self.assertEqual(calls, ["legacy"])
+        with self.assertRaises(Exception):
+            parser.parse_args(["dashboard"])
 
     def test_static_assets_are_local_es_modules_and_packaged(self) -> None:
         root = asset_root()
-        for name in ("index.html", "styles.css", "app.js", "state.js"):
+        for name in ("index.html", "styles.css", "workbench.css", "app.js", "state.js"):
             self.assertTrue((root / name).is_file(), name)
         html = (root / "index.html").read_text(encoding="utf-8")
         script = (root / "app.js").read_text(encoding="utf-8")
@@ -230,16 +210,27 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('"--exclude-module", "cryptography"', build_script)
         self.assertIn('"--hidden-import", "webview.platforms.edgechromium"', build_script)
         self.assertIn("shown_callback=close_loader", windows_entry)
+        self.assertNotIn("launch_dashboard_mode", windows_entry)
+        self.assertNotIn('args[0] == "dashboard"', windows_entry)
+
+    def test_glossary_and_navigation_are_complete(self) -> None:
+        self.assertEqual(len(STATUS_GLOSSARY), 10)
+        script = (asset_root() / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn('["diagnostics"', script)
+        self.assertIn('disclosure("diagnostics"', script)
+        self.assertIn("draftQuery", script)
+        self.assertIn("committedQuery", script)
 
     @unittest.skipUnless(shutil.which("node"), "Node is a development-only optional test runtime")
     def test_frontend_state_helpers_without_browser(self) -> None:
         source = (asset_root() / "state.js").read_bytes()
         module_url = "data:text/javascript;base64," + base64.b64encode(source).decode("ascii")
         script = f"""
-          import {{filterRecords, graphNeighborhood, evidenceLabel}} from {json.dumps(module_url)};
+          import {{filterRecords, graphNeighborhood, evidenceLabel, paginate}} from {json.dumps(module_url)};
           const rows = filterRecords([{{title:'Alpha'}},{{title:'Beta'}}], 'alp', ['title']);
           const graph = graphNeighborhood({{nodes:[{{id:'a'}},{{id:'b'}},{{id:'c'}}],edges:[{{source:'a',target:'b'}},{{source:'b',target:'c'}}]}}, 'a', 1);
-          if (rows.length !== 1 || graph.nodes.length !== 2 || evidenceLabel({{status:'unregistered'}}) !== '未登记') process.exit(1);
+          const page = paginate(Array.from({{length: 21}}, (_, i) => i), 3, 10);
+          if (rows.length !== 1 || graph.nodes.length !== 2 || evidenceLabel({{status:'unregistered'}}) !== '未登记' || page.items.length !== 1) process.exit(1);
         """
         subprocess.run(["node", "--input-type=module", "-e", script], check=True)
 
