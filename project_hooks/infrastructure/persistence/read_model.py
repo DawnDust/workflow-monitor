@@ -374,10 +374,7 @@ class MaintenanceReadModel:
             raise ReadModelError(str(exc)) from exc
 
     @staticmethod
-    def _attempt(connection: sqlite3.Connection, branch: str) -> dict | None:
-        row = connection.execute("SELECT * FROM attempts WHERE branch=? OR archive_branch=? LIMIT 1", (branch, branch)).fetchone()
-        if row is None:
-            return None
+    def _decode_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
         result = dict(row)
         result["acceptance"] = json.loads(result.pop("acceptance_json"))
         result["evidence"] = [item["evidence"] for item in rows(
@@ -386,6 +383,18 @@ class MaintenanceReadModel:
             (result["attempt_id"],),
         )]
         return result
+
+    @classmethod
+    def _attempt(cls, connection: sqlite3.Connection, branch: str) -> dict | None:
+        row = connection.execute("SELECT * FROM attempts WHERE branch=? OR archive_branch=? LIMIT 1", (branch, branch)).fetchone()
+        return cls._decode_attempt(connection, row) if row is not None else None
+
+    @classmethod
+    def _attempts(cls, connection: sqlite3.Connection) -> list[dict]:
+        attempt_rows = connection.execute(
+            "SELECT * FROM attempts ORDER BY created_at DESC, attempt_id"
+        ).fetchall()
+        return [cls._decode_attempt(connection, row) for row in attempt_rows]
 
     def _context(self, connection: sqlite3.Connection, branch: str) -> dict:
         state = connection.execute("SELECT * FROM project_state WHERE branch=?", (branch,)).fetchone()
@@ -847,6 +856,7 @@ class MaintenanceReadModel:
                 "decisions": decisions,
                 "explorations": explorations,
                 "attempt": self._attempt(connection, branch),
+                "attempts": self._attempts(connection),
                 "events": events,
                 "search_index": self._search_index(connection),
                 "task_details": task_details,
