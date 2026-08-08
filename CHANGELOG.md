@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 新增实验性 Web Dashboard 2.0：`dashboard --ui auto|web|legacy`、本地 WebView2 白名单桥接、随单 EXE 打包的原生 Web 静态资源，以及初始化失败时的显式 Tkinter 回退；探索阶段 `auto` 仍保持旧界面。
+- 新增科研地图、探索对比和证据矩阵；显式 catalog 关系与过程派生关系分开呈现，证据矩阵只接受已登记的 `supports`、`validates`、`contradicts`，未登记单元格不做负面推断。
+- 增加桥接契约、路径限制、刷新合并、最后正常快照、Runtime 回退、前端无浏览器状态转换、静态资源打包与冻结 EXE bridge-ready 测试。
+
 - 将对外产品名更新为 **Workflow Monitor**，Windows 可执行文件更名为 `workflow-monitor.exe`，并加入工作台图标与版本资源。
 
 ## 1.5.0

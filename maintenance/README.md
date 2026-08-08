@@ -126,6 +126,10 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 
 ## 四、记录与只读 Dashboard
 
+Web Dashboard 2.0 探索阶段增加 `dashboard --ui auto|web|legacy`。`auto` 暂时继续使用 Tkinter，`web` 显式启动随 EXE 打包的本地 HTML/CSS/ES Modules，`legacy` 强制使用 Tkinter。WebView2 Runtime 缺失或初始化失败时会显示原因和官方安装地址，再回退旧界面；程序不会静默下载 Runtime。Web 桥接只允许刷新、更新检查、软件交付刷新、诊断导出、报告 Bug、打开 `resources/` 或 `diagnostics-export/` 下的受限路径，以及复制资料上下文，不暴露任意命令、任意文件读取或业务写入。
+
+科研地图区分显式 catalog 关系与按 `task_id`、branch、stage 派生的过程关系；探索对比投影现有 attempt/exploration；证据矩阵只把已登记的 `supports`、`validates`、`contradicts` 作为证据。矩阵空白显示“未登记”，不推断为“没有证据”。
+
 `events.jsonl` 保存项目资料、阶段、任务、状态、决策、探索和科研资料索引的不可抹除事件。任务完成事件同时提供交接投影，旧版独立交接事件继续兼容并按任务去重。SQLite 保存事件投影、查询索引、活动任务和临时文件基线，可随时从事件日志重建。Schema v3 继续接受历史 v1/v2 事件；旧项目不会从自由文本推断项目资料或阶段，未初始化时明确显示“未设置”。
 
 ### 科研资料索引
