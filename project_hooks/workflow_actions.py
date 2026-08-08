@@ -877,6 +877,7 @@ class WorkflowActionService:
                 execution_mode=execution_mode(),
             )
             return ActionResult(
-                "failed", format_failure(record), incident_id=record["incident_id"],
+                "failed", format_failure(record),
+                incident_id=record["incident_id"] if record.get("recorded", True) else None,
                 code=record["code"],
             )

@@ -5,34 +5,31 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import PyInstaller.__main__
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-def git(root: Path, *args: str) -> str:
-    completed = subprocess.run(
-        ["git", *args], cwd=root, text=True, encoding="utf-8", errors="replace",
-        capture_output=True, check=False,
-    )
-    return completed.stdout.strip() if completed.returncode == 0 else ""
+from project_hooks import DISPLAY_NAME, EXECUTABLE_NAME, __version__
+from project_hooks.build_identity import repository_source_identity
 
 
 def write_build_info(root: Path) -> Path:
-    commit = git(root, "rev-parse", "HEAD") or None
-    status = git(root, "status", "--porcelain=v1", "--untracked-files=all")
-    diff = git(root, "diff", "--binary", "HEAD")
-    tree = hashlib.sha256(f"{commit or 'unknown'}\n{status}\n{diff}".encode("utf-8")).hexdigest()
+    repository = repository_source_identity(root)
+    tree = repository["source_tree"]
     built_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     build_id = hashlib.sha256(f"{tree}\n{built_at}".encode("utf-8")).hexdigest()[:16]
     value = {
         "build_id": build_id,
-        "source_commit": commit,
+        "source_commit": repository["source_commit"],
         "source_tree": tree,
+        "source_tree_algorithm": repository["source_tree_algorithm"],
         "built_at": built_at,
-        "dirty": bool(status),
+        "dirty": repository["dirty"],
         "mode": "frozen",
     }
     path = root / "build" / "build-info.json"
@@ -41,12 +38,38 @@ def write_build_info(root: Path) -> Path:
     return path
 
 
+def write_version_info(root: Path) -> Path:
+    version = tuple(int(part) for part in __version__.split(".")) + (0,)
+    dotted = ", ".join(str(part) for part in version)
+    path = root / "build" / "windows-version-info.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""VSVersionInfo(
+  ffi=FixedFileInfo(filevers=({dotted}), prodvers=({dotted}), mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[StringFileInfo([StringTable('040904B0', [
+    StringStruct('CompanyName', 'DawnDust'),
+    StringStruct('FileDescription', '{DISPLAY_NAME}'),
+    StringStruct('FileVersion', '{__version__}'),
+    StringStruct('InternalName', 'workflow-monitor'),
+    StringStruct('OriginalFilename', '{EXECUTABLE_NAME}'),
+    StringStruct('ProductName', '{DISPLAY_NAME}'),
+    StringStruct('ProductVersion', '{__version__}')
+  ])]), VarFileInfo([VarStruct('Translation', [1033, 1200])])]
+)\n""",
+        encoding="utf-8",
+    )
+    return path
+
+
 def main() -> int:
-    root = Path(__file__).resolve().parents[1]
+    root = ROOT
     build_info = write_build_info(root)
+    version_info = write_version_info(root)
+    icon_png = root / "project_hooks" / "assets" / "crafting_table_icon.png"
+    icon_ico = root / "project_hooks" / "assets" / "crafting_table_icon.ico"
     PyInstaller.__main__.run([
         str(root / "project_hooks" / "windows_entry.py"),
-        "--name", "project-hooks",
+        "--name", "workflow-monitor",
         "--onefile",
         "--console",
         "--hide-console", "hide-early",
@@ -56,9 +79,12 @@ def main() -> int:
         "--workpath", str(root / "build" / "pyinstaller"),
         "--specpath", str(root / "build" / "pyinstaller"),
         "--paths", str(root),
+        "--icon", str(icon_ico),
+        "--version-file", str(version_info),
         "--add-data", f"{build_info}{os.pathsep}.",
+        "--add-data", f"{icon_png}{os.pathsep}project_hooks/assets",
     ])
-    executable = root / "dist" / "project-hooks.exe"
+    executable = root / "dist" / EXECUTABLE_NAME
     if not executable.is_file():
         raise SystemExit(f"PyInstaller did not create {executable}")
     return 0

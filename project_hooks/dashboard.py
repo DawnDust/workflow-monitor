@@ -30,7 +30,12 @@ from .read_model import (
     is_auxiliary_task_id,
 )
 from .resource_layout import RESOURCE_DIRECTORIES
-from .updater import check_latest_update, version_report
+from .updater import (
+    check_latest_update,
+    refresh_software_delivery as refresh_local_software_delivery,
+    software_delivery_report,
+    version_report,
+)
 from .store import SCHEMA_VERSION, load_events
 from .launcher import ACTIVE_ENV, PORTABLE_ROOT_ENV, selected_executable
 from .workflow_actions import (
@@ -47,12 +52,12 @@ from .workbench import EXTERNAL_TOOL_KINDS, external_tools_from_events
 
 CLI_FALLBACK = (
     "可改用以下只读命令：\n"
-    "  .\\project-hooks.exe context\n"
-    "  .\\project-hooks.exe history\n"
-    "  .\\project-hooks.exe decisions\n"
-    "  .\\project-hooks.exe explorations\n"
-    "  .\\project-hooks.exe catalog list\n"
-    "  .\\project-hooks.exe db status"
+    "  .\\workflow-monitor.exe context\n"
+    "  .\\workflow-monitor.exe history\n"
+    "  .\\workflow-monitor.exe decisions\n"
+    "  .\\workflow-monitor.exe explorations\n"
+    "  .\\workflow-monitor.exe catalog list\n"
+    "  .\\workflow-monitor.exe db status"
 )
 
 class DashboardError(RuntimeError):
@@ -186,8 +191,8 @@ SOFTWARE_PROMPT_TEMPLATES = {
             "更新后 check、db verify 和待提交文件",
         ),
         "extra_rules": (
-            "仅在 main、无活动任务、工作树干净且与 origin/main 同步时执行 `project-hooks update`。"
-            "升级完成后运行 `project-hooks check` 和 `project-hooks db verify`，不自动提交。"
+            "仅在 main、无活动任务、工作树干净且与 origin/main 同步时执行 `workflow-monitor update`。"
+            "升级完成后运行 `workflow-monitor check` 和 `workflow-monitor db verify`，不自动提交。"
         ),
     },
     "software_update_target": {
@@ -210,18 +215,18 @@ SOFTWARE_PROMPT_TEMPLATES = {
         "task": "只读验证工作流配置、永久事件源、SQLite 投影、Git Hook 和版本兼容性。",
         "sections": (
             "项目根目录与配置状态",
-            "project-hooks check 结果",
-            "project-hooks db verify 结果",
+            "workflow-monitor check 结果",
+            "workflow-monitor db verify 结果",
             "事件数量、schema 和日志摘要",
             "Git Hook 与版本兼容状态",
             "问题分级和修复建议",
         ),
-        "extra_rules": "依次执行 `project-hooks version`、`project-hooks check` 和 `project-hooks db verify`；不应用修复。",
+        "extra_rules": "依次执行 `workflow-monitor version`、`workflow-monitor check` 和 `workflow-monitor db verify`；不应用修复。",
     },
     "update_failure_diagnosis": {
         "category": "软件诊断",
         "label": "诊断升级失败",
-        "task": "分析 project-hooks 安装或升级失败的原因，优先使用只读证据并确认项目数据未受损。",
+        "task": "分析 Workflow Monitor 安装或升级失败的原因，优先使用只读证据并确认项目数据未受损。",
         "sections": (
             "失败命令、版本和完整错误",
             "网络、Release、摘要和权限检查",
@@ -299,20 +304,20 @@ WORKBENCH_PROMPT_CATEGORIES = (
 )
 
 RESEARCH_PROMPT_COMMON_RULES = """请遵守以下规则：
-0. 以下所有 `project-hooks` 命令均使用项目根目录的 `.\\project-hooks.exe` 执行。
+0. 以下所有 `workflow-monitor` 命令均使用项目根目录的 `.\\workflow-monitor.exe` 执行。
 1. 只使用当前 Codex 对话中已经选择的文件、已有消息和我提供的资料作为已有证据。
 2. 如果材料不足，先明确指出还需要选择或提供哪些文件；停止补造事实、数据、引文或实验结果。
 3. 明确区分“已有证据”“合理推断”和“待验证建议”。
 4. 论述时尽量引用资料 ID、标题或项目相对路径，使结论可以回查。
 5. 先完成分析，再单独列出建议保存的资料条目、资料关系、项目决策或探索记录。
 6. 未经我在对话中明确确认，不得修改项目文件、数据库、事件或 Git 状态。
-7. 如果我确认记录，再先运行 `project-hooks context --format markdown` 并按 core_read_order 阅读规范；复用已有活动任务且不替我结束，或按规范创建 stable 任务。只通过现有 project、stage、catalog、decision、attempt 和 state 命令记录；项目资料与阶段只在 main 的 stable 任务中更新，探索当前步骤、进展和下一步使用 attempt update；完成后更新项目概览，仅结束由你创建的任务。
+7. 如果我确认记录，再先运行 `workflow-monitor context --format markdown` 并按 core_read_order 阅读规范；复用已有活动任务且不替我结束，或按规范创建 stable 任务。只通过现有 project、stage、catalog、decision、attempt 和 state 命令记录；项目资料与阶段只在 main 的 stable 任务中更新，探索当前步骤、进展和下一步使用 attempt update；完成后更新项目概览，仅结束由你创建的任务。
 """
 
 SOFTWARE_PROMPT_COMMON_RULES = """请遵守以下规则：
-0. 以下所有 `project-hooks` 命令均使用项目根目录的 `.\\project-hooks.exe` 执行。
+0. 以下所有 `workflow-monitor` 命令均使用项目根目录的 `.\\workflow-monitor.exe` 执行。
 1. 先确认当前操作针对工作流软件开发仓库、普通科研项目还是临时测试仓库，不得混淆目标。
-2. 除首次初始化外，先运行 `project-hooks context --format markdown` 并按 core_read_order 阅读规范。
+2. 除首次初始化外，先运行 `workflow-monitor context --format markdown` 并按 core_read_order 阅读规范。
 3. 先做只读预检；任何写操作都必须遵守现有任务生命周期、分支限制、活动任务和 Git 同步要求。
 4. 不得手工改写 `maintenance/events.jsonl` 既有行、直接编辑 SQLite、删除活动状态或绕过 `end`。
 5. 只使用正式 GitHub Release；校验下载摘要，不从未发布的 main 分支替代稳定版本。
@@ -606,6 +611,12 @@ class DashboardDataProvider:
     def check_for_updates(self) -> dict:
         return check_latest_update(self.project_root)
 
+    def check_software_delivery(self) -> dict:
+        return software_delivery_report(self.project_root)
+
+    def refresh_software_delivery(self, release: dict) -> dict:
+        return refresh_local_software_delivery(self.project_root, release)
+
     def lifecycle_snapshot(self) -> dict:
         if self.action_service is None:
             return {"lifecycle_step": {"key": "unavailable", "label": "仅查看", "index": 0}}
@@ -615,15 +626,27 @@ class DashboardDataProvider:
 def version_status_text(report: dict) -> str:
     project = report.get("project_version") or "未初始化"
     build_id = (report.get("build_identity") or {}).get("build_id")
-    warning = " ⚠ 构建不一致" if report.get("build_warning") else ""
     build_text = f" ({build_id[:12]})" if build_id else ""
-    return f"版本：EXE {report['application_version']}{build_text} / 项目 {project}{warning}"
+    return f"版本：EXE {report['application_version']}{build_text} / 项目 {project}"
 
 
-def delivery_status(state: dict, update_result: dict | None = None) -> dict[str, str]:
-    """Render honest local delivery state without treating a push as a Release."""
+def branch_status_text(branch: str, classification: dict) -> str:
+    kind = classification.get("kind")
+    if kind == "exploration":
+        track = classification.get("track") or "exploration"
+        label = f"探索 / {track}"
+    elif kind == "stable":
+        label = "稳定维护"
+    elif kind == "archive":
+        label = "归档探索"
+    else:
+        label = "不支持"
+    return f"分支：{branch}（{label}）"
+
+
+def delivery_status(state: dict) -> dict[str, str]:
+    """Render the Git delivery state for the current work cycle."""
     dirty_count = len(state.get("dirty_paths") or [])
-    changed_count = len(state.get("changed_paths") or [])
     git = state.get("git") or {}
     active = state.get("active_task") or {}
     head = str(git.get("head") or "")
@@ -632,16 +655,18 @@ def delivery_status(state: dict, update_result: dict | None = None) -> dict[str,
 
     worktree = "干净" if dirty_count == 0 else f"有 {dirty_count} 个未提交变更"
     if dirty_count and head_changed:
-        commit = f"部分已提交，仍有 {dirty_count} 个未提交变更"
+        commit = "部分已提交，仍有未提交变更"
     elif dirty_count:
-        commit = f"尚未提交当前修改（任务变化 {changed_count} 个文件）"
+        commit = "尚未提交当前修改"
     elif head_changed:
         commit = f"已提交到 {head[:8]}"
     else:
         commit = "没有待提交修改"
 
     relation = git.get("relation")
-    if relation == "synced":
+    if relation == "synced" and dirty_count:
+        push = "未提交修改尚未进入推送范围"
+    elif relation == "synced":
         push = f"已与 {git.get('upstream_ref') or 'origin/main'} 同步"
     elif relation == "ahead":
         push = f"待推送 {git.get('ahead') or 0} 个提交"
@@ -652,29 +677,48 @@ def delivery_status(state: dict, update_result: dict | None = None) -> dict[str,
     else:
         push = "远端状态不可用"
 
-    identity = state.get("build_identity") or {}
-    version = state.get("application_version") or "未知版本"
-    if identity.get("dirty"):
-        release = f"v{version} 候选构建，尚未正式发布"
-    elif update_result is None:
-        release = f"v{version} 干净构建，尚未联网核对"
-    elif update_result.get("status") == "current":
-        release = f"已核对正式发布 v{update_result.get('latest_version') or version}"
-    elif update_result.get("status") == "different-build":
-        release = f"v{version} 构建与正式发布资产不同"
-    elif update_result.get("status") == "update-available":
-        release = f"最新正式版 v{update_result.get('latest_version') or '未知'}，当前 v{version}"
-    else:
-        release = "正式发布状态未确认"
-    return {"worktree": worktree, "commit": commit, "push": push, "release": release}
+    return {"worktree": worktree, "commit": commit, "push": push}
 
 
-def delivery_status_text(state: dict, update_result: dict | None = None) -> str:
-    status = delivery_status(state, update_result)
+def delivery_status_text(state: dict) -> str:
+    status = delivery_status(state)
     return (
         f"工作区：{status['worktree']}　｜　提交：{status['commit']}　｜　"
-        f"推送：{status['push']}　｜　正式发布：{status['release']}"
+        f"推送：{status['push']}"
     )
+
+
+def software_delivery_status_text(report: dict | None) -> str:
+    if not report:
+        return "EXE 构建：读取中｜最近发布：读取中｜发布后软件修改：读取中"
+    match = report.get("exe_repository_match")
+    failed = report.get("status") == "software-delivery-check-failed"
+    build = (
+        "与当前仓库一致" if match is True
+        else "与当前仓库不一致" if match is False
+        else "未能核对" if failed
+        else "项目未包含软件源码"
+    )
+    version = report.get("release_version")
+    published_at = report.get("published_at")
+    if version:
+        try:
+            value = datetime.fromisoformat(str(published_at).replace("Z", "+00:00"))
+            published = value.astimezone().strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError):
+            published = str(published_at or "时间未知")
+        release = f"v{version}｜{published}"
+    else:
+        release = "未能核对"
+    source_available = report.get("software_source_available")
+    if source_available is None:
+        changes = "未能核对" if failed else "不适用"
+    elif not source_available:
+        changes = "不适用"
+    else:
+        count = len(report.get("unreleased_software_changes") or [])
+        changes = f"有 {count} 个软件文件尚未发布" if count else "无未发布软件修改"
+    return f"EXE 构建：{build}　｜　最近发布：{release}　｜　发布后软件修改：{changes}"
 
 
 def active_task_warning(active: dict | None, now: datetime | None = None) -> dict | None:
@@ -1505,6 +1549,14 @@ class AdvancedWindow:
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.health = ttk.Label(self.window, text="正在加载技术信息…", padding=(10, 8), justify="left")
         self.health.pack(fill="x")
+        self.software = ttk.Label(
+            self.window,
+            text=software_delivery_status_text(None),
+            padding=(10, 0, 10, 8),
+            justify="left",
+            wraplength=1000,
+        )
+        self.software.pack(fill="x")
         self.events = TablePage(
             self.window, tk, ttk, scrolledtext,
             columns=[("occurred_at", "时间", 180), ("event_type", "事件类型", 190),
@@ -1517,6 +1569,9 @@ class AdvancedWindow:
     def set_snapshot(self, snapshot: dict) -> None:
         self.health.configure(text=advanced_summary(snapshot))
         self.events.set_records(snapshot.get("events", []))
+
+    def set_software_delivery(self, report: dict | None) -> None:
+        self.software.configure(text=software_delivery_status_text(report))
 
     def select_event(self, event_id: str) -> bool:
         return self.events.select_record("event_id", event_id)
@@ -2587,8 +2642,9 @@ class ExplanationPage:
             ("behind", "本地落后", "远端有本地尚未包含的提交。", "停止发布，先安全同步。"),
             ("diverged", "已经分叉", "本地与远端各自包含不同提交。", "人工审查并选择合并或变基策略。"),
             ("unavailable", "远端不可用", "没有 origin/main、离线或 Git 检查失败。", "只能陈述未知，不能假定已经推送。"),
-            ("candidate build", "候选构建", "本地构建用于验收，可能包含未提交源码。", "不能称为正式发布。"),
-            ("verified release", "已核对正式发布", "正式 manifest 的版本与构建 ID 和当前程序一致。", "表示 Release 资产已核对，不等同于科研内容结论。"),
+            ("build match", "EXE 与仓库一致", "EXE 内嵌源码指纹与当前软件源码仓库指纹相同。", "表示该 EXE 能代表当前仓库；普通科研项目没有软件源码时不适用。"),
+            ("latest release", "最近正式发布", "显示 GitHub 最新正式 Release 的版本与发布时间。", "这是辅助信息，不是科研工作周期的完成条件。"),
+            ("unreleased software", "发布后软件修改", "最新 Release 标签之后仍有软件源码、测试、构建脚本或维护文档变化。", "按需提交、推送并在合适时发布新软件版本；科研 resources 不计入。"),
         )),
     )
 
@@ -2648,6 +2704,8 @@ class ExplanationPage:
 
 class DashboardApp:
     def __init__(self, root, tk, ttk, scrolledtext, provider: DashboardDataProvider, refresh_seconds: float):
+        from project_hooks.app_icon import apply_window_icon
+
         self.root, self.tk, self.ttk = root, tk, ttk
         self.scrolledtext = scrolledtext
         self.controller = DashboardController(provider)
@@ -2659,6 +2717,9 @@ class DashboardApp:
         self.lifecycle_polling = False
         self.lifecycle_token: str | None = None
         self.latest_update_result: dict | None = None
+        self.software_delivery_result: dict | None = None
+        self.software_delivery_running = False
+        self.software_delivery_pending = False
         self.ui_queue: queue.Queue[Callable[[], None]] = queue.Queue()
         self.refresh_running = False
         self.refresh_pending = False
@@ -2666,7 +2727,8 @@ class DashboardApp:
         self.last_full_state_token: str | None = None
         self.action_matrix = None
         self.section_revisions: dict[str, str] = {}
-        root.title("Project Maintenance")
+        apply_window_icon(root, tk)
+        root.title("Workflow Monitor")
         root.geometry("1220x820")
         root.minsize(900, 620)
 
@@ -2694,7 +2756,7 @@ class DashboardApp:
         self.lifecycle_action = ttk.Label(lifecycle, text="最近动作：无")
         self.lifecycle_action.pack(fill="x", pady=(2, 0))
         self.lifecycle_delivery = ttk.Label(
-            lifecycle, text="工作区：读取中　｜　提交：读取中　｜　推送：读取中　｜　正式发布：读取中",
+            lifecycle, text="工作区：读取中　｜　提交：读取中　｜　推送：读取中",
             wraplength=1160, justify="left",
         )
         self.lifecycle_delivery.pack(fill="x", pady=(2, 0))
@@ -2910,11 +2972,13 @@ class DashboardApp:
             detail += f"｜需要恢复：{state['sidecar']['error']}"
         self.lifecycle_detail.configure(text=detail)
         self.lifecycle_delivery.configure(
-            text=delivery_status_text(state, self.latest_update_result),
+            text=delivery_status_text(state),
         )
         token = state.get("state_token")
         if self.lifecycle_token and token != self.lifecycle_token:
             self.lifecycle_action.configure(text="项目状态已变化；只读工作流视图正在同步。")
+            if self.software_delivery_result is not None:
+                self.root.after(0, lambda: self.request_software_delivery(initial=False))
         self.lifecycle_token = token
 
     def check_for_updates(self) -> None:
@@ -2946,6 +3010,40 @@ class DashboardApp:
             self.post_ui(finish)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def request_software_delivery(self, *, initial: bool) -> None:
+        """Refresh auxiliary software state without blocking the lifecycle view."""
+        if self.software_delivery_running:
+            self.software_delivery_pending = True
+            return
+        self.software_delivery_running = True
+
+        def worker() -> None:
+            try:
+                if initial or self.software_delivery_result is None:
+                    result = self.provider.check_software_delivery()
+                else:
+                    result = self.provider.refresh_software_delivery(self.software_delivery_result)
+            except Exception:
+                result = dict(self.software_delivery_result or {})
+                result["status"] = "software-delivery-check-failed"
+
+            def finish() -> None:
+                self.software_delivery_running = False
+                self.software_delivery_result = result
+                if self.advanced_window is not None:
+                    self.advanced_window.set_software_delivery(result)
+                if self.software_delivery_pending:
+                    self.software_delivery_pending = False
+                    self.root.after(0, lambda: self.request_software_delivery(initial=False))
+
+            self.post_ui(finish)
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name="dashboard-software-delivery",
+        ).start()
 
     def apply_update(self) -> None:
         self.notify("Dashboard 为只读观察台；请在 AI 对话中确认并执行软件更新。")
@@ -3005,7 +3103,7 @@ class DashboardApp:
     def restart_updated_dashboard(self) -> None:
         executable = selected_executable(self.project_root)
         if executable is None:
-            self.notify("找不到已安装的新版 EXE，请手工重新打开项目根目录的 project-hooks.exe。")
+            self.notify("找不到已安装的新版 EXE，请手工重新打开项目根目录的 workflow-monitor.exe。")
             return
         env = os.environ.copy()
         env[ACTIVE_ENV] = "1"
@@ -3034,7 +3132,7 @@ class DashboardApp:
                 title="导出脱敏诊断包",
                 defaultextension=".zip",
                 initialdir=str(export_folder),
-                initialfile=f"project-hooks-diagnostics-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip",
+                initialfile=f"workflow-monitor-diagnostics-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip",
                 filetypes=(("ZIP 文件", "*.zip"),),
             )
             if not selected:
@@ -3091,9 +3189,10 @@ class DashboardApp:
         return True
 
     def apply_snapshot(self, snapshot: dict) -> None:
-        branch_type = snapshot["classification"]["kind"]
         health = snapshot["health"]
-        self.branch_label.configure(text=f"分支：{snapshot['branch']}（{branch_type}）")
+        self.branch_label.configure(text=branch_status_text(
+            snapshot["branch"], snapshot["classification"],
+        ))
         warning = snapshot.get("active_task_warning")
         health_text = f"数据库：{health['status']}"
         if warning:
@@ -3108,13 +3207,11 @@ class DashboardApp:
             "health": health,
             "catalog": snapshot.get("catalog_items", []),
             "delivery": (self.action_matrix.state if self.action_matrix is not None else None),
-            "update": self.latest_update_result,
         }
         if self._section_changed("overview", overview_source):
             overview = self.overview_text(
                 snapshot,
                 self.action_matrix.state if self.action_matrix is not None else None,
-                self.latest_update_result,
             )
             self.overview.configure(state="normal")
             self.overview.delete("1.0", "end")
@@ -3132,6 +3229,7 @@ class DashboardApp:
             self.diagnostics_page.set_data(snapshot.get("diagnostics", {}))
         if self.advanced_window is not None and self._section_changed("advanced", snapshot.get("events", [])):
             self.advanced_window.set_snapshot(snapshot)
+            self.advanced_window.set_software_delivery(self.software_delivery_result)
         if self.global_query.get().strip():
             self.update_search_results(switch=False)
 
@@ -3182,6 +3280,9 @@ class DashboardApp:
             )
         if self.snapshot:
             self.advanced_window.set_snapshot(self.snapshot)
+        self.advanced_window.set_software_delivery(self.software_delivery_result)
+        if self.software_delivery_result is None:
+            self.request_software_delivery(initial=True)
         self.advanced_window.focus()
         if event_id and not self.advanced_window.select_event(event_id):
             self.status.configure(text=f"高级查看中找不到事件：{event_id}")
@@ -3213,7 +3314,6 @@ class DashboardApp:
     @staticmethod
     def overview_text(
         snapshot: dict, delivery_state: dict | None = None,
-        update_result: dict | None = None,
     ) -> str:
         context = snapshot.get("context") or {}
         profile = context.get("project_profile") or {}
@@ -3268,7 +3368,7 @@ class DashboardApp:
             separator,
             "",
             "代码交付",
-            delivery_status_text(delivery_state, update_result),
+            delivery_status_text(delivery_state),
             f"最近完成：{latest_text}",
             separator,
             "",
@@ -3281,7 +3381,10 @@ class DashboardApp:
         if not self.snapshot:
             return
         self.root.clipboard_clear()
-        self.root.clipboard_append(self.overview_text(self.snapshot))
+        self.root.clipboard_append(self.overview_text(
+            self.snapshot,
+            self.action_matrix.state if self.action_matrix is not None else None,
+        ))
 
     @staticmethod
     def history_detail(record: dict) -> str:

@@ -295,6 +295,20 @@ class WorkflowActionTests(unittest.TestCase):
             self.assertTrue(failed.incident_id)
             self.assertTrue((root / ".project_hooks/diagnostics/events.jsonl").is_file())
 
+    def test_expected_action_validation_failure_has_no_incident(self) -> None:
+        state = stable_state()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = WorkflowActionService(
+                root, state_provider=lambda: dict(state),
+                executor=lambda *_args: (_ for _ in ()).throw(ValueError("bad input")),
+            )
+            availability = service.availability("health.check", force=True)
+            result = service.execute(ActionRequest("health.check", {}, availability.state_token))
+            self.assertEqual(result.status, "failed")
+            self.assertIsNone(result.incident_id)
+            self.assertFalse((root / ".project_hooks/diagnostics/events.jsonl").exists())
+
     def test_worktree_requires_three_second_quiet_window(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             service = WorkflowActionService(

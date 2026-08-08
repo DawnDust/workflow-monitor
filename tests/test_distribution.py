@@ -9,14 +9,24 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from project_hooks import __version__ as CURRENT_VERSION
+from project_hooks import EXECUTABLE_NAME, __version__ as CURRENT_VERSION
+from project_hooks.app_icon import PNG_ICON
+from project_hooks.build_identity import exe_matches_repository, repository_source_identity
 from project_hooks.cli import discover_project_root
 from project_hooks.project_manager import (
     ProjectManagerError,
     apply_project_update,
     initialize_project,
 )
-from project_hooks.updater import UpdateError, check_latest_update, check_update, run_update, verify_digest
+from project_hooks.updater import (
+    UpdateError,
+    check_latest_release,
+    check_latest_update,
+    check_update,
+    run_update,
+    software_changes_since_release,
+    verify_digest,
+)
 from project_hooks.windows_entry import PortableBootstrapError, prepare_portable_project
 from scripts.run_tests import validate_release_tag
 
@@ -51,10 +61,14 @@ class DistributionTests(unittest.TestCase):
     def init(self, version: str = CURRENT_VERSION) -> None:
         initialize_project(self.root, version)
 
+    def test_application_icon_assets_are_present(self) -> None:
+        self.assertTrue(PNG_ICON.is_file())
+        self.assertTrue(PNG_ICON.with_suffix(".ico").is_file())
+
     def exe_release(self, *, digest_override: str | None = None, build_id: str | None = None) -> Path:
         release = Path(self.temp.name) / "release"
         release.mkdir(exist_ok=True)
-        windows_exe = release / "project-hooks.exe"
+        windows_exe = release / EXECUTABLE_NAME
         windows_exe.write_bytes(b"test executable")
         manifest = {
             "version": CURRENT_VERSION,
@@ -90,7 +104,7 @@ class DistributionTests(unittest.TestCase):
     def test_release_manifest_contains_only_executable_asset(self) -> None:
         dist = Path(self.temp.name) / "dist"
         dist.mkdir()
-        executable = dist / "project-hooks.exe"
+        executable = dist / EXECUTABLE_NAME
         executable.write_bytes(b"release executable")
 
         subprocess.run(
@@ -107,7 +121,7 @@ class DistributionTests(unittest.TestCase):
             {"version", "build_identity", "launcher_min_version", "event_schema", "windows_exe"},
         )
         self.assertIn("build_id", manifest["build_identity"])
-        self.assertEqual(manifest["windows_exe"]["file"], "project-hooks.exe")
+        self.assertEqual(manifest["windows_exe"]["file"], EXECUTABLE_NAME)
 
     def test_release_tag_must_match_application_version(self) -> None:
         validate_release_tag(CURRENT_VERSION, f"v{CURRENT_VERSION}")
@@ -124,6 +138,72 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(result["status"], "different-build")
         self.assertIn("不同构建", result["build_warning"])
 
+    @patch("project_hooks.updater._load_latest_release")
+    def test_latest_release_reports_version_and_publish_time(self, load_release) -> None:
+        load_release.return_value = {
+            "tag_name": "v1.5.0",
+            "draft": False,
+            "prerelease": False,
+            "published_at": "2026-08-02T11:32:58Z",
+            "html_url": "https://example.invalid/releases/v1.5.0",
+        }
+
+        result = check_latest_release()
+
+        self.assertEqual(result["release_version"], "1.5.0")
+        self.assertEqual(result["published_at"], "2026-08-02T11:32:58Z")
+
+    def test_exe_repository_match_and_post_release_software_changes(self) -> None:
+        source = self.root / "project_hooks/__init__.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("VERSION = 1\n", encoding="utf-8")
+        resource = self.root / "resources/data/sample.txt"
+        resource.parent.mkdir(parents=True)
+        resource.write_text("baseline\n", encoding="utf-8")
+        self.commit("software baseline")
+        self.git("tag", "v1.5.0")
+        repository = repository_source_identity(self.root)
+        identity = {
+            "source_tree": repository["source_tree"],
+            "source_tree_algorithm": repository["source_tree_algorithm"],
+        }
+        self.assertTrue(exe_matches_repository(self.root, identity))
+
+        source.write_text("VERSION = 2\n", encoding="utf-8")
+        resource.write_text("research change\n", encoding="utf-8")
+
+        self.assertFalse(exe_matches_repository(self.root, identity))
+        self.assertEqual(
+            software_changes_since_release(self.root, "v1.5.0"),
+            ["project_hooks/__init__.py"],
+        )
+
+    def test_repository_fingerprint_detects_untracked_content_changes(self) -> None:
+        source = self.root / "project_hooks/__init__.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("tracked\n", encoding="utf-8")
+        self.commit("tracked source")
+        scratch = self.root / "project_hooks/scratch.py"
+        scratch.write_text("first\n", encoding="utf-8")
+        repository = repository_source_identity(self.root)
+        identity = {
+            "source_tree": repository["source_tree"],
+            "source_tree_algorithm": "git-worktree-v2",
+        }
+        self.assertTrue(exe_matches_repository(self.root, identity))
+
+        resource = self.root / "resources/data/result.txt"
+        resource.parent.mkdir(parents=True)
+        resource.write_text("research only\n", encoding="utf-8")
+        events = self.root / "maintenance/events.jsonl"
+        events.parent.mkdir(parents=True)
+        events.write_text("dynamic event\n", encoding="utf-8")
+        self.assertTrue(exe_matches_repository(self.root, identity))
+
+        scratch.write_text("second\n", encoding="utf-8")
+
+        self.assertFalse(exe_matches_repository(self.root, identity))
+
     def test_project_root_is_discovered_from_descendant(self) -> None:
         self.init()
         nested = self.root / "resources/analysis/deep"
@@ -133,7 +213,7 @@ class DistributionTests(unittest.TestCase):
     def test_portable_bootstrap_initializes_empty_folder_and_local_hook(self) -> None:
         portable = Path(self.temp.name) / "portable"
         portable.mkdir()
-        executable = portable / "project-hooks.exe"
+        executable = portable / EXECUTABLE_NAME
         executable.write_bytes(b"placeholder")
 
         initialized = prepare_portable_project(portable, executable)
@@ -141,16 +221,16 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(initialized)
         self.assertTrue((portable / ".git").is_dir())
         self.assertTrue((portable / ".codex/project-maintenance-workflow.json").is_file())
-        self.assertIn("./project-hooks.exe pre-commit", (
+        self.assertIn("./workflow-monitor.exe pre-commit", (
             portable / ".githooks/pre-commit"
         ).read_text(encoding="utf-8"))
-        self.assertIn("/project-hooks.exe", (portable / ".gitignore").read_text(encoding="utf-8"))
+        self.assertIn("/workflow-monitor.exe", (portable / ".gitignore").read_text(encoding="utf-8"))
         self.assertFalse(prepare_portable_project(portable, executable))
 
     def test_portable_bootstrap_rejects_nonempty_uninitialized_folder(self) -> None:
         portable = Path(self.temp.name) / "occupied"
         portable.mkdir()
-        executable = portable / "project-hooks.exe"
+        executable = portable / EXECUTABLE_NAME
         executable.write_bytes(b"placeholder")
         (portable / "research.txt").write_text("keep", encoding="utf-8")
 
@@ -164,7 +244,7 @@ class DistributionTests(unittest.TestCase):
         portable = Path(self.temp.name) / "empty-git"
         portable.mkdir()
         subprocess.run(["git", "init", "-b", "main"], cwd=portable, check=True, capture_output=True)
-        executable = portable / "project-hooks.exe"
+        executable = portable / EXECUTABLE_NAME
         executable.write_bytes(b"placeholder")
 
         self.assertTrue(prepare_portable_project(portable, executable))
@@ -179,28 +259,28 @@ class DistributionTests(unittest.TestCase):
     def test_portable_bootstrap_reports_missing_git_without_writing(self) -> None:
         portable = Path(self.temp.name) / "missing-git"
         portable.mkdir()
-        executable = portable / "project-hooks.exe"
+        executable = portable / EXECUTABLE_NAME
         executable.write_bytes(b"placeholder")
 
         with patch("project_hooks.windows_entry._git_available", return_value=False):
             with self.assertRaisesRegex(PortableBootstrapError, "未找到 Git"):
                 prepare_portable_project(portable, executable)
 
-        self.assertEqual(sorted(path.name for path in portable.iterdir()), ["project-hooks.exe"])
+        self.assertEqual(sorted(path.name for path in portable.iterdir()), [EXECUTABLE_NAME])
 
     def test_portable_bootstrap_requires_canonical_executable_name(self) -> None:
         portable = Path(self.temp.name) / "renamed-exe"
         portable.mkdir()
-        executable = portable / "project-hooks (1).exe"
+        executable = portable / "workflow-monitor (1).exe"
         executable.write_bytes(b"placeholder")
 
-        with self.assertRaisesRegex(PortableBootstrapError, "必须命名为 project-hooks.exe"):
+        with self.assertRaisesRegex(PortableBootstrapError, "必须命名为 workflow-monitor.exe"):
             prepare_portable_project(portable, executable)
 
     def test_portable_bootstrap_rolls_back_files_created_during_failure(self) -> None:
         portable = Path(self.temp.name) / "failed-portable"
         portable.mkdir()
-        executable = portable / "project-hooks.exe"
+        executable = portable / EXECUTABLE_NAME
         executable.write_bytes(b"placeholder")
 
         def fail_after_partial_write(root: Path, version: str) -> None:
@@ -212,7 +292,7 @@ class DistributionTests(unittest.TestCase):
             with self.assertRaisesRegex(ProjectManagerError, "injected failure"):
                 prepare_portable_project(portable, executable)
 
-        self.assertEqual(sorted(path.name for path in portable.iterdir()), ["project-hooks.exe"])
+        self.assertEqual(sorted(path.name for path in portable.iterdir()), [EXECUTABLE_NAME])
 
     def test_project_update_preserves_existing_journal_bytes_and_rebuilds_database(self) -> None:
         self.init("1.3.0")
@@ -305,7 +385,7 @@ class DistributionTests(unittest.TestCase):
         real_run = subprocess.run
 
         def run_portable(command, *args, **kwargs):
-            if str(command[0]).endswith("project-hooks.exe"):
+            if str(command[0]).endswith(EXECUTABLE_NAME):
                 return migration
             return real_run(command, *args, **kwargs)
 
@@ -335,7 +415,7 @@ class DistributionTests(unittest.TestCase):
         real_run = subprocess.run
 
         def run_portable(command, *args, **kwargs):
-            if str(command[0]).endswith("project-hooks.exe"):
+            if str(command[0]).endswith(EXECUTABLE_NAME):
                 return migration
             return real_run(command, *args, **kwargs)
 

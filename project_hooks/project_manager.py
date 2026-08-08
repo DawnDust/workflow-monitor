@@ -36,10 +36,10 @@ GITATTRIBUTES_END = "# project-maintenance-hooks:end"
 
 HOOK_TEMPLATE = """#!/bin/sh
 # project-maintenance-hooks managed
-if [ -x "./project-hooks.exe" ]; then
-  ./project-hooks.exe pre-commit
+if [ -x "./workflow-monitor.exe" ]; then
+  ./workflow-monitor.exe pre-commit
 else
-  echo "缺少项目根目录的 project-hooks.exe，无法执行提交检查" >&2
+  echo "缺少项目根目录的 workflow-monitor.exe，无法执行提交检查" >&2
   exit 1
 fi
 """
@@ -47,9 +47,9 @@ fi
 AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 ## 项目维护生命周期
 
-- 所有命令使用仓库根目录的 `.\\project-hooks.exe`。
-- 新 clone 或 worktree 首次使用时，将 `project-hooks.exe` 放到仓库根目录并运行 `.\\project-hooks.exe install`。
-- 每次任务先运行 `.\\project-hooks.exe context --format markdown`，按 `core_read_order` 阅读规范，首次写入前运行 `start`。
+- 所有命令使用仓库根目录的 `.\\workflow-monitor.exe`。
+- 新 clone 或 worktree 首次使用时，将 `workflow-monitor.exe` 放到仓库根目录并运行 `.\\workflow-monitor.exe install`。
+- 每次任务先运行 `.\\workflow-monitor.exe context --format markdown`，按 `core_read_order` 阅读规范，首次写入前运行 `start`。
 - 用户只需用自然语言描述任务；AI 提取目标、验收和证据，任务 ID、时间、分支、状态令牌和安全默认值由工作流代码处理。
 - 稳定维护只在 `main` 使用 `--track stable`；研究和实验使用独立探索分支；无法可靠判断轨道时必须在对话中询问用户。
 - 使用 `state update`、`decision add` 和 `attempt update` 保存进展，最后必须运行 `end`。
@@ -73,7 +73,7 @@ __pycache__/
 .venv/
 build/
 dist/
-/project-hooks.exe
+/workflow-monitor.exe
 /diagnostics-export/
 # project-maintenance-hooks:end"""
 
@@ -88,20 +88,20 @@ maintenance/events.jsonl text eol=lf merge=union
 
 MAINTENANCE_README = """# 项目维护规范
 
-本项目使用 `project-hooks` 保存项目资料、阶段、任务生命周期、研究尝试、决策、交接和科研资料索引。
+本项目使用 Workflow Monitor 保存项目资料、阶段、任务生命周期、研究尝试、决策、交接和科研资料索引。
 `maintenance/events.jsonl` 是追加式永久事件源；`.project_hooks/maintenance.sqlite3`
 是可从事件源重建的本地查询投影。
 
 ## 日常流程
 
-所有命令使用仓库根目录的 `.\\project-hooks.exe`。
+所有命令使用仓库根目录的 `.\\workflow-monitor.exe`。
 
-1. 运行 `.\\project-hooks.exe context --format markdown`。
-2. 首次写入前运行 `.\\project-hooks.exe start ...`。
-3. 使用 `.\\project-hooks.exe state update` 更新断点；路线变化使用 `decision add`；探索证据使用 `attempt update`。
-4. 最后运行 `.\\project-hooks.exe end ...`，不得删除活动状态或绕过收尾。
+1. 运行 `.\\workflow-monitor.exe context --format markdown`。
+2. 首次写入前运行 `.\\workflow-monitor.exe start ...`。
+3. 使用 `.\\workflow-monitor.exe state update` 更新断点；路线变化使用 `decision add`；探索证据使用 `attempt update`。
+4. 最后运行 `.\\workflow-monitor.exe end ...`，不得删除活动状态或绕过收尾。
 
-项目说明和长期大目标通过 `.\\project-hooks.exe project update` 记录。全项目同一时间最多
+项目说明和长期大目标通过 `.\\workflow-monitor.exe project update` 记录。全项目同一时间最多
 一个 active 大阶段，使用 `stage start` 和 `stage update` 推进。探索分支自动关联创建时的
 当前阶段，并通过 `attempt update --current-step ... --progress ... --next-step ...` 保存进度。
 Dashboard 是只读观察台：“工作流”页合并当前任务、当前阶段、探索、动作可用性和历史记录，
@@ -127,27 +127,27 @@ Squash PR，合并必须等待用户明确确认。
 原始资料不覆盖；过程与成果分开。Markdown 文件中的公式使用 Markdown/LaTeX 语法。
 `catalog scan` 固定扫描以上七个目录；`add`、`update` 和 `ingest` 拒绝目录与资料类型不一致。
 `check` 会报告缺失目录、错位条目和未索引文件。旧项目先运行
-`.\\project-hooks.exe catalog migrate-layout --dry-run`，确认无冲突后再执行实际迁移。
+`.\\workflow-monitor.exe catalog migrate-layout --dry-run`，确认无冲突后再执行实际迁移。
 事件日志只追加，不得手工修改既有行；SQLite 不纳入 Git，也不是唯一备份。
 
 ## 故障反馈
 
-运行 `.\\project-hooks.exe diagnostics status` 查看本地故障摘要，运行
-`.\\project-hooks.exe diagnostics export` 导出脱敏 ZIP。诊断记录位于被 Git 忽略的
+运行 `.\\workflow-monitor.exe diagnostics status` 查看本地故障摘要，运行
+`.\\workflow-monitor.exe diagnostics export` 导出脱敏 ZIP。诊断记录位于被 Git 忽略的
 `.project_hooks/diagnostics/`，不包含项目文件、完整事件日志、环境变量或 Git 远程地址，且不会自动上传。
 
 Dashboard 只读显示诊断状态，并对不可执行动作提前显示稳定原因代码、证据和安全下一步；用户点击后可向所选位置导出脱敏诊断 ZIP，也可由 AI 或 CLI 执行导出。
 
-诊断导出保存不含绝对路径的本地回执，以便确认每个事件是否进入诊断包。升级成功且健康检查通过后，自动清理旧版本的输入校验和普通冲突；内部异常与数据完整性问题保留待复查。用户可在诊断页确认解决后原子删除对应指纹，故障再次出现时会重新记录。
+诊断导出保存不含绝对路径的本地回执，以便确认每个事件是否进入诊断包。参数错误、工作流前置条件和普通冲突只显示提示，不持久化为 Bug 诊断；内部异常、数据完整性和外部依赖故障保留待复查。用户可在诊断页确认解决后原子删除对应指纹，故障再次出现时会重新记录。
 
 ## 工作台外置工具
 
-外置工具通过 `.\\project-hooks.exe workbench external add/update/pause/restore/retire` 追加审计记录，列表与详情由 `list/show` 读取。记录只包含名称、类型、用途、使用提示、参考链接或产品标识和状态；不保存凭据与绝对路径，不自动检测安装、启动程序、执行脚本或联网验证。外置工具只在 Dashboard 工作台展示，不加入日常 `context`。
+外置工具通过 `.\\workflow-monitor.exe workbench external add/update/pause/restore/retire` 追加审计记录，列表与详情由 `list/show` 读取。记录只包含名称、类型、用途、使用提示、参考链接或产品标识和状态；不保存凭据与绝对路径，不自动检测安装、启动程序、执行脚本或联网验证。外置工具只在 Dashboard 工作台展示，不加入日常 `context`。
 
 ## 崩溃恢复
 
-活动任务异常中断后运行 `.\\project-hooks.exe task recover`。确认放弃时运行
-`.\\project-hooks.exe task abandon --reason <原因>`；命令保留科研文件、暂存区和分支。
+活动任务异常中断后运行 `.\\workflow-monitor.exe task recover`。确认放弃时运行
+`.\\workflow-monitor.exe task abandon --reason <原因>`；命令保留科研文件、暂存区和分支。
 """
 
 
@@ -171,7 +171,7 @@ def default_config() -> dict:
         "state_dir": ".project_hooks",
         "backend": "project_hooks",
         "core_read_order": ["maintenance/README.md"],
-        "context_command": ".\\project-hooks.exe context --format markdown",
+        "context_command": ".\\workflow-monitor.exe context --format markdown",
         "maintenance_store": {
             "engine": "sqlite",
             "database": ".project_hooks/maintenance.sqlite3",
@@ -266,7 +266,7 @@ def initialize_project(root: Path, application_version: str) -> dict:
     root.mkdir(parents=True, exist_ok=True)
     require_git_repository(root)
     if (root / CONFIG_PATH).exists():
-        raise ProjectManagerError("项目已经初始化；请使用 .\\project-hooks.exe update")
+        raise ProjectManagerError("项目已经初始化；请使用 .\\workflow-monitor.exe update")
     for relative, content in template_files().items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -327,7 +327,7 @@ def preflight_update(root: Path) -> None:
     require_git_repository(root)
     installation = root / INSTALLATION_PATH
     if not installation.is_file():
-        raise ProjectManagerError("缺少安装清单；请先使用当前 EXE执行 .\\project-hooks.exe install 进行接管")
+        raise ProjectManagerError("缺少安装清单；请先使用当前 EXE执行 .\\workflow-monitor.exe install 进行接管")
     branch = git(root, "branch", "--show-current").stdout.strip()
     if branch != "main":
         raise ProjectManagerError(f"升级只能在 main 执行，当前分支为 {branch or '未知'}")

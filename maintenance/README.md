@@ -32,17 +32,17 @@
 
 ### 日常入口
 
-所有命令使用仓库根目录的 `.\project-hooks.exe`，不依赖全局命令或 Python 环境。
+所有命令使用仓库根目录的 `.\workflow-monitor.exe`，不依赖全局命令或 Python 环境。
 
 ```powershell
-.\project-hooks.exe
-.\project-hooks.exe context --format markdown
-.\project-hooks.exe start --help
-.\project-hooks.exe end --help
-.\project-hooks.exe dashboard
+.\workflow-monitor.exe
+.\workflow-monitor.exe context --format markdown
+.\workflow-monitor.exe start --help
+.\workflow-monitor.exe end --help
+.\workflow-monitor.exe dashboard
 ```
 
-无参数入口打开 Dashboard；`context` 保留完整的目标、判决、断点和交接信息。普通 `--help` 只列日常入口，`--help-all` 列出高级命令。空文件夹首次双击自动初始化；新 clone 或 worktree 将 EXE放到根目录后运行 `.\project-hooks.exe install`，为当前仓库设置 `core.hooksPath=.githooks`。
+无参数入口打开 Dashboard；`context` 保留完整的目标、判决、断点和交接信息。普通 `--help` 只列日常入口，`--help-all` 列出高级命令。空文件夹首次双击自动初始化；新 clone 或 worktree 将 EXE 放到根目录后运行 `.\workflow-monitor.exe install`，为当前仓库设置 `core.hooksPath=.githooks`。
 
 ### 软件升级
 
@@ -50,7 +50,7 @@
 `origin/main` 同步的 `main` 分支运行：
 
 ```powershell
-.\project-hooks.exe update
+.\workflow-monitor.exe update
 ```
 
 命令从 GitHub Release 获取并校验新版 EXE，在 `.project_hooks/runtime/` 保存项目内版本化运行时，迁移配置、保留事件日志既有内容、重建
@@ -70,16 +70,16 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 | 故障反馈 | `diagnostics status/export/resolve/cleanup` |
 | 工作台工具 | `workbench external list/show/add/update/pause/restore/retire` |
 
-使用 `.\project-hooks.exe <命令> --help` 查看具体参数。`pre-commit` 是仓库 Hook 的内部入口，不属于用户命令。
+使用 `.\workflow-monitor.exe <命令> --help` 查看具体参数。`pre-commit` 是仓库 Hook 的内部入口，不属于用户命令。
 
 ## 二、任务生命周期
 
 每次任务固定按以下顺序执行：
 
-1. 运行 `.\project-hooks.exe context --format markdown`，再读取本规范。
-2. 首次写入前运行 `.\project-hooks.exe start <task_id> ...`。
+1. 运行 `.\workflow-monitor.exe context --format markdown`，再读取本规范。
+2. 首次写入前运行 `.\workflow-monitor.exe start <task_id> ...`。
 3. 使用 `state update` 更新当前状态；路线改变时使用 `decision add`；探索任务使用 `attempt update` 记录假设、证据和结论。
-4. 运行 `.\project-hooks.exe end <task_id> ...`，由 Hook 写入单一完成事件；也可直接在 `end` 中提供状态、判决、断点和下一步等参数，一步完成最终状态更新与任务结束。
+4. 运行 `.\workflow-monitor.exe end <task_id> ...`，由 Hook 写入单一完成事件；也可直接在 `end` 中提供状态、判决、断点和下一步等参数，一步完成最终状态更新与任务结束。
 
 项目说明和长期大目标只通过 `project update` 记录；全项目同一时间最多一个 active 大阶段，
 通过 `stage start/update` 创建和推进。探索分支自动关联创建时的当前阶段，使用
@@ -133,15 +133,15 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 科研资料索引分为 `literature`、`data`、`theory`、`simulation`、`output`、`other` 和 `report` 七类。实体文件保留在项目目录，数据库只记录项目相对路径、摘要、状态、标签、来源、扩展信息和类型化关系。所有写命令要求已有活动任务：
 
 ```powershell
-.\project-hooks.exe catalog scan --dry-run
-.\project-hooks.exe catalog scan
-.\project-hooks.exe catalog ingest <文件> --kind literature
-.\project-hooks.exe catalog add --kind theory --title "理论名称" --summary "简短说明"
-.\project-hooks.exe catalog bulk-update --tag to-read --add-tag reviewed
-.\project-hooks.exe catalog link <source-id> supports <target-id>
-.\project-hooks.exe catalog list --kind literature
-.\project-hooks.exe catalog context --tag core --format markdown
-.\project-hooks.exe catalog migrate-layout --dry-run
+.\workflow-monitor.exe catalog scan --dry-run
+.\workflow-monitor.exe catalog scan
+.\workflow-monitor.exe catalog ingest <文件> --kind literature
+.\workflow-monitor.exe catalog add --kind theory --title "理论名称" --summary "简短说明"
+.\workflow-monitor.exe catalog bulk-update --tag to-read --add-tag reviewed
+.\workflow-monitor.exe catalog link <source-id> supports <target-id>
+.\workflow-monitor.exe catalog list --kind literature
+.\workflow-monitor.exe catalog context --tag core --format markdown
+.\workflow-monitor.exe catalog migrate-layout --dry-run
 ```
 
 默认扫描将 `resources/source/`、`data/`、`theory/`、`analysis/`、`outputs/`、`others/`、`reports/` 依次映射到七类资料。路径和资料类型必须匹配；扫描不会删除记录，文件消失时只标记为 `missing`。`check` 会拒绝缺失目录、错位条目和标准目录中的未索引文件。条目使用 `archive` 和 `restore` 软归档，关系使用 `link` 和 `unlink` 维护。
@@ -152,14 +152,14 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 
 任务的发布状态不单独写事件，而是根据任务关联提交与 `origin/main` 的祖先关系实时推导为已发布、部分发布、待发布、仅记录或未知。Git 同步且当前任务已发布后，概览会隐藏已完成的提交、发布、推送和远端核对步骤，并只读派生“已完成并发布”状态；普通后续事项继续保留，不修改原始事件。发布后不再创建“记录已发布”专用任务。
 
-双击 `.\project-hooks.exe` 打开 Tkinter Dashboard，包含：
+双击 `.\workflow-monitor.exe` 打开 Tkinter Dashboard，包含：
 
 - 七个日常分页：工作流、概览、搜索、资料、工作台、诊断和解释；决策与探索记录已并入工作流。
-- 顶部近实时显示当前 EXE/项目版本、生命周期步骤、活动任务、文件变化、进度、决策数、写锁和工作树稳定时间，并独立显示工作区、提交、推送及经 manifest 核对的正式 Release 状态；dirty 构建始终标为候选。
+- 顶部近实时显示当前 EXE/项目版本、实际分支及稳定维护或探索类型、生命周期步骤、活动任务、文件变化、进度、决策数、写锁和工作树稳定时间；工作周期只显示工作区、提交和推送。“高级查看”显示 EXE 与当前源码仓库是否一致、最近正式 Release 的版本与时间，以及 Release 后是否仍有软件文件修改。
 - “工作流”页左侧按任务、动作、阶段、探索和决策折叠分组，右侧只读显示选中对象的完整详情。动作继续细分为可执行、等待 AI 文本、执行中和暂不可用，并显示原因代码、证据和安全下一步。
 - 动作状态分为 `available`、`needs_input`、`blocked` 和 `running`；Dashboard 不提供字段表单、执行、高风险确认或一键更新。
 - 用户只需在 AI 对话中描述任务；AI 自动读取项目规则并调用 CLI/结构化服务。放弃、迁移、数据库重建和软件更新在对话中取得确认。
-- “检查更新”只在后台查询最新正式版本；诊断页按指纹展示问题、导出覆盖和清理回执，并集中提供脱敏 ZIP 导出与预填 GitHub Issue，不自动上传任何数据。
+- 用户打开“高级查看”后才只读核对一次最近正式 Release，私有仓库可使用已登录的 `gh` 会话回退查询且不保存凭据；本地构建一致性与发布后软件修改随状态变化重新计算但不重复联网。“检查更新”按钮另行查询最新正式版本。诊断页按指纹展示问题、导出覆盖和清理回执，并集中提供脱敏 ZIP 导出与预填 GitHub Issue，不自动上传任何数据。
 - 概览以横向分割线显示项目、健康、当前总体状态、判决、断点、阻塞、下一步、代码交付、最近完成和科研资料摘要；只保留任务与阶段的紧凑定位，不重复完整详情。
 - 全局搜索框、搜索和清除按钮集中在“搜索”页；搜索覆盖科研资料、任务、阶段、决策、探索和事件索引，结果使用左侧列表、右侧完整详情的分栏布局。
 - 资料页使用左侧目录树、右侧详情的两栏布局；七个标准目录默认折叠并显示实际/已索引文件数，只有展开时才加载该目录的资料索引，可打开所在位置或复制 AI 上下文。
@@ -169,6 +169,6 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 - 工作流、搜索结果与原始事件之间支持双向定位。
 - “解释”页按类别折叠展示英文状态、中文含义、实际影响和安全下一步，覆盖工作流、任务、动作、阶段、探索、决策、资料及 Git/Release。
 
-Dashboard 启动时先显示窗口，再由单一后台刷新器读取生命周期、Git 和 SQLite；全部动作可用性共用一次状态快照。每约 1 秒检查状态令牌，仅在数据变化或用户刷新时更新完整投影，并按页面差量重绘。刷新失败继续显示最后一次正常数据。除用户点击检查更新或报告 Bug 外不访问 GitHub；诊断导出只写用户选择的本地 ZIP。导出批次在本地保存无路径回执；成功升级只自动清理旧版本 validation/conflict，internal_error/data_integrity 保留待复查。
+Dashboard 启动时先显示窗口，再由单一后台刷新器读取生命周期、Git 和 SQLite；全部动作可用性共用一次状态快照。每约 1 秒检查状态令牌，仅在数据变化或用户刷新时更新完整投影，并按页面差量重绘。用户打开“高级查看”后才只读核对一次最近正式 Release，之后软件本地状态随令牌变化重新计算但不重复联网。刷新失败继续显示最后一次正常数据。除高级查看核对最近 Release、用户点击检查更新或报告 Bug 外不访问 GitHub；诊断导出只写用户选择的本地 ZIP。参数错误、工作流前置条件和普通冲突只显示提示，不持久化为 Bug 诊断；internal_error、data_integrity 和 external_dependency 才生成事件编号并保留待复查。
 
 图形环境不可用时，继续使用 `context`、`history`、`decisions`、`explorations`、`catalog list` 和 `db status`。

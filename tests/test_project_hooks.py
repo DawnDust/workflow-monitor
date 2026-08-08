@@ -40,11 +40,13 @@ from project_hooks.dashboard import (
     active_task_warning,
     advanced_summary,
     build_research_prompt,
+    branch_status_text,
     catalog_overview_text,
     copy_research_prompt,
     dashboard_presets,
     delivery_status,
     delivery_status_text,
+    software_delivery_status_text,
     filter_records,
     global_search,
     launch_dashboard,
@@ -154,8 +156,8 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         (self.root / "resources/reports").rmdir()
         missing = self.hooks(check=False)
         self.assertNotEqual(missing.returncode, 0)
-        self.assertIn(".\\project-hooks.exe install", missing.stderr)
-        self.assertIn(".\\project-hooks.exe check", missing.stderr)
+        self.assertIn(".\\workflow-monitor.exe install", missing.stderr)
+        self.assertIn(".\\workflow-monitor.exe check", missing.stderr)
         self.hooks("install")
         self.assertTrue(database.exists())
         self.assertTrue((self.root / "resources/reports/.gitkeep").is_file())
@@ -1368,14 +1370,14 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         )
         self.assertIn("必须大于或等于 0", legacy.stderr)
 
-    def test_diagnostics_cli_records_failure_and_exports_allowlisted_bundle(self) -> None:
+    def test_diagnostics_cli_skips_expected_rejection_and_exports_allowlisted_bundle(self) -> None:
         self.start("20260722_diag_001")
         rejected = self.start("20260722_diag_002", check=False)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("PH-E100", rejected.stderr)
-        self.assertIn("事件编号", rejected.stderr)
+        self.assertNotIn("事件编号", rejected.stderr)
         status = json.loads(self.hooks("diagnostics", "status").stdout)
-        self.assertEqual(status["records"], 1)
+        self.assertEqual(status["records"], 0)
         self.assertFalse(status["automatic_upload"])
         output = self.root / "diagnostics.zip"
         exported = json.loads(self.hooks("diagnostics", "export", "--output", str(output)).stdout)
@@ -1564,12 +1566,13 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertIn("工作断点：不应出现在默认概览", dashboard_text)
         self.assertIn("代码交付", dashboard_text)
         self.assertIn("工作区：有 1 个未提交变更", dashboard_text)
-        self.assertIn("正式发布：v1.5.0 候选构建，尚未正式发布", dashboard_text)
+        self.assertIn("推送：未提交修改尚未进入推送范围", dashboard_text)
+        self.assertNotIn("EXE 构建：", dashboard_text)
         self.assertIn("资料概览", dashboard_text)
         self.assertIn("科研资料：共 0", dashboard_text)
         self.assertGreaterEqual(dashboard_text.count("─" * 32), 3)
 
-    def test_delivery_status_separates_worktree_commit_push_and_release(self) -> None:
+    def test_delivery_status_separates_worktree_commit_and_push(self) -> None:
         state = {
             "application_version": "1.5.0",
             "dirty_paths": ["a.py", "b.py"], "changed_paths": ["a.py"],
@@ -1581,9 +1584,8 @@ class DashboardPresentationTests(unittest.TestCase):
         }
         value = delivery_status(state)
         self.assertEqual(value["worktree"], "有 2 个未提交变更")
-        self.assertIn("尚未提交当前修改", value["commit"])
-        self.assertIn("origin/main", value["push"])
-        self.assertIn("候选构建", value["release"])
+        self.assertEqual(value["commit"], "尚未提交当前修改")
+        self.assertEqual(value["push"], "未提交修改尚未进入推送范围")
 
         committed = delivery_status({
             **state, "dirty_paths": [], "changed_paths": [],
@@ -1592,14 +1594,47 @@ class DashboardPresentationTests(unittest.TestCase):
         })
         self.assertEqual(committed["commit"], "已提交到 def67890")
         self.assertEqual(committed["push"], "待推送 2 个提交")
-        self.assertIn("尚未联网核对", committed["release"])
-        verified = delivery_status({
-            **state, "dirty_paths": [], "build_identity": {"dirty": False},
-        }, {"status": "current", "latest_version": "1.5.0"})
-        self.assertEqual(verified["release"], "已核对正式发布 v1.5.0")
         self.assertIn("工作区：干净", delivery_status_text({
             **state, "dirty_paths": [], "build_identity": {"dirty": False},
         }))
+
+        no_active_task = delivery_status({
+            **state,
+            "active_task": None,
+            "changed_paths": [],
+        })
+        self.assertNotIn("任务变化", no_active_task["commit"])
+        self.assertNotIn("已同步", no_active_task["push"])
+
+    def test_software_delivery_status_separates_build_release_and_later_changes(self) -> None:
+        text = software_delivery_status_text({
+            "exe_repository_match": True,
+            "release_version": "1.5.0",
+            "published_at": "2026-08-02T11:32:58Z",
+            "software_source_available": True,
+            "unreleased_software_changes": [],
+        })
+        self.assertIn("EXE 构建：与当前仓库一致", text)
+        self.assertIn("最近发布：v1.5.0", text)
+        self.assertIn("发布后软件修改：无未发布软件修改", text)
+
+    def test_exploration_branch_label_and_commit_states_are_explicit(self) -> None:
+        self.assertEqual(
+            branch_status_text(
+                "research/new-model",
+                {"kind": "exploration", "track": "research", "topic": "new-model"},
+            ),
+            "分支：research/new-model（探索 / research）",
+        )
+        base = {
+            "dirty_paths": [],
+            "active_task": {"base_head": "abc12345"},
+            "git": {"head": "def67890", "relation": "ahead", "ahead": 1},
+        }
+        self.assertEqual(delivery_status(base)["commit"], "已提交到 def67890")
+        self.assertEqual(delivery_status(base)["push"], "待推送 1 个提交")
+        mixed = delivery_status({**base, "dirty_paths": ["analysis.py"]})
+        self.assertEqual(mixed["commit"], "部分已提交，仍有未提交变更")
 
     def test_publication_classifiers_are_conservative(self) -> None:
         self.assertTrue(is_publication_step("提交已验证改动"))
@@ -2091,7 +2126,7 @@ class DashboardPresentationTests(unittest.TestCase):
 
     def test_tkinter_unavailable_has_cli_fallback(self) -> None:
         with patch("project_hooks.dashboard.import_tk", side_effect=DashboardError("missing\n" + CLI_FALLBACK)):
-            with self.assertRaisesRegex(DashboardError, r"project-hooks\.exe context"):
+            with self.assertRaisesRegex(DashboardError, r"workflow-monitor\.exe context"):
                 launch_dashboard(object(), 0)
 
 

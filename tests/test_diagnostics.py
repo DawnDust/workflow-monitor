@@ -17,7 +17,9 @@ from project_hooks.diagnostics import (
     diagnostics_overview,
     diagnostics_status,
     export_diagnostics,
+    format_failure,
     load_records,
+    record_failure,
     resolve_diagnostic,
     sanitize_text,
 )
@@ -57,6 +59,29 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(first["code"], "PH-E100")
         self.assertEqual(first["fingerprint"], second["fingerprint"])
         self.assertNotEqual(first["incident_id"], second["incident_id"])
+
+    def test_expected_validation_is_formatted_but_not_persisted(self) -> None:
+        record = record_failure(
+            self.root, ValueError("bad input"), command="check",
+            application_version="1.5.0", schema_version=3, execution_mode="source",
+        )
+        self.assertFalse(record["recorded"])
+        self.assertEqual(load_records(self.root), [])
+        self.assertNotIn("事件编号", format_failure(record))
+
+    def test_update_failure_is_external_and_persisted(self) -> None:
+        update_error = type("UpdateError", (RuntimeError,), {})
+        record = record_failure(
+            self.root, update_error("GitHub Release HTTP 404"), command="update",
+            application_version="1.5.0", schema_version=3, execution_mode="source",
+        )
+        self.assertTrue(record["recorded"])
+        self.assertEqual(record["category"], "external_dependency")
+        self.assertEqual(load_records(self.root), [record])
+        self.assertIn("事件编号", format_failure(record))
+        overview = diagnostics_overview(self.root, application_version="1.6.0")
+        self.assertTrue(overview["issues"][0]["protected"])
+        self.assertEqual(overview["issues"][0]["status"], "old_version_protected")
 
     def test_concurrent_append_and_rotation_are_bounded(self) -> None:
         def worker(index: int) -> None:

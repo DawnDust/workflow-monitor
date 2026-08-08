@@ -26,8 +26,9 @@ MAX_RECORDS = 500
 MAX_BYTES = 2 * 1024 * 1024
 HISTORY_FILES = 3
 LEDGER_MAX_RECORDS = 200
-PROTECTED_CATEGORIES = {"internal_error", "data_integrity"}
+PROTECTED_CATEGORIES = {"internal_error", "data_integrity", "external_dependency"}
 AUTO_CLEAN_CATEGORIES = {"validation", "conflict"}
+NON_DIAGNOSTIC_CATEGORIES = {"validation", "conflict"}
 ISSUE_URL = "https://github.com/DawnDust/project-maintenance-template/issues/new"
 _LOCK = threading.RLock()
 
@@ -64,18 +65,28 @@ def classify_failure(exc: BaseException) -> tuple[str, str, str]:
     message = str(exc).lower()
     name = type(exc).__name__.lower()
     if any(word in message for word in ("冲突", "conflict", "分叉", "切换分支", "拒绝覆盖")):
-        return "conflict", "PH-C200", "先运行 `.\\project-hooks.exe status`，确认冲突后再重试。"
+        return "conflict", "PH-C200", "先运行 `.\\workflow-monitor.exe status`，确认冲突后再重试。"
     if any(word in message for word in (
         "integrity", "database", "sqlite", "数据库", "事件 id 内容冲突", "日志", "schema",
     )) or "database" in name:
-        return "data_integrity", "PH-D300", "运行 `.\\project-hooks.exe db verify`，不要先删除数据库或日志。"
+        return "data_integrity", "PH-D300", "运行 `.\\workflow-monitor.exe db verify`，不要先删除数据库或日志。"
+    if name in {"readmodelerror", "storeerror", "jsondecodeerror"}:
+        return "data_integrity", "PH-D300", "运行 `.\\workflow-monitor.exe db verify`，不要先删除数据库或日志。"
+    if name == "updateerror" or isinstance(exc, OSError):
+        return "external_dependency", "PH-X400", "检查本地文件或外部服务状态后重试；持续失败时导出诊断。"
     expected_names = {
-        "workflowerror", "catalogerror", "dashboarderror", "projectmanagererror",
-        "readmodelerror", "storeerror", "updateerror", "valueerror", "jsondecodeerror",
+        "workflowerror", "catalogerror", "projectmanagererror", "valueerror",
+        "actionblockederror",
     }
-    if name in expected_names or isinstance(exc, (ValueError, OSError)):
+    if name in expected_names or isinstance(exc, ValueError):
         return "validation", "PH-E100", "按错误提示修正输入或前置条件后重试。"
     return "internal_error", "PH-I500", "导出诊断包并将事件编号提交给开发者。"
+
+
+def is_recordable_failure(exc: BaseException) -> bool:
+    """Return whether a failure is actionable as a persisted software diagnostic."""
+    category, _code, _suggestion = classify_failure(exc)
+    return category not in NON_DIAGNOSTIC_CATEGORIES
 
 
 def _fingerprint(category: str, exc: BaseException, summary: str) -> str:
@@ -210,16 +221,18 @@ def create_failure_record(
 
 def record_failure(project_root: Path, exc: BaseException, **metadata) -> dict:
     record = create_failure_record(project_root, exc, **metadata)
-    append_record(project_root, record)
+    record["recorded"] = is_recordable_failure(exc)
+    if record["recorded"]:
+        append_record(project_root, record)
     return record
 
 
 def format_failure(record: dict) -> str:
-    return (
-        f"[{record['code']}] {record['summary']}\n"
-        f"事件编号：{record['incident_id']}\n"
-        f"建议：{record['suggestion']}"
-    )
+    lines = [f"[{record['code']}] {record['summary']}"]
+    if record.get("recorded", True):
+        lines.append(f"事件编号：{record['incident_id']}")
+    lines.append(f"建议：{record['suggestion']}")
+    return "\n".join(lines)
 
 
 def load_records(project_root: Path) -> list[dict]:
@@ -436,7 +449,7 @@ def export_diagnostics(
         category = str(record.get("category") or "unknown")
         categories[category] = categories.get(category, 0) + 1
     report = (
-        "# project-hooks 脱敏诊断报告\n\n"
+        "# Workflow Monitor 脱敏诊断报告\n\n"
         f"- 导出时间：{datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
         f"- 应用版本：{application_version}\n"
         f"- 导出批次：{export_id}\n"

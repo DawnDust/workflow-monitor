@@ -117,7 +117,7 @@ STATE_ARGUMENTS = (
     "goal", "judgment", "breakpoint", "blocker", "status", "main_goal_version",
 )
 DAILY_HELP = """\
-usage: project-hooks [-h] [--help-all] [--project PATH] {context,start,end,dashboard,diagnostics} ...
+usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,end,dashboard,diagnostics} ...
 
 项目内维护入口。无参数运行时显示行动概览。
 
@@ -129,16 +129,16 @@ usage: project-hooks [-h] [--help-all] [--project PATH] {context,start,end,dashb
   diagnostics 查看或导出本地脱敏诊断
 
 首次使用:
-  .\\project-hooks.exe init .
-  .\\project-hooks.exe check
+  .\\workflow-monitor.exe init .
+  .\\workflow-monitor.exe check
 
 软件升级:
-  .\\project-hooks.exe update
+  .\\workflow-monitor.exe update
 
 使用 --help-all 查看全部高级命令；使用 <命令> --help 查看参数。
 """
 FULL_HELP = """\
-usage: project-hooks [-h] [--help-all] [--project PATH] <command> ...
+usage: workflow-monitor [-h] [--help-all] [--project PATH] <command> ...
 
 日常命令:
   context, start, end, dashboard, diagnostics
@@ -205,7 +205,7 @@ def config() -> dict:
     data.setdefault("timezone", "Asia/Shanghai")
     data.setdefault("state_dir", ".project_hooks")
     data.setdefault("core_read_order", STATIC_READ_ORDER)
-    data.setdefault("context_command", ".\\project-hooks.exe context --format markdown")
+    data.setdefault("context_command", ".\\workflow-monitor.exe context --format markdown")
     data.setdefault("maintenance_store", DEFAULT_STORE)
     data.setdefault("git_auto_commit", {"enabled": True, "eligible_task_sizes": ["large"]})
     data.setdefault("branch_policy", DEFAULT_BRANCH_POLICY)
@@ -256,7 +256,7 @@ def assert_project_version_compatible(args: argparse.Namespace) -> None:
             and not command_is_read_only(args)):
         raise WorkflowError(
             f"项目模板版本为 {installed}，当前 EXE 为 {__version__}；"
-            "写操作前请运行 `.\\project-hooks.exe update`"
+            "写操作前请运行 `.\\workflow-monitor.exe update`"
         )
 
 
@@ -411,7 +411,7 @@ def check_repository(
         errors.append("maintenance_store 与 SQLite 工作流不一致")
     installed = installed_project_version()
     if installed and installed != __version__:
-        errors.append(f"项目模板版本 {installed} 与当前 EXE {__version__} 不一致；请运行 .\\project-hooks.exe update")
+        errors.append(f"项目模板版本 {installed} 与当前 EXE {__version__} 不一致；请运行 .\\workflow-monitor.exe update")
     try:
         branch_policy()
     except WorkflowError as exc:
@@ -1128,7 +1128,7 @@ def stage_update_reminder(record: dict) -> dict | None:
         "message": "本任务没有更新当前阶段；请确认阶段进展、当前步骤和下一步是否仍然准确",
         "stage_id": stage["stage_id"],
         "stage_updated_at": stage.get("updated_at"),
-        "next_safe_command": f".\\project-hooks.exe stage update {stage['stage_id']} ...",
+        "next_safe_command": f".\\workflow-monitor.exe stage update {stage['stage_id']} ...",
     }
 
 
@@ -1696,7 +1696,7 @@ def diagnostics_command(args: argparse.Namespace) -> dict:
         return cleanup_resolved_diagnostics(ROOT)
     output = args.output or (
         ROOT / "diagnostics-export" /
-        f"project-hooks-diagnostics-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+        f"workflow-monitor-diagnostics-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
     )
     result = export_diagnostics(
         ROOT,
@@ -2081,7 +2081,7 @@ def add_state_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = WorkflowArgumentParser(prog="project-hooks", add_help=False)
+    parser = WorkflowArgumentParser(prog="workflow-monitor", add_help=False)
     parser.add_argument("-h", "--help", action="store_true", dest="basic_help")
     parser.add_argument("--help-all", action="store_true")
     parser.add_argument("--project", type=Path)
@@ -2277,7 +2277,7 @@ def main(argv: list[str] | None = None) -> int:
             output = initialize_project(ROOT, __version__)
         elif root is None:
             raise WorkflowError(
-                "当前目录不在 project-hooks 科研项目中；请先运行 `.\\project-hooks.exe init .`，"
+                "当前目录不在 Workflow Monitor 科研项目中；请先运行 `.\\workflow-monitor.exe init .`，"
                 "或使用 `--project <path>`"
             )
         elif shared_action is not None:
@@ -2301,8 +2301,8 @@ def main(argv: list[str] | None = None) -> int:
             configured = run_git(["config", "--local", "--get", "core.hooksPath"], check=False).stdout.strip()
             if configured != TRACKED_HOOKS_DIR:
                 raise WorkflowError(
-                    "项目维护尚未安装。请先运行 `.\\project-hooks.exe install`，"
-                    "再运行 `.\\project-hooks.exe check`。"
+                    "项目维护尚未安装。请先运行 `.\\workflow-monitor.exe install`，"
+                    "再运行 `.\\workflow-monitor.exe check`。"
                 )
             output = action_overview_text(context_data())
         elif args.command == "start": output = start_task(args)

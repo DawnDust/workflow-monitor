@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from project_hooks import __version__
+from project_hooks import EXECUTABLE_NAME, __version__
 from project_hooks.store import SCHEMA_VERSION
 
 
@@ -29,7 +29,7 @@ def main() -> int:
             f"release version mismatch: tag={args.version}, application={__version__}"
         )
     dist = args.dist.resolve()
-    executable = dist / "project-hooks.exe"
+    executable = dist / EXECUTABLE_NAME
     if not executable.is_file():
         raise SystemExit(f"missing Windows executable: {executable}")
     base = (

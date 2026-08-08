@@ -8,7 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from project_hooks import __version__
+from project_hooks import DISPLAY_NAME, EXECUTABLE_NAME, __version__
+from project_hooks.app_icon import apply_window_icon
 from project_hooks.launcher import (
     PORTABLE_ROOT_ENV,
     configure_utf8_stdio,
@@ -95,15 +96,15 @@ def prepare_portable_project(root: Path, executable: Path | None = None) -> bool
     root.mkdir(parents=True, exist_ok=True)
     if (root / CONFIG_PATH).is_file():
         return False
-    if executable.name.lower() != "project-hooks.exe":
+    if executable.name.lower() != EXECUTABLE_NAME:
         raise PortableBootstrapError(
-            f"便携启动文件必须命名为 project-hooks.exe；当前名称为 {executable.name}。\n\n"
+            f"便携启动文件必须命名为 {EXECUTABLE_NAME}；当前名称为 {executable.name}。\n\n"
             "请重命名后重新双击。"
         )
     if not _directory_is_bootstrap_safe(root, executable):
         raise PortableBootstrapError(
-            "当前目录不是空文件夹，且尚未初始化 project-hooks。\n\n"
-            "请把 project-hooks.exe 放入一个空文件夹后双击，"
+            "当前目录不是空文件夹，且尚未初始化 Workflow Monitor。\n\n"
+            f"请把 {EXECUTABLE_NAME} 放入一个空文件夹后双击，"
             "或在命令行中对现有 Git 仓库显式执行 init。"
         )
     if not _git_available():
@@ -138,14 +139,15 @@ def show_error(message: str) -> None:
         from tkinter import messagebox
 
         root = tk.Tk()
+        apply_window_icon(root, tk)
         root.withdraw()
-        messagebox.showerror("project-hooks", message, parent=root)
+        messagebox.showerror(DISPLAY_NAME, message, parent=root)
         root.destroy()
     except Exception:
         try:
             import ctypes
 
-            ctypes.windll.user32.MessageBoxW(None, message, "project-hooks", 0x10)
+            ctypes.windll.user32.MessageBoxW(None, message, DISPLAY_NAME, 0x10)
         except Exception:
             pass
 
@@ -159,11 +161,12 @@ def run_portable_dashboard(root: Path | None = None, refresh_seconds: float = 3.
     # performing first-run Git initialization.  Frozen one-file extraction is
     # then the only unavoidable delay visible to the user.
     root_window = tk.Tk()
-    root_window.title("Project Maintenance")
+    apply_window_icon(root_window, tk)
+    root_window.title(DISPLAY_NAME)
     root_window.geometry("560x150")
     root_window.minsize(460, 130)
     ttk.Label(
-        root_window, text="Project Maintenance", font=("TkDefaultFont", 13, "bold"),
+        root_window, text=DISPLAY_NAME, font=("TkDefaultFont", 13, "bold"),
     ).pack(anchor="w", padx=18, pady=(18, 5))
     ttk.Label(
         root_window, text="正在读取项目并准备只读工作流视图…",

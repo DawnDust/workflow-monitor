@@ -227,7 +227,7 @@ def release_smoke() -> int:
     subprocess.run(
         [sys.executable, "scripts/build_release.py", "--version", __version__], cwd=ROOT, check=True,
     )
-    executable = ROOT / "dist" / "project-hooks.exe"
+    executable = ROOT / "dist" / "workflow-monitor.exe"
     version_process = subprocess.run(
         [str(executable), "version"], cwd=ROOT, check=True, capture_output=True,
     )
@@ -240,7 +240,7 @@ def release_smoke() -> int:
         raise RuntimeError("release manifest build identity does not match executable")
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
         portable = Path(directory)
-        copied = portable / "project-hooks.exe"
+        copied = portable / "workflow-monitor.exe"
         shutil.copy2(executable, copied)
         process = subprocess.Popen(
             [str(copied)], cwd=portable, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -260,7 +260,7 @@ def release_smoke() -> int:
             )
         if os.name == "nt":
             title, _elapsed = wait_for_dashboard_window(process, 3.0)
-            if title != "Project Maintenance":
+            if title != "Workflow Monitor":
                 raise RuntimeError("frozen no-argument startup did not expose a Dashboard window within 3 seconds")
         if process.poll() is None:
             if os.name == "nt":
@@ -289,7 +289,7 @@ def release_smoke() -> int:
                 "frozen operational Dashboard exited early: "
                 + (stderr or stdout).decode("utf-8", "replace")
             )
-        if os.name == "nt" and title != "Project Maintenance":
+        if os.name == "nt" and title != "Workflow Monitor":
             raise RuntimeError(
                 f"frozen Dashboard had no visible window after {elapsed:.2f}s"
             )

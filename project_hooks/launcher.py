@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import EXECUTABLE_NAME, __version__
 
 
 ACTIVE_ENV = "PROJECT_HOOKS_EXE_ACTIVE"
@@ -41,7 +41,7 @@ def selected_executable(project_root: Path) -> Path | None:
         data = json.loads(pointer.read_text(encoding="utf-8"))
         selected = str(data["version"])
         executable = Path(str(data.get("executable") or (
-            runtime / "executables" / selected / "project-hooks.exe"
+            runtime / "executables" / selected / EXECUTABLE_NAME
         ))).resolve()
         selected_key = tuple(int(part) for part in selected.split("."))
         bundled_key = tuple(int(part) for part in __version__.split("."))
