@@ -19,32 +19,35 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 MODULES = (
-    "tests.test_diagnostics", "tests.test_workflow_actions",
-    "tests.test_workbench", "tests.test_project_hooks", "tests.test_distribution",
-    "tests.test_web_dashboard",
+    "tests.integration.system.test_diagnostics",
+    "tests.unit.application.test_action_service",
+    "tests.unit.application.test_workbench_service",
+    "tests.integration.persistence.test_workflow",
+    "tests.distribution.test_distribution",
+    "tests.integration.web.test_dashboard",
+    "tests.unit.test_architecture",
 )
 FAST_CLASSES = (
-    "tests.test_diagnostics.DiagnosticsTests",
-    "tests.test_workflow_actions.WorkflowActionTests",
-    "tests.test_workflow_actions.DashboardActionWidgetTests",
-    "tests.test_workbench.ExternalWorkbenchTests",
-    "tests.test_project_hooks.DashboardPresentationTests",
-    "tests.test_web_dashboard.WebProjectionTests",
-    "tests.test_web_dashboard.WebDashboardBridgeTests",
-    "tests.test_web_dashboard.WebDashboardIntegrationTests",
+    "tests.integration.system.test_diagnostics.DiagnosticsTests",
+    "tests.unit.application.test_action_service.WorkflowActionTests",
+    "tests.unit.application.test_workbench_service.ExternalWorkbenchTests",
+    "tests.integration.web.test_dashboard.WebProjectionTests",
+    "tests.integration.web.test_dashboard.WebDashboardBridgeTests",
+    "tests.integration.web.test_dashboard.WebDashboardIntegrationTests",
+    "tests.unit.test_architecture.ArchitectureTests",
 )
 CORE_SMOKE = (
-    "tests.test_project_hooks.ProjectHooksSqliteTests.test_install_rebuilds_database_and_context_is_available",
-    "tests.test_project_hooks.ProjectHooksSqliteTests.test_record_events_rolls_back_journal_when_projection_fails",
-    "tests.test_project_hooks.ProjectHooksSqliteTests.test_failed_exploration_start_restores_branch_active_state_and_journal",
-    "tests.test_project_hooks.ProjectHooksSqliteTests.test_end_can_update_final_state_in_one_step_with_auto_commit",
-    "tests.test_project_hooks.ProjectHooksSqliteTests.test_catalog_cli_scan_relations_context_and_rebuild",
+    "tests.integration.persistence.test_workflow.ProjectHooksSqliteTests.test_install_rebuilds_database_and_context_is_available",
+    "tests.integration.persistence.test_workflow.ProjectHooksSqliteTests.test_record_events_rolls_back_journal_when_projection_fails",
+    "tests.integration.persistence.test_workflow.ProjectHooksSqliteTests.test_failed_exploration_start_restores_branch_active_state_and_journal",
+    "tests.integration.persistence.test_workflow.ProjectHooksSqliteTests.test_end_can_update_final_state_in_one_step_with_auto_commit",
+    "tests.integration.persistence.test_workflow.ProjectHooksSqliteTests.test_catalog_cli_scan_relations_context_and_rebuild",
 )
-DISTRIBUTION_CLASS = "tests.test_distribution.DistributionTests"
+DISTRIBUTION_CLASS = "tests.distribution.test_distribution.DistributionTests"
 # The first measured branch baseline is 46%. CLI integration tests execute copied
 # project modules in child processes, so this conservative floor guards regressions
 # without pretending those child paths are uncovered product behavior.
-COVERAGE_FLOOR = 46
+COVERAGE_FLOOR = 51
 
 
 def flatten(suite: unittest.TestSuite) -> list[str]:

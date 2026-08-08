@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from project_hooks import EXECUTABLE_NAME, __version__
-from project_hooks.store import SCHEMA_VERSION
+from project_hooks.infrastructure.persistence.store import SCHEMA_VERSION
 
 
 def digest(path: Path) -> str:

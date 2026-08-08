@@ -20,6 +20,8 @@
 | `resources/others/` | 暂时无法可靠分类的资料 |
 | `resources/reports/` | 面向外部受众的项目总结与报告 |
 
+软件源码按 `core → application → infrastructure/ui` 的单向边界组织；完整职责、依赖限制和新增代码放置规则见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+
 ### 项目约定
 
 - 原始资料不覆盖，过程与成果分开，同一文件只保留一个权威位置。

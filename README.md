@@ -76,6 +76,7 @@ EXE从最新 GitHub Release 下载并校验新版程序，把版本化运行时�
 - `workflow-monitor.exe` 和 `.project_hooks/` 均被 Git 忽略。
 
 完整生命周期和分支策略见 [maintenance/README.md](./maintenance/README.md)。
+维护者进行功能开发或重构前，还应阅读 [maintenance/ARCHITECTURE.md](./maintenance/ARCHITECTURE.md)，遵守四层依赖方向和稳定入口约定。
 
 ## 发布维护
 
