@@ -1,178 +1,36 @@
-import { escapeHtml as esc, evidenceLabel, filterRecords, graphNeighborhood, text } from "./state.js";
+import { escapeHtml as esc, evidenceLabel, filterRecords, graphNeighborhood, paginate } from "./state.js";
 
 const pages = [
-  ["workflow", "⌁", "工作流"], ["overview", "◫", "概览"], ["search", "⌕", "搜索"],
-  ["resources", "◇", "资料"], ["workbench", "▦", "工作台"], ["diagnostics", "◌", "诊断"],
-  ["explain", "?", "解释"], ["research-map", "◎", "科研地图"],
-  ["exploration-compare", "⇄", "探索对比"], ["evidence-matrix", "▤", "证据矩阵"],
-  ["advanced", "⋯", "高级查看"],
+  ["workflow","⌁","工作流"],["overview","◫","概览"],["search","⌕","搜索"],
+  ["resources","◇","资料"],["workbench","▦","工作台"],["explain","?","解释"],
+  ["research-map","◎","科研地图"],["exploration-compare","⇄","探索对比"],
+  ["evidence-matrix","▤","证据矩阵"],["advanced","⋯","高级查看"],
 ];
+const state = {page:"overview",snapshot:null,token:null,graphFocus:null,draftQuery:"",committedQuery:"",searchPage:1,eventPage:1,records:new Map()};
+const $ = q => document.querySelector(q), bridge = () => window.pywebview?.api;
+function notice(message,tone="info"){const n=$("#notice");n.textContent=message;n.className=`notice ${tone}`;clearTimeout(notice.timer);notice.timer=setTimeout(()=>n.classList.add("hidden"),6000);}
+async function invoke(method,...args){const api=bridge();if(!api||typeof api[method]!=="function")throw new Error("本地桥接尚未就绪");return api[method](...args);}
+function panel(title,body,kicker="LOCAL SNAPSHOT",extra=""){return `<article class="panel"><header><div><small>${kicker}</small><h2>${esc(title)}</h2></div>${extra}</header>${body}</article>`;}
+function cards(values,clickable=false){return `<div class="metrics ${clickable?"resource-cards":""}">${values.map(x=>`<article ${clickable?`class="resource-card" role="button" tabindex="0" data-resource-path="${esc(x[4])}"`:""}><span>${esc(x[0])}</span><b class="${x[3]||""}">${esc(x[1])}</b><small>${esc(x[2])}</small></article>`).join("")}</div>`;}
+function table(records,columns,kind=""){if(!records.length)return `<div class="empty">暂无记录</div>`;return `<div class="table-wrap"><table><thead><tr>${columns.map(x=>`<th>${esc(x[1])}</th>`).join("")}</tr></thead><tbody>${records.map((record,i)=>{const key=`${kind}:${record.event_id||record.item_id||record.task_id||i}`;state.records.set(key,record);return `<tr ${kind?`data-record-key="${esc(key)}" data-kind="${kind}" tabindex="0"`:""}>${columns.map(x=>`<td>${esc(record[x[0]])}</td>`).join("")}</tr>`;}).join("")}</tbody></table></div>`;}
+function renderNavigation(){$("#navigation").innerHTML=pages.map(([id,icon,label])=>`<button data-page="${id}" class="${state.page===id?"active":""}"><span>${icon}</span>${label}</button>`).join("");$("#navigation").querySelectorAll("button").forEach(b=>b.onclick=()=>{state.page=b.dataset.page;state.graphFocus=null;renderNavigation();render();});}
+function statusStrip(s){const lifecycle=s.action_matrix?.state||{},step=lifecycle.lifecycle_step||{},active=lifecycle.active_task||{};$("#status-strip").className="status-strip";$("#status-strip").innerHTML=`<span class="pulse"></span><b>${esc(step.label|| (active.task_id?"任务进行中":"当前无活动任务"))}</b><code>${esc(s.branch)}</code><span>STATE · ${esc((state.token||"").slice(0,8).toUpperCase())}</span>`;}
 
-const state = { page: "overview", snapshot: null, token: null, graphFocus: null, query: "" };
-const $ = selector => document.querySelector(selector);
-const bridge = () => window.pywebview?.api;
-
-function notice(message, tone = "info") {
-  const node = $("#notice");
-  node.textContent = message; node.className = `notice ${tone}`;
-  clearTimeout(notice.timer); notice.timer = setTimeout(() => node.classList.add("hidden"), 6000);
-}
-
-async function invoke(method, ...args) {
-  const api = bridge();
-  if (!api || typeof api[method] !== "function") throw new Error("本地桥接尚未就绪");
-  return api[method](...args);
-}
-
-function renderNavigation() {
-  $("#navigation").innerHTML = pages.map(([id, icon, label]) =>
-    `<button data-page="${id}" class="${state.page === id ? "active" : ""}"><span>${icon}</span>${label}</button>`).join("");
-  $("#navigation").querySelectorAll("button").forEach(button => button.onclick = () => {
-    state.page = button.dataset.page; state.graphFocus = null; renderNavigation(); render();
-  });
-}
-
-function statusStrip(s) {
-  const context = s.context || {}, attempt = s.attempt || {}, active = context.active_task || {};
-  const label = attempt.state ? `探索 ${attempt.state}` : active.task_id ? "任务进行中" : "当前无活动任务";
-  $("#status-strip").className = "status-strip";
-  $("#status-strip").innerHTML = `<span class="pulse"></span><b>${esc(label)}</b><code>${esc(s.branch)}</code><span>STATE · ${esc((state.token || "").slice(0, 8).toUpperCase())}</span>`;
-}
-
-function panel(title, body, kicker = "LOCAL SNAPSHOT", extra = "") {
-  return `<article class="panel"><header><div><small>${kicker}</small><h2>${esc(title)}</h2></div>${extra}</header>${body}</article>`;
-}
-
-function cards(values) {
-  return `<div class="metrics">${values.map(([label, value, note, tone]) => `<article><span>${esc(label)}</span><b class="${tone || ""}">${esc(value)}</b><small>${esc(note)}</small></article>`).join("")}</div>`;
-}
-
-function overview(s) {
-  const c = s.context || {}, health = s.health || {}, attempt = s.attempt || {};
-  const profile = c.project_profile || {}, overviewState = c.overview_state || c.state || {};
-  return cards([
-    ["当前任务", c.active_task ? "1" : "0", c.active_task?.goal || "无活动任务"],
-    ["资料索引", (s.catalog_items || []).length, `${(s.catalog_relations || []).length} 条显式关系`, "accent"],
-    ["探索尝试", (s.explorations || []).length + (attempt.attempt_id ? 1 : 0), attempt.state || "无当前尝试"],
-    ["系统健康", health.status || "未知", `${health.events || 0} events`, health.status === "passed" ? "good" : "warn"],
-  ]) + `<div class="grid two">${panel("项目主线", `<dl class="details"><dt>描述</dt><dd>${esc(profile.description)}</dd><dt>大目标</dt><dd>${esc(profile.big_goal)}</dd><dt>当前判断</dt><dd>${esc(overviewState.judgment)}</dd><dt>断点</dt><dd>${esc(overviewState.breakpoint)}</dd></dl>`, "PROJECT STATE")}${panel("下一步", `<ol class="steps">${(c.visible_next_steps || overviewState.next_steps || []).map(step => `<li>${esc(step)}</li>`).join("") || "<li>暂无登记的下一步</li>"}</ol>`, "NEXT ACTION")}</div>`;
-}
-
-function workflow(s) {
-  const c = s.context || {}, task = c.active_task || {}, attempt = s.attempt || {};
-  const history = (s.history || []).slice(0, 10);
-  const actions = s.action_matrix?.actions || [];
-  return `<div class="grid two">${panel("当前工作周期", `<dl class="details"><dt>任务</dt><dd>${esc(task.task_id || attempt.attempt_id)}</dd><dt>目标</dt><dd>${esc(task.goal || attempt.goal)}</dd><dt>轨道</dt><dd>${esc(attempt.track || "stable")}</dd><dt>当前步骤</dt><dd>${esc(attempt.current_step)}</dd><dt>进展</dt><dd>${esc(attempt.progress)}</dd><dt>下一步</dt><dd>${esc(attempt.next_step)}</dd></dl>`, "ACTIVE CYCLE")}${panel("安全边界", `<p class="muted">Web 视图保持业务只读。任务、阶段、探索、决策和资料关系仍由结构化 CLI 生命周期写入。</p><div class="boundary"><b>允许</b><span>刷新 · 更新检查 · 诊断导出 · 打开受限路径 · 复制上下文</span><b>禁止</b><span>任意命令 · 任意文件读取 · SQLite 写入</span></div>`, "READ ONLY")}</div>${panel("动作可用性", table(actions, [["category","类别"],["label","动作"],["status","状态"],["missing_fields","等待输入"]]), "ACTION MATRIX")}${panel("最近完成", table(history, [["occurred_at","时间"],["summary","任务"],["result","结果"],["branch","分支"]]), "TASK HISTORY")}`;
-}
-
-function table(records, columns, clickKind = "") {
-  if (!records.length) return `<div class="empty">暂无记录</div>`;
-  return `<div class="table-wrap"><table><thead><tr>${columns.map(([,label]) => `<th>${esc(label)}</th>`).join("")}</tr></thead><tbody>${records.map((record, index) => `<tr ${clickKind ? `data-record="${index}" data-kind="${clickKind}" tabindex="0"` : ""}>${columns.map(([key]) => `<td>${esc(record[key])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
-}
-
-function search(s) {
-  const results = filterRecords(s.search_index || [], state.query, ["title","summary","search_text","branch","kind_label"]);
-  return panel("跨记录搜索", `<label class="searchbox"><span>⌕</span><input id="search-input" value="${esc(state.query)}" placeholder="搜索任务、事件、决策、资料、分支…"></label><p class="count">${results.length} 条结果</p>${table(results.slice(0, 200), [["kind_label","类型"],["title","标题"],["summary","摘要"],["branch","分支"]], "search")}`, "INDEX · LOCAL");
-}
-
-function resources(s) {
-  return `${cards((s.resource_directories || []).map(x => [x.label, x.actual_files, `${x.indexed_files} 已登记 · ${x.status}`, x.status === "ok" ? "good" : "warn"]))}${panel("资料目录与索引", table(s.catalog_items || [], [["kind_label","类型"],["title","标题"],["status","状态"],["path","项目路径"],["branch","分支"]], "catalog"), "CATALOG")}`;
-}
-
-function workbench(s) {
-  const tools = s.external_tools || [];
-  return `<div class="grid two">${panel("科研上下文", `<p class="muted">选择登记资料并复制 Markdown 上下文，交给 AI 或本地工具继续工作。不会自动上传内容。</p><button id="copy-context" class="primary-button">复制全部登记资料上下文</button>`, "CONTEXT")}${panel("外置软件", table(tools, [["kind_label","类型"],["name","名称"],["status","状态"]]), "REGISTERED TOOLS")}</div>`;
-}
-
-function diagnostics(s) {
-  const d = s.diagnostics || {}, issues = d.issues || d.active || [];
-  return `<div class="grid two">${panel("诊断状态", `<dl class="details"><dt>状态</dt><dd>${esc(d.status || "正常")}</dd><dt>最新事件</dt><dd>${esc(d.latest_incident_id)}</dd><dt>活动问题</dt><dd>${esc(issues.length)}</dd></dl><div class="button-row"><button id="export-diagnostics" class="primary-button">导出脱敏 ZIP</button><button id="report-bug">报告 Bug</button></div>`, "PRIVACY SAFE")}${panel("问题", table(issues, [["occurred_at","时间"],["code","代码"],["summary","摘要"]]), "LOCAL LEDGER")}</div>`;
-}
-
-function explain(s) {
-  return `<div class="grid two">${panel("数据如何流动", `<div class="flow"><b>事件日志</b><i>→</i><b>SQLite 投影</b><i>→</i><b>只读快照</b><i>→</i><b>WebView2</b></div><p class="muted">浏览器界面不直接访问 SQLite，也不开放网络端口。Python 桥接只暴露明确白名单。</p>`, "ARCHITECTURE")}${panel("关系解释", `<div class="legend vertical"><span><i class="solid"></i>显式 catalog 关系：可作为证据</span><span><i class="dashed"></i>task_id / branch / stage 派生：只表示过程关联</span></div><p class="muted">证据矩阵中的“未登记”不代表没有证据，只表示当前 catalog 中没有登记对应关系。</p>`, "PROVENANCE")}</div>`;
-}
-
-function graphView(s) {
-  const source = s.research?.graph || {nodes:[],edges:[]};
-  const graph = state.graphFocus ? graphNeighborhood(source, state.graphFocus, 1) : source;
-  const max = 80, clipped = graph.nodes.length > max, nodes = graph.nodes.slice(0, max);
-  const allowed = new Set(nodes.map(x => x.id));
-  const edges = graph.edges.filter(x => allowed.has(x.source) && allowed.has(x.target));
-  const width = 960, height = 540, cx = width/2, cy = height/2;
-  const positioned = new Map(nodes.map((node, i) => { const ring = Math.floor(i / 18)+1, slot=i%18, a=(slot/18)*Math.PI*2; const radius=Math.min(70+ring*105,225); return [node.id,{...node,x:cx+Math.cos(a)*radius,y:cy+Math.sin(a)*radius}]; }));
-  return panel("科研地图", `${clipped ? `<div class="notice warn">节点超过 ${max} 个，已显示安全上限。请搜索或点击节点聚焦。</div>` : ""}<div class="graph-tools"><input id="graph-search" placeholder="搜索节点并聚焦"><button id="graph-reset">显示全部</button><span>${nodes.length} 节点 · ${edges.length} 关系</span></div><div class="graph-canvas"><svg viewBox="0 0 ${width} ${height}">${edges.map(edge => { const a=positioned.get(edge.source),b=positioned.get(edge.target); return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" class="${edge.provenance}" />`; }).join("")}${[...positioned.values()].map(node => `<g class="graph-node" data-node="${esc(node.id)}" transform="translate(${node.x} ${node.y})"><circle r="13" class="${esc(node.kind)}"></circle><text y="27" text-anchor="middle">${esc(node.label).slice(0,18)}</text></g>`).join("")}</svg></div><div class="legend"><span><i class="solid"></i>已登记关系</span><span><i class="dashed"></i>过程派生关系</span></div>`, "RESEARCH LENS");
-}
-
-function comparison(s) {
-  const records = s.research?.explorations || [];
-  return panel("探索对比", `<div class="compare">${records.map(x => `<article><header><span class="badge ${esc(x.state)}">${esc(x.state)}</span><small>${x.is_current ? "CURRENT" : "ARCHIVED"}</small></header><h3>${esc(x.goal)}</h3><dl class="details"><dt>分支</dt><dd>${esc(x.branch)}</dd><dt>假设</dt><dd>${esc(x.hypothesis)}</dd><dt>阶段</dt><dd>${esc(x.stage)}</dd><dt>当前步骤</dt><dd>${esc(x.current_step)}</dd><dt>证据</dt><dd>${esc((x.evidence || []).join("；"))}</dd><dt>结果</dt><dd>${esc(x.result)}</dd></dl></article>`).join("") || `<div class="empty">暂无探索记录</div>`}</div>`, "HYPOTHESIS · EVIDENCE · RESULT");
-}
-
-function matrix(s) {
-  const data = s.research?.evidence_matrix || {rows:[]};
-  return panel("证据矩阵", `<p class="muted">只展示已登记的 supports / validates / contradicts；“未登记”不等于“没有证据”。</p><div class="table-wrap"><table class="matrix"><thead><tr><th>理论</th><th>论文</th><th>实验 / 仿真</th><th>结果</th></tr></thead><tbody>${data.rows.map(row => `<tr><th>${esc(row.theory.title)}</th>${["paper","experiment","result"].map(key => `<td class="${row.cells[key].status}">${esc(evidenceLabel(row.cells[key]))}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="4" class="empty">暂无已登记理论</td></tr>`}</tbody></table></div>`, "EXPLICIT EVIDENCE ONLY");
-}
-
-function advanced(s) {
-  return `${panel("版本与运行状态", `<div class="button-row"><button id="check-updates" class="primary-button">检查更新</button><button id="software-refresh">刷新软件交付状态</button></div><pre>${esc(JSON.stringify({branch:s.branch,health:s.health,classification:s.classification,active_task_warning:s.active_task_warning}, null, 2))}</pre>`, "ADVANCED")}${panel("原始事件", table((s.events || []).slice(0,500), [["occurred_at","时间"],["event_type","类型"],["task_id","任务"],["branch","分支"]], "event"), "EVENT JOURNAL")}`;
-}
-
-function render() {
-  const s = state.snapshot; const page = pages.find(x => x[0] === state.page);
-  $("#page-title").textContent = page?.[2] || "概览";
-  if (!s) { $("#content").innerHTML = `<div class="loading-card"><span></span>正在准备本地只读快照…</div>`; return; }
-  const views = {workflow,overview,search,resources,workbench,diagnostics,explain,"research-map":graphView,"exploration-compare":comparison,"evidence-matrix":matrix,advanced};
-  $("#content").innerHTML = views[state.page](s);
-  bindPageEvents(s);
-}
-
-function bindPageEvents(s) {
-  $("#search-input")?.addEventListener("input", event => { state.query = event.target.value; render(); $("#search-input")?.focus(); });
-  $("#copy-context")?.addEventListener("click", async () => { const r=await invoke("copy_context", null); if(r.ok){await navigator.clipboard.writeText(r.data.text);notice("AI 上下文已复制");}else notice(r.error.message,"error"); });
-  $("#export-diagnostics")?.addEventListener("click", async () => { const r=await invoke("export_diagnostics", null); notice(r.ok ? `诊断包已保存：${r.data.output}` : r.error.message, r.ok?"info":"error"); });
-  $("#report-bug")?.addEventListener("click", async () => { const r=await invoke("report_bug"); notice(r.ok&&r.data.opened?"已打开 Bug 报告页面":"无法打开 Bug 报告页面",r.ok?"info":"error"); });
-  $("#check-updates")?.addEventListener("click", async () => { const r=await invoke("check_updates"); openDrawer("更新检查", r); });
-  $("#software-refresh")?.addEventListener("click", async () => { const r=await invoke("refresh_software_delivery", {}); openDrawer("软件交付状态", r); });
-  $("#graph-reset")?.addEventListener("click", () => {state.graphFocus=null;render();});
-  $("#graph-search")?.addEventListener("change", event => { const q=event.target.value.toLocaleLowerCase(); const hit=(s.research?.graph.nodes||[]).find(x=>x.label.toLocaleLowerCase().includes(q)); if(hit){state.graphFocus=hit.id;render();}else notice("没有匹配节点","warn"); });
-  document.querySelectorAll(".graph-node").forEach(node => node.addEventListener("click",()=>{state.graphFocus=node.dataset.node;render();}));
-  document.querySelectorAll("tr[data-record]").forEach(row => row.addEventListener("click",()=>openDrawer("记录详情", {kind:row.dataset.kind,index:row.dataset.record})));
-}
-
-function openDrawer(title, value) { $("#drawer-title")?.remove(); $("#drawer-body").innerHTML=`<small>DETAIL</small><h2 id="drawer-title">${esc(title)}</h2><pre>${esc(JSON.stringify(value,null,2))}</pre>`; $("#drawer").classList.remove("hidden"); }
-
-async function refresh(force = false) {
-  $("#refresh-button").disabled = true;
-  try {
-    const response = await invoke("refresh", state.token, force);
-    if (response.data?.snapshot) state.snapshot = response.data.snapshot;
-    if (response.data?.state_token) state.token = response.data.state_token;
-    if (!response.ok) notice(`刷新失败，继续显示最后快照：${response.error.message}`, "error");
-    statusStrip(state.snapshot); render();
-  } catch (error) { notice(error.message, "error"); }
-  finally { $("#refresh-button").disabled = false; }
-}
-
-function initialize() {
-  const requestedTheme = new URLSearchParams(location.hash.slice(1)).get("theme");
-  const preferredTheme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-  $("#app").dataset.theme = ["light", "dark"].includes(requestedTheme) ? requestedTheme : preferredTheme;
-  $("#theme-toggle").textContent = $("#app").dataset.theme === "dark" ? "☼" : "☾";
-  renderNavigation(); render();
-  $("#refresh-button").onclick = () => refresh(true);
-  $("#theme-toggle").onclick = () => { const app=$("#app"); app.dataset.theme=app.dataset.theme==="dark"?"light":"dark"; $("#theme-toggle").textContent=app.dataset.theme==="dark"?"☼":"☾"; };
-  $("#drawer-close").onclick = () => $("#drawer").classList.add("hidden");
-  document.addEventListener("keydown", event => { if(event.key==="Escape") $("#drawer").classList.add("hidden"); });
-  window.addEventListener("pywebviewready", async () => {
-    const ready=await invoke("ready");
-    $("#runtime-version").textContent=`v${ready.data.version} · bridge ready`;
-    await refresh(true);
-    if (ready.data.refresh_seconds > 0) {
-      setInterval(() => refresh(false), ready.data.refresh_seconds * 1000);
-    }
-  });
-  setTimeout(() => { if (!bridge()) notice("WebView2 桥接初始化较慢，请稍候…", "warn"); }, 2500);
-}
-
+function overview(s){const c=s.context||{},h=s.health||{},a=s.attempt||{},p=c.project_profile||{},o=c.overview_state||c.state||{};return cards([["当前任务",c.active_task?"1":"0",c.active_task?.goal||"无活动任务"],["资料索引",(s.catalog_items||[]).length,`${(s.catalog_relations||[]).length} 条显式关系`,"accent"],["探索尝试",(s.explorations||[]).length+(a.attempt_id?1:0),a.state||"无当前尝试"],["系统健康",h.status||"未知",`${h.events||0} events`,h.status==="passed"?"good":"warn"]])+`<div class="grid two">${panel("项目主线",`<dl class="details"><dt>描述</dt><dd>${esc(p.description)}</dd><dt>大目标</dt><dd>${esc(p.big_goal)}</dd><dt>当前判断</dt><dd>${esc(o.judgment)}</dd><dt>断点</dt><dd>${esc(o.breakpoint)}</dd></dl>`,"PROJECT STATE")}${panel("下一步",`<ol class="steps">${(c.visible_next_steps||o.next_steps||[]).map(x=>`<li>${esc(x)}</li>`).join("")||"<li>暂无登记的下一步</li>"}</ol>`,"NEXT ACTION")}</div>`;}
+function workflow(s){const l=s.action_matrix?.state||{},active=l.active_task||{},writer=l.writer_lock||{},step=l.lifecycle_step||{},git=l.git||{},attempt=l.attempt||s.attempt||{},labels=["未开始","周期已建立","工作中","进展已记录","可完成","正在收尾","已完成"];const steps=labels.map((x,i)=>`<span class="${i===step.index?"current":""}">${x}</span>`).join("<i>→</i>");const detail=active.task_id?`<dl class="details"><dt>任务</dt><dd>${esc(active.task_id)}</dd><dt>轨道</dt><dd>${esc(active.track||attempt.track||"stable")}</dd><dt>开始</dt><dd>${esc(active.started_at)}</dd><dt>变化</dt><dd>${(l.changed_paths||[]).length} 个文件</dd><dt>进度</dt><dd>${active.state_updated?"已记录":"未记录"}</dd><dt>决策</dt><dd>${active.decisions_added||0}</dd><dt>写锁</dt><dd>${writer.status==="active"?`${esc(writer.command)} / PID ${esc(writer.pid)}`:"空闲"}</dd><dt>工作树稳定</dt><dd>${esc(l.worktree_quiet_seconds||0)} 秒</dd></dl>`:`<p class="muted">当前没有活动工作周期。最近完成：${esc(l.last_completed?.task_id||"无")}</p>`;const delivery=`<dl class="details"><dt>工作区</dt><dd>${(l.dirty_paths||[]).length?`${l.dirty_paths.length} 个未提交变化`:"干净"}</dd><dt>提交/推送</dt><dd>${esc(git.relation||"未知")}</dd><dt>恢复</dt><dd>${esc(l.sidecar?.error||"无需恢复")}</dd></dl>`;return panel("实时生命周期",`<div class="lifecycle-steps">${steps}</div>${detail}`,"LIVE · 3 SECOND REFRESH")+`<div class="grid two">${panel("交付状态",delivery,"WORKTREE · COMMIT · PUSH")}${panel("安全边界",`<p class="muted">Web 工作台保持业务只读。任务、阶段、探索、决策和资料关系仍由结构化 CLI 生命周期写入。</p><div class="boundary"><b>允许</b><span>刷新 · 更新检查 · 诊断导出 · 打开受限资料 · 复制上下文</span><b>禁止</b><span>任意命令 · 任意文件读取 · SQLite 写入</span></div>`,"READ ONLY")}</div>${panel("最近完成",table((s.history||[]).slice(0,10),[["occurred_at","时间"],["summary","任务"],["result","结果"],["branch","分支"]],"history"),"TASK HISTORY")}`;}
+function search(s){const filtered=state.committedQuery?filterRecords(s.search_index||[],state.committedQuery,["title","summary","search_text","branch","kind_label"]):[];const page=paginate(filtered,state.searchPage,10);state.searchPage=page.page;return panel("跨记录搜索",`<form id="search-form" class="search-controls"><label class="searchbox"><span>⌕</span><input id="search-input" value="${esc(state.draftQuery)}" placeholder="搜索任务、事件、决策、资料、分支…"></label><button class="primary-button" type="submit">搜索</button><button id="search-clear" type="button">清除</button></form>${state.committedQuery?`<p class="count">“${esc(state.committedQuery)}” · ${filtered.length} 条结果 · 第 ${page.page}/${page.pages} 页</p>${table(page.items,[["kind_label","类型"],["title","标题"],["summary","摘要"],["branch","分支"]],"search")}<div class="pagination"><button id="search-prev" ${page.page<=1?"disabled":""}>上一页</button><button id="search-next" ${page.page>=page.pages?"disabled":""}>下一页</button></div>`:`<div class="empty">输入关键词后按 Enter 或点击“搜索”</div>`}`,"INDEX · LOCAL");}
+function resources(s){const dirs=(s.resource_directories||[]).map(x=>[x.label,x.actual_files,`${x.indexed_files} 已登记 · ${x.status}`,x.status==="ok"?"good":"warn",x.path]);return cards(dirs,true)+panel("资料目录与索引",table(s.catalog_items||[],[["kind_label","类型"],["title","标题"],["status","状态"],["path","项目路径"],["branch","分支"]],"catalog"),"CATALOG · CLICK TO REVEAL");}
+function workbench(s){return `<div class="grid two">${panel("科研上下文",`<p class="muted">复制已登记资料的 Markdown 上下文，不会自动上传内容。</p><button id="copy-context" class="primary-button">复制全部登记资料上下文</button>`,"CONTEXT")}${panel("外置软件",table(s.external_tools||[],[["kind_label","类型"],["name","名称"],["status","状态"]]),"REGISTERED TOOLS")}</div>`;}
+function explain(s){return panel("中英文状态解释",`<p class="muted">展开类别并选择英文状态，查看中文含义、实际影响和安全下一步。</p><div class="glossary">${(s.status_glossary||[]).map((group,i)=>`<details ${i===0?"open":""}><summary>${esc(group.section)} <span>${group.items.length}</span></summary>${group.items.map(item=>`<button class="glossary-item" data-glossary="${esc(group.section)}:${esc(item.code)}"><b>${esc(item.code)}</b><span>${esc(item.meaning)}</span></button>`).join("")}</details>`).join("")}</div>`,"STATUS GLOSSARY");}
+function graphView(s){const src=s.research?.graph||{nodes:[],edges:[]},g=state.graphFocus?graphNeighborhood(src,state.graphFocus,1):src,max=80,nodes=g.nodes.slice(0,max),allowed=new Set(nodes.map(x=>x.id)),edges=g.edges.filter(x=>allowed.has(x.source)&&allowed.has(x.target)),pos=new Map(nodes.map((n,i)=>{const a=(i%18)/18*Math.PI*2,r=Math.min(175+Math.floor(i/18)*70,250);return[n.id,{...n,x:480+Math.cos(a)*r,y:270+Math.sin(a)*r}]}));return panel("科研地图",`<div class="graph-tools"><input id="graph-search" placeholder="搜索节点并聚焦"><button id="graph-reset">显示全部</button><span>${nodes.length} 节点 · ${edges.length} 关系</span></div><div class="graph-canvas"><svg viewBox="0 0 960 540">${edges.map(e=>{const a=pos.get(e.source),b=pos.get(e.target);return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" class="${e.provenance}"/>`}).join("")}${[...pos.values()].map(n=>`<g class="graph-node" data-node="${esc(n.id)}" transform="translate(${n.x} ${n.y})"><circle r="13" class="${esc(n.kind)}"></circle><text y="27" text-anchor="middle">${esc(n.label).slice(0,18)}</text></g>`).join("")}</svg></div>`,"RESEARCH LENS");}
+function comparison(s){return panel("探索对比",`<div class="compare">${(s.research?.explorations||[]).map(x=>`<article><header><span class="badge ${esc(x.state)}">${esc(x.state)}</span></header><h3>${esc(x.goal)}</h3><dl class="details"><dt>分支</dt><dd>${esc(x.branch)}</dd><dt>假设</dt><dd>${esc(x.hypothesis)}</dd><dt>当前步骤</dt><dd>${esc(x.current_step)}</dd><dt>证据</dt><dd>${esc((x.evidence||[]).join("；"))}</dd><dt>结果</dt><dd>${esc(x.result)}</dd></dl></article>`).join("")||`<div class="empty">暂无探索记录</div>`}</div>`,"HYPOTHESIS · EVIDENCE · RESULT");}
+function matrix(s){const d=s.research?.evidence_matrix||{rows:[]};return panel("证据矩阵",`<p class="muted">只展示已登记的 supports / validates / contradicts；“未登记”不等于“没有证据”。</p><div class="table-wrap"><table class="matrix"><thead><tr><th>理论</th><th>论文</th><th>实验 / 仿真</th><th>结果</th></tr></thead><tbody>${d.rows.map(r=>`<tr><th>${esc(r.theory.title)}</th>${["paper","experiment","result"].map(k=>`<td class="${r.cells[k].status}">${esc(evidenceLabel(r.cells[k]))}</td>`).join("")}</tr>`).join("")||`<tr><td colspan="4" class="empty">暂无已登记理论</td></tr>`}</tbody></table></div>`,"EXPLICIT EVIDENCE ONLY");}
+function disclosure(id,title,count){return `<details class="panel disclosure" data-lazy="${id}"><summary><span><small>ADVANCED</small><b>${esc(title)}</b></span><em>${esc(count)}</em></summary><div class="lazy-body empty">展开后读取</div></details>`;}
+function advanced(s){const issues=s.diagnostics?.issues||s.diagnostics?.active||[],actions=s.action_matrix?.actions||[];return disclosure("runtime","版本与运行状态","按需")+disclosure("actions","动作可用性",`${actions.length} 项`)+disclosure("diagnostics","诊断",`${issues.length} 个问题`)+disclosure("events","原始事件",`${(s.events||[]).length} 条`);}
+function fillDisclosure(node,s){const id=node.dataset.lazy,body=node.querySelector(".lazy-body");if(body.dataset.loaded)return;body.dataset.loaded="1";body.classList.remove("empty");if(id==="runtime")body.innerHTML=`<div class="button-row"><button id="check-updates" class="primary-button">检查更新</button><button id="software-refresh">刷新软件交付状态</button></div><pre>${esc(JSON.stringify({branch:s.branch,health:s.health,classification:s.classification,active_task_warning:s.active_task_warning},null,2))}</pre>`;if(id==="actions")body.innerHTML=table(s.action_matrix?.actions||[],[["category","类别"],["label","动作"],["status","状态"],["missing_fields","等待输入"]]);if(id==="diagnostics"){const d=s.diagnostics||{},issues=d.issues||d.active||[];body.innerHTML=`<div class="button-row"><button id="export-diagnostics" class="primary-button">导出脱敏 ZIP</button><button id="report-bug">报告 Bug</button></div>${table(issues,[["occurred_at","时间"],["code","代码"],["summary","摘要"]],"diagnostic")}`;}if(id==="events"){const page=paginate([...(s.events||[])].reverse(),state.eventPage,50);state.eventPage=page.page;body.innerHTML=`<p class="count">第 ${page.page}/${page.pages} 页</p>${table(page.items,[["occurred_at","时间"],["event_type","类型"],["task_id","任务"],["branch","分支"]],"event")}<div class="pagination"><button id="event-prev" ${page.page<=1?"disabled":""}>上一页</button><button id="event-next" ${page.page>=page.pages?"disabled":""}>下一页</button></div>`;}bindDynamic(s);}
+function render(){state.records.clear();const s=state.snapshot,p=pages.find(x=>x[0]===state.page);$("#page-title").textContent=p?.[2]||"概览";if(!s){$("#content").innerHTML=`<div class="loading-card"><span></span>正在准备本地只读快照…</div>`;return;}const views={workflow,overview,search,resources,workbench,explain,"research-map":graphView,"exploration-compare":comparison,"evidence-matrix":matrix,advanced};$("#content").innerHTML=views[state.page](s);bindDynamic(s);}
+function openDrawer(title,value){$("#drawer-body").innerHTML=`<small>DETAIL</small><h2 id="drawer-title">${esc(title)}</h2><pre>${esc(JSON.stringify(value,null,2))}</pre>`;$("#drawer").classList.remove("hidden");}
+function bindDynamic(s){$("#search-input")?.addEventListener("input",e=>state.draftQuery=e.target.value);$("#search-form")?.addEventListener("submit",e=>{e.preventDefault();state.committedQuery=state.draftQuery.trim();state.searchPage=1;render();});$("#search-clear")?.addEventListener("click",()=>{state.draftQuery="";state.committedQuery="";state.searchPage=1;render();});$("#search-prev")?.addEventListener("click",()=>{state.searchPage--;render();});$("#search-next")?.addEventListener("click",()=>{state.searchPage++;render();});document.querySelectorAll(".resource-card").forEach(n=>{const open=async()=>{const r=await invoke("open_resource_directory",n.dataset.resourcePath);notice(r.ok?`已打开 ${r.data.path}`:r.error.message,r.ok?"info":"error")};n.onclick=open;n.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();open();}}});document.querySelectorAll("tr[data-record-key]").forEach(row=>row.onclick=async()=>{const record=state.records.get(row.dataset.recordKey);if(row.dataset.kind==="catalog"){const r=await invoke("reveal_resource_file",record.item_id);notice(r.ok?`已定位 ${r.data.path}`:r.error.message,r.ok?"info":"error");}else openDrawer("记录详情",record);});document.querySelectorAll(".glossary-item").forEach(btn=>btn.onclick=()=>{const [section,code]=btn.dataset.glossary.split(":");const item=(s.status_glossary||[]).find(x=>x.section===section)?.items.find(x=>x.code===code);openDrawer(`${code}｜${item.meaning}`,{类别:section,英文状态:code,中文含义:item.meaning,意味着什么:item.implication,安全下一步:item.next_step});});document.querySelectorAll("details[data-lazy]").forEach(n=>n.addEventListener("toggle",()=>{if(n.open)fillDisclosure(n,s);}));$("#copy-context")?.addEventListener("click",async()=>{const r=await invoke("copy_context",null);if(r.ok){await navigator.clipboard.writeText(r.data.text);notice("AI 上下文已复制");}else notice(r.error.message,"error")});$("#export-diagnostics")?.addEventListener("click",async()=>{const r=await invoke("export_diagnostics",null);notice(r.ok?`诊断包已保存：${r.data.output}`:r.error.message,r.ok?"info":"error")});$("#report-bug")?.addEventListener("click",async()=>{const r=await invoke("report_bug");notice(r.ok&&r.data.opened?"已打开 Bug 报告页面":"无法打开 Bug 报告页面",r.ok?"info":"error")});$("#check-updates")?.addEventListener("click",async()=>openDrawer("更新检查",await invoke("check_updates")));$("#software-refresh")?.addEventListener("click",async()=>openDrawer("软件交付状态",await invoke("refresh_software_delivery",{})));$("#event-prev")?.addEventListener("click",()=>{state.eventPage--;const n=document.querySelector('[data-lazy="events"]');n.querySelector(".lazy-body").dataset.loaded="";fillDisclosure(n,s)});$("#event-next")?.addEventListener("click",()=>{state.eventPage++;const n=document.querySelector('[data-lazy="events"]');n.querySelector(".lazy-body").dataset.loaded="";fillDisclosure(n,s)});$("#graph-reset")?.addEventListener("click",()=>{state.graphFocus=null;render()});$("#graph-search")?.addEventListener("change",e=>{const q=e.target.value.toLocaleLowerCase(),hit=(s.research?.graph.nodes||[]).find(x=>x.label.toLocaleLowerCase().includes(q));if(hit){state.graphFocus=hit.id;render()}else notice("没有匹配节点","warn")});document.querySelectorAll(".graph-node").forEach(n=>n.onclick=()=>{state.graphFocus=n.dataset.node;render()});}
+async function refresh(force=false){$("#refresh-button").disabled=true;try{const r=await invoke("refresh",state.token,force);if(r.data?.snapshot)state.snapshot=r.data.snapshot;if(r.data?.state_token)state.token=r.data.state_token;if(!r.ok)notice(`刷新失败，继续显示最后快照：${r.error.message}`,"error");statusStrip(state.snapshot);render();}catch(e){notice(e.message,"error")}finally{$("#refresh-button").disabled=false;}}
+function initialize(){const requested=new URLSearchParams(location.hash.slice(1)).get("theme"),preferred=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";$("#app").dataset.theme=["light","dark"].includes(requested)?requested:preferred;renderNavigation();render();$("#refresh-button").onclick=()=>refresh(true);$("#theme-toggle").onclick=()=>{const a=$("#app");a.dataset.theme=a.dataset.theme==="dark"?"light":"dark"};$("#drawer-close").onclick=()=>$("#drawer").classList.add("hidden");document.addEventListener("keydown",e=>{if(e.key==="Escape")$("#drawer").classList.add("hidden")});window.addEventListener("pywebviewready",async()=>{const ready=await invoke("ready");$("#runtime-version").textContent=`v${ready.data.version} · bridge ready`;await refresh(true);if(ready.data.refresh_seconds>0)setInterval(()=>refresh(false),ready.data.refresh_seconds*1000);});}
 initialize();

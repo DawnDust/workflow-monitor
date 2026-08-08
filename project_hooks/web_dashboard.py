@@ -18,14 +18,12 @@ from .catalog import render_context_markdown
 from .dashboard_actions import export_bundle, report_bug as open_dashboard_bug
 from .diagnostics import diagnostics_status
 from .web_projection import web_snapshot
+from .resource_layout import RESOURCE_DIRECTORIES
 
 
 WEBVIEW2_DOWNLOAD_URL = "https://developer.microsoft.com/microsoft-edge/webview2/"
 WEB_ASSET_PACKAGE = Path("project_hooks") / "web_assets"
 ALLOWED_OPEN_ROOTS = ("resources", "diagnostics-export")
-UI_MODES = ("auto", "web", "legacy")
-# During the experiment the proven Tkinter UI remains the default.
-AUTO_WEB_DEFAULT = False
 
 
 def asset_root() -> Path:
@@ -132,6 +130,7 @@ class WebDashboardBridge:
                 matrix = service.availability_matrix()
                 source["action_matrix"] = {
                     "state_token": matrix.state_token,
+                    "state": matrix.state,
                     "actions": [{
                         "action_id": action.action_id, "label": action.label,
                         "category": action.category, "status": action.status,
@@ -206,24 +205,46 @@ class WebDashboardBridge:
         except Exception as exc:
             return self._error(exc, code="report_bug_failed")
 
-    def open_project_path(self, relative: str) -> dict:
-        if not isinstance(relative, str) or not relative.strip():
-            return self._error("relative path is required", code="invalid_path")
+    def open_resource_directory(self, relative: str) -> dict:
+        allowed = {item.relative_path for item in RESOURCE_DIRECTORIES}
+        if relative not in allowed:
+            return self._error("unknown standard resource directory", code="invalid_path")
         candidate = (self.project_root / relative).resolve()
         try:
             rel = candidate.relative_to(self.project_root)
         except ValueError:
             return self._error("path is outside the project", code="invalid_path")
-        if not rel.parts or rel.parts[0] not in ALLOWED_OPEN_ROOTS or not candidate.exists():
-            return self._error("path is not in an allowed project area", code="invalid_path")
+        if not candidate.is_dir():
+            return self._error("resource directory does not exist", code="missing_path")
         try:
-            if platform.system() == "Windows":
-                os.startfile(str(candidate))  # type: ignore[attr-defined]
-            elif platform.system() == "Darwin":
-                subprocess.Popen(["open", str(candidate)])
-            else:
-                subprocess.Popen(["xdg-open", str(candidate)])
+            subprocess.Popen(["explorer.exe", str(candidate)])
             return self._ok({"path": rel.as_posix()})
+        except OSError as exc:
+            return self._error(exc, code="open_failed")
+
+    def reveal_resource_file(self, item_id: str) -> dict:
+        if not isinstance(item_id, str) or not item_id.strip():
+            return self._error("item_id is required", code="invalid_parameters")
+        snapshot = self._last_snapshot or web_snapshot(self.provider.load())
+        item = next((value for value in snapshot.get("catalog_items") or []
+                     if value.get("item_id") == item_id), None)
+        if item is None:
+            return self._error("catalog item is not registered", code="not_found")
+        relative = item.get("path")
+        if not isinstance(relative, str):
+            return self._error("catalog item has no file path", code="missing_path")
+        candidate = (self.project_root / relative).resolve()
+        try:
+            rel = candidate.relative_to(self.project_root)
+        except ValueError:
+            return self._error("path is outside the project", code="invalid_path")
+        if not rel.parts or rel.parts[0] != "resources":
+            return self._error("catalog file is outside resources", code="invalid_path")
+        if not candidate.is_file():
+            return self._error("catalog file does not exist", code="missing_path")
+        try:
+            subprocess.Popen(["explorer.exe", f"/select,{candidate}"])
+            return self._ok({"item_id": item_id, "path": rel.as_posix()})
         except OSError as exc:
             return self._error(exc, code="open_failed")
 
@@ -278,36 +299,3 @@ def launch_web_dashboard(
     if shown_callback is not None:
         window.events.shown += shown_callback
     webview.start(gui="edgechromium", debug=False, storage_path=str(user_data), private_mode=False)
-
-
-def launch_dashboard_mode(
-    provider,
-    refresh_seconds: float,
-    ui: str,
-    *,
-    legacy_launcher: Callable[..., None],
-    web_launcher: Callable[..., None] = launch_web_dashboard,
-    legacy_root_factory=None,
-    fallback_notifier: Callable[[str], None] | None = None,
-) -> dict:
-    """Select the UI and make Web initialization failure an explicit fallback."""
-    if ui not in UI_MODES:
-        raise ValueError(f"unsupported dashboard UI: {ui}")
-    selected = "web" if ui == "web" or (ui == "auto" and AUTO_WEB_DEFAULT) else "legacy"
-    if selected == "legacy":
-        legacy_launcher(provider, refresh_seconds, root_factory=legacy_root_factory)
-        return {"ui": "legacy", "fallback": False}
-    try:
-        web_launcher(provider, refresh_seconds)
-        return {"ui": "web", "fallback": False}
-    except Exception as exc:
-        message = (
-            f"Web Dashboard 无法启动，将回退到旧版界面。\n\n{exc}\n\n"
-            f"WebView2 官方安装页面：{WEBVIEW2_DOWNLOAD_URL}"
-        )
-        if fallback_notifier is not None:
-            fallback_notifier(message)
-        else:
-            print(message, file=sys.stderr)
-        legacy_launcher(provider, refresh_seconds, root_factory=legacy_root_factory)
-        return {"ui": "legacy", "fallback": True, "reason": str(exc)}

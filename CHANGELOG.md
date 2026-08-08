@@ -1,5 +1,8 @@
 # Changelog
 
+- WebView2 现为唯一图形工作台；无参数 EXE 直接启动 Web，并移除 `dashboard`、`--ui` 与 legacy 回退。
+- 补齐实时生命周期、资料目录/文件打开、完整双语解释、10 条分页搜索，以及高级查看中的折叠动作、诊断和原始事件。
+
 ## Unreleased
 
 - 新增实验性 Web Dashboard 2.0：`dashboard --ui auto|web|legacy`、本地 WebView2 白名单桥接、随单 EXE 打包的原生 Web 静态资源，以及初始化失败时的显式 Tkinter 回退；探索阶段 `auto` 仍保持旧界面。

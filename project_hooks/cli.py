@@ -30,8 +30,6 @@ from .catalog import (
     configure_catalog_parser,
     decode_item,
 )
-from .dashboard import DashboardDataProvider, DashboardError, launch_dashboard
-from .web_dashboard import UI_MODES, launch_dashboard_mode
 from .diagnostics import (
     cleanup_resolved_diagnostics,
     diagnostics_status,
@@ -118,7 +116,7 @@ STATE_ARGUMENTS = (
     "goal", "judgment", "breakpoint", "blocker", "status", "main_goal_version",
 )
 DAILY_HELP = """\
-usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,end,dashboard,diagnostics} ...
+usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,end,diagnostics} ...
 
 项目内维护入口。无参数运行时显示行动概览。
 
@@ -126,7 +124,6 @@ usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,end,da
   context     读取完整动态上下文
   start       开始任务生命周期
   end         完成任务生命周期
-  dashboard   打开只读管理窗口
   diagnostics 查看或导出本地脱敏诊断
 
 首次使用:
@@ -142,7 +139,7 @@ FULL_HELP = """\
 usage: workflow-monitor [-h] [--help-all] [--project PATH] <command> ...
 
 日常命令:
-  context, start, end, dashboard, diagnostics
+  context, start, end, diagnostics
 
 仓库维护:
   init, install, update, version, check, status, branch-status
@@ -2123,10 +2120,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("pre-commit", help=argparse.SUPPRESS)
     context = sub.add_parser("context")
     context.add_argument("--format", choices=("markdown", "json"), default="markdown")
-    dashboard = sub.add_parser("dashboard", help="打开只读 SQLite 维护数据窗口")
-    dashboard.add_argument("--refresh-seconds", type=non_negative_float, default=3.0)
-    dashboard.add_argument("--branch")
-    dashboard.add_argument("--ui", choices=UI_MODES, default="auto")
     diagnostics = sub.add_parser("diagnostics", help="查看或导出本地脱敏诊断")
     diagnostics_sub = diagnostics.add_subparsers(dest="diagnostics_command", required=True)
     diagnostics_sub.add_parser("status")
@@ -2320,16 +2313,6 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "pre-commit": pre_commit_check(); output = {"status": "passed"}
         elif args.command == "context":
             data = context_data(); output = data if args.format == "json" else markdown_context(data)
-        elif args.command == "dashboard":
-            provider = DashboardDataProvider(
-                read_model(), classify_branch, args.branch,
-                action_service=dashboard_action_service(),
-            )
-            launch_dashboard_mode(
-                provider, args.refresh_seconds, args.ui,
-                legacy_launcher=launch_dashboard,
-            )
-            output = {"status": "closed"}
         elif args.command == "diagnostics": output = diagnostics_command(args)
         elif args.command == "state": output = state_update(args)
         elif args.command == "project": output = project_command(args)

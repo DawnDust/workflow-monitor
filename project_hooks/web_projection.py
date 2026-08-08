@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from typing import Iterable
 
+from .status_glossary import glossary_snapshot
+
 
 EVIDENCE_RELATIONS = frozenset({"supports", "validates", "contradicts"})
 RESULT_KINDS = frozenset({"output", "report"})
@@ -203,4 +205,5 @@ def web_snapshot(snapshot: dict) -> dict:
         "explorations": exploration_comparison(snapshot),
         "evidence_matrix": evidence_matrix(snapshot),
     }
+    projected["status_glossary"] = glossary_snapshot()
     return projected

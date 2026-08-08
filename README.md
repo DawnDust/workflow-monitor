@@ -1,6 +1,6 @@
 # Workflow Monitor
 
-> Web Dashboard 2.0 正在 `experiment/web-dashboard-v2` 探索轨道验证。当前默认入口仍为 Tkinter；可用 `dashboard --ui web` 显式试用本地 WebView2 界面，或用 `--ui legacy` 强制回退。Web 界面不开放网络端口、不使用 CDN、不上传项目数据，业务数据保持只读。
+> 双击或无参数运行 `workflow-monitor.exe` 会直接打开本地 WebView2 工作台。界面不开放网络端口、不使用 CDN、不上传项目数据，业务数据保持只读。
 
 面向 Windows 科研 Git 项目的单文件工作流工具，提供任务生命周期、探索分支、决策、交接、资料索引和只读 Dashboard。
 
@@ -31,9 +31,6 @@
 .\workflow-monitor.exe diagnostics status
 .\workflow-monitor.exe diagnostics export
 .\workflow-monitor.exe workbench external list
-.\workflow-monitor.exe dashboard
-.\workflow-monitor.exe dashboard --ui web
-.\workflow-monitor.exe dashboard --ui legacy
 ```
 
 双击无参数启动 Dashboard；在 PowerShell 中带参数运行时执行完整 CLI。`--help` 显示日常入口，`--help-all` 显示全部命令。
