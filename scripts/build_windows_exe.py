@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from project_hooks import DISPLAY_NAME, EXECUTABLE_NAME, __version__
-from project_hooks.build_identity import repository_source_identity
+from project_hooks.infrastructure.git.build_identity import repository_source_identity
 
 
 def write_build_info(root: Path) -> Path:
@@ -65,9 +65,9 @@ def main() -> int:
     root = ROOT
     build_info = write_build_info(root)
     version_info = write_version_info(root)
-    icon_png = root / "project_hooks" / "assets" / "crafting_table_icon.png"
-    icon_ico = root / "project_hooks" / "assets" / "crafting_table_icon.ico"
-    web_assets = root / "project_hooks" / "web_assets"
+    icon_png = root / "project_hooks" / "ui" / "windows" / "assets" / "crafting_table_icon.png"
+    icon_ico = root / "project_hooks" / "ui" / "windows" / "assets" / "crafting_table_icon.ico"
+    web_assets = root / "project_hooks" / "ui" / "web" / "assets"
     PyInstaller.__main__.run([
         str(root / "project_hooks" / "windows_entry.py"),
         "--name", "workflow-monitor",
@@ -83,8 +83,8 @@ def main() -> int:
         "--icon", str(icon_ico),
         "--version-file", str(version_info),
         "--add-data", f"{build_info}{os.pathsep}.",
-        "--add-data", f"{icon_png}{os.pathsep}project_hooks/assets",
-        "--add-data", f"{web_assets}{os.pathsep}project_hooks/web_assets",
+        "--add-data", f"{icon_png}{os.pathsep}project_hooks/ui/windows/assets",
+        "--add-data", f"{web_assets}{os.pathsep}project_hooks/ui/web/assets",
         "--hidden-import", "webview",
         "--hidden-import", "webview.platforms.edgechromium",
         "--hidden-import", "clr",
