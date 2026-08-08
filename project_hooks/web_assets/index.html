@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Workflow Monitor</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app" class="app" data-theme="dark">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark"><i></i><i></i><i></i></span><span><b>Workflow</b><small>MONITOR · LAB</small></span></div>
+      <nav id="navigation" aria-label="主导航"></nav>
+      <div class="runtime"><span></span>LOCAL · READ ONLY<small id="runtime-version">WebView2</small></div>
+    </aside>
+    <main class="workspace">
+      <header class="topbar">
+        <div><p id="crumb">LOCAL RESEARCH WORKSPACE</p><h1 id="page-title">概览</h1></div>
+        <div class="toolbar">
+          <button id="theme-toggle" class="icon-button" title="切换主题" aria-label="切换主题">☼</button>
+          <button id="refresh-button" class="primary-button">↻ 刷新快照</button>
+        </div>
+      </header>
+      <div id="notice" class="notice hidden" role="status"></div>
+      <section id="status-strip" class="status-strip loading"><span class="pulse"></span><b>正在连接本地数据桥接…</b></section>
+      <section id="content" tabindex="-1"></section>
+    </main>
+  </div>
+  <div id="drawer" class="drawer hidden" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+    <button id="drawer-close" class="drawer-close" aria-label="关闭">×</button><div id="drawer-body"></div>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

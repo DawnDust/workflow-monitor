@@ -67,6 +67,7 @@ def main() -> int:
     version_info = write_version_info(root)
     icon_png = root / "project_hooks" / "assets" / "crafting_table_icon.png"
     icon_ico = root / "project_hooks" / "assets" / "crafting_table_icon.ico"
+    web_assets = root / "project_hooks" / "web_assets"
     PyInstaller.__main__.run([
         str(root / "project_hooks" / "windows_entry.py"),
         "--name", "workflow-monitor",
@@ -83,6 +84,25 @@ def main() -> int:
         "--version-file", str(version_info),
         "--add-data", f"{build_info}{os.pathsep}.",
         "--add-data", f"{icon_png}{os.pathsep}project_hooks/assets",
+        "--add-data", f"{web_assets}{os.pathsep}project_hooks/web_assets",
+        "--hidden-import", "webview",
+        "--hidden-import", "webview.platforms.edgechromium",
+        "--hidden-import", "clr",
+        "--exclude-module", "PyQt5",
+        "--exclude-module", "PyQt6",
+        "--exclude-module", "PySide2",
+        "--exclude-module", "PySide6",
+        "--exclude-module", "qtpy",
+        "--exclude-module", "webview.platforms.qt",
+        "--exclude-module", "webview.platforms.gtk",
+        "--exclude-module", "webview.platforms.cef",
+        "--exclude-module", "webview.platforms.cocoa",
+        "--exclude-module", "webview.platforms.android",
+        # pywebview's generic server hook collects TLS/template helpers even
+        # though this build loads a file:// application with ssl=False.
+        "--exclude-module", "cryptography",
+        "--exclude-module", "bcrypt",
+        "--exclude-module", "jinja2",
     ])
     executable = root / "dist" / EXECUTABLE_NAME
     if not executable.is_file():

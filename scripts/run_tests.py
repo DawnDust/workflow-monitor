@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 MODULES = (
     "tests.test_diagnostics", "tests.test_workflow_actions",
     "tests.test_workbench", "tests.test_project_hooks", "tests.test_distribution",
+    "tests.test_web_dashboard",
 )
 FAST_CLASSES = (
     "tests.test_diagnostics.DiagnosticsTests",
@@ -28,6 +29,9 @@ FAST_CLASSES = (
     "tests.test_workflow_actions.DashboardActionWidgetTests",
     "tests.test_workbench.ExternalWorkbenchTests",
     "tests.test_project_hooks.DashboardPresentationTests",
+    "tests.test_web_dashboard.WebProjectionTests",
+    "tests.test_web_dashboard.WebDashboardBridgeTests",
+    "tests.test_web_dashboard.WebDashboardIntegrationTests",
 )
 CORE_SMOKE = (
     "tests.test_project_hooks.ProjectHooksSqliteTests.test_install_rebuilds_database_and_context_is_available",
@@ -220,6 +224,19 @@ def wait_for_dashboard_window(process: subprocess.Popen, timeout: float) -> tupl
     return title, time.monotonic() - started
 
 
+def stop_smoke_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+    else:
+        process.terminate()
+    process.wait(timeout=5)
+
+
 def release_smoke() -> int:
     from project_hooks import __version__
     validate_release_tag(__version__)
@@ -290,17 +307,36 @@ def release_smoke() -> int:
                 + (stderr or stdout).decode("utf-8", "replace")
             )
         if os.name == "nt" and title != "Workflow Monitor":
+            stop_smoke_process(dashboard)
             raise RuntimeError(
                 f"frozen Dashboard had no visible window after {elapsed:.2f}s"
             )
+        stop_smoke_process(dashboard)
         if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/PID", str(dashboard.pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            bridge_marker = portable / ".bridge-ready"
+            web_env = os.environ.copy()
+            web_env["WORKFLOW_MONITOR_BRIDGE_READY_FILE"] = str(bridge_marker)
+            web_dashboard = subprocess.Popen(
+                [str(copied), "dashboard", "--ui", "web", "--refresh-seconds", "0"],
+                cwd=portable, env=web_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
-        else:
-            dashboard.terminate()
-        dashboard.wait(timeout=5)
+            title, elapsed = wait_for_dashboard_window(web_dashboard, 2.0)
+            if title != "Workflow Monitor":
+                stop_smoke_process(web_dashboard)
+                raise RuntimeError(
+                    f"frozen Web Dashboard loading shell had no visible window after {elapsed:.2f}s"
+                )
+            deadline = time.monotonic() + 15
+            while not bridge_marker.is_file() and web_dashboard.poll() is None and time.monotonic() < deadline:
+                time.sleep(.1)
+            if not bridge_marker.is_file():
+                stdout, stderr = web_dashboard.communicate(timeout=5) if web_dashboard.poll() is not None else (b"", b"")
+                stop_smoke_process(web_dashboard)
+                raise RuntimeError(
+                    "frozen Web Dashboard did not emit bridge-ready signal: "
+                    + (stderr or stdout).decode("utf-8", "replace")
+                )
+            stop_smoke_process(web_dashboard)
     return 0
 
 
