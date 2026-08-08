@@ -21,6 +21,23 @@ from project_hooks.launcher import (
 CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
 
 
+def _hide_loader_window(handle: int, find_window=None, show_window=None) -> None:
+    """Hide the startup shell without depending on Tk's inactive event loop."""
+    if find_window is None or show_window is None:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        user32.FindWindowW.restype = wintypes.HWND
+        find_window = user32.FindWindowW
+        show_window = user32.ShowWindow
+    # Tk's winfo_id is the client HWND, while its visible frame is a separate
+    # top-level window with the TkTopLevel class and the configured title.
+    top_level = find_window("TkTopLevel", DISPLAY_NAME) or handle
+    show_window(top_level, 0)
+
+
 def initialize_project(*args, **kwargs):
     """Lazy compatibility wrapper kept patchable by distribution tests."""
     from project_hooks.project_manager import initialize_project as implementation
@@ -194,20 +211,15 @@ def run_portable_web_workbench(
             action_service=dashboard_action_service(),
         )
         loader_handle = root_window.winfo_id()
-
-        def close_loader() -> None:
-            import ctypes
-            ctypes.windll.user32.PostMessageW(loader_handle, 0x0010, 0, 0)
-
-        launch_web_dashboard(
-            provider, refresh_seconds,
-            shown_callback=close_loader,
-        )
+        # pywebview's frozen WindowsForms loop blocks Python callbacks and
+        # monitor threads. Hide the fully prepared loading shell synchronously
+        # before transferring the main thread to WebView2.
+        _hide_loader_window(loader_handle)
+        launch_web_dashboard(provider, refresh_seconds)
         return 0
-    except Exception:
+    finally:
         if root_window.winfo_exists():
             root_window.destroy()
-        raise
 
 
 def main(argv: list[str] | None = None) -> int:

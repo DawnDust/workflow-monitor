@@ -21,11 +21,11 @@ from project_hooks.status_glossary import STATUS_GLOSSARY
 from project_hooks.web_projection import (
     bfs_neighborhood,
     evidence_matrix,
-    exploration_comparison,
     research_graph,
     version_timeline,
     web_snapshot,
 )
+from project_hooks.windows_entry import _hide_loader_window
 
 
 def sample_snapshot() -> dict:
@@ -34,11 +34,12 @@ def sample_snapshot() -> dict:
         "health": {"status": "passed", "events": 3},
         "context": {"active_task": {"task_id": "task-1", "goal": "Build web UI"}},
         "history": [], "decisions": [], "events": [
-            {"event_id":"v5","occurred_at":"2026-01-01 00:00:00","event_type":"project_state.updated","task_id":"task-0","payload":{"main_goal_version":"v5","goal":"Foundation"}},
-            {"event_id":"v6","occurred_at":"2026-02-01 00:00:00","event_type":"project_state.updated","task_id":"task-1","payload":{"main_goal_version":"v6","goal":"Web"}},
+            {"event_id":"v5","occurred_at":"2026-01-01 00:00:00","event_type":"project_state.updated","task_id":"task-0","payload":{"main_goal_version":"v5","goal":"Foundation","judgment":"Foundation accepted"}},
+            {"event_id":"v6","occurred_at":"2026-02-01 00:00:00","event_type":"project_state.updated","task_id":"task-1","payload":{"main_goal_version":"v6","goal":"Web","judgment":"Web started","status":"active"}},
+            {"event_id":"v6-final","occurred_at":"2026-02-01 12:00:00","event_type":"project_state.updated","task_id":"task-1","payload":{"main_goal_version":"v6","goal":"Maintenance task","judgment":"Web delivered","status":"completed"}},
             {"event_id":"done","occurred_at":"2026-02-02 00:00:00","event_type":"task.finished","task_id":"task-1","payload":{}},
         ], "search_index": [],
-        "resource_directories": [{"name":"theory","path":"resources/theory","label":"理论","actual_files":1,"indexed_files":1,"status":"ok"}], "external_tools": [], "diagnostics": {},
+        "resource_directories": [{"name":"theory","kind":"theory","path":"resources/theory","label":"理论","description":"理论、假设、定义和推导","actual_files":1,"indexed_files":1,"status":"ok"}], "external_tools": [], "diagnostics": {},
         "task_details": {
             "task-1": {"goal": "Build web UI", "branch": "experiment/web-dashboard-v2"},
         },
@@ -113,12 +114,6 @@ class WebProjectionTests(unittest.TestCase):
         self.assertEqual(row["cells"]["experiment"]["status"], "unregistered")
         self.assertEqual(row["cells"]["experiment"]["label"], "未登记")
 
-    def test_exploration_projection_keeps_current_and_archived_states(self) -> None:
-        records = exploration_comparison(sample_snapshot())
-        self.assertEqual(records[0]["state"], "active")
-        self.assertTrue(records[0]["is_current"])
-        self.assertEqual(records[1]["state"], "negative")
-
     def test_web_snapshot_does_not_mutate_source(self) -> None:
         source = sample_snapshot()
         projected = web_snapshot(source)
@@ -126,11 +121,16 @@ class WebProjectionTests(unittest.TestCase):
         self.assertIn("research", projected)
         self.assertIn("timeline", projected["research"])
         self.assertNotIn("graph", projected["research"])
+        self.assertNotIn("explorations", projected["research"])
 
     def test_version_timeline_aggregates_tasks_and_has_no_isolated_nodes(self) -> None:
         timeline = version_timeline(sample_snapshot())
         self.assertEqual([row["version"] for row in timeline["versions"]], ["v5", "v6"])
-        self.assertEqual(timeline["versions"][1]["task_count"], 1)
+        version = timeline["versions"][1]
+        self.assertEqual(version["task_count"], 1)
+        self.assertEqual(version["initial_goal"], "Web")
+        self.assertEqual(version["final_judgment"], "Web delivered")
+        self.assertEqual(version["latest_status"], "completed")
         self.assertEqual(timeline["explorations"][0]["version"], "v6")
         self.assertEqual(timeline["files"][0]["version"], "v6")
         endpoints = {value for edge in timeline["edges"] for value in (edge["source"], edge["target"])}
@@ -150,6 +150,18 @@ class WebProjectionTests(unittest.TestCase):
         self.assertEqual(len(timeline["files"]), 1)
         self.assertEqual(timeline["files"][0]["kind"], "file-group")
         self.assertEqual(len(timeline["files"][0]["items"]), 6)
+
+    def test_version_timeline_keeps_missing_summary_fields_explicit(self) -> None:
+        source = sample_snapshot()
+        source["events"].append({
+            "event_id": "v7", "occurred_at": "2026-03-01 00:00:00",
+            "event_type": "project_state.updated", "task_id": "task-2",
+            "payload": {"main_goal_version": "v7"},
+        })
+        version = version_timeline(source)["versions"][-1]
+        self.assertIsNone(version["initial_goal"])
+        self.assertIsNone(version["final_judgment"])
+        self.assertIsNone(version["latest_status"])
 
 
 class WebDashboardBridgeTests(unittest.TestCase):
@@ -217,6 +229,14 @@ class WebDashboardBridgeTests(unittest.TestCase):
 
 
 class WebDashboardIntegrationTests(unittest.TestCase):
+    def test_loader_hide_uses_immediate_native_visibility_call(self) -> None:
+        calls = []
+        _hide_loader_window(
+            1234, lambda class_name, title: 5678,
+            lambda handle, command: calls.append((handle, command)),
+        )
+        self.assertEqual(calls, [(5678, 0)])
+
     def test_dashboard_command_and_legacy_modes_are_removed(self) -> None:
         parser = build_parser()
         with self.assertRaises(Exception):
@@ -240,14 +260,16 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('"--exclude-module", "PyQt5"', build_script)
         self.assertIn('"--exclude-module", "cryptography"', build_script)
         self.assertIn('"--hidden-import", "webview.platforms.edgechromium"', build_script)
-        self.assertIn("shown_callback=close_loader", windows_entry)
+        self.assertIn("_hide_loader_window(loader_handle)", windows_entry)
+        self.assertNotIn("PostMessageW(loader_handle", windows_entry)
+        self.assertIn("finally:", windows_entry)
         self.assertNotIn("launch_dashboard_mode", windows_entry)
         self.assertNotIn('args[0] == "dashboard"', windows_entry)
 
     def test_glossary_and_navigation_are_complete(self) -> None:
         self.assertEqual(len(STATUS_GLOSSARY), 10)
         script = (asset_root() / "app.js").read_text(encoding="utf-8")
-        self.assertNotIn('["diagnostics"', script)
+        self.assertNotIn('["diagnostics","', script)
         self.assertIn('disclosure("diagnostics"', script)
         self.assertIn("draftQuery", script)
         self.assertIn("committedQuery", script)
@@ -256,6 +278,14 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn("changed_sections", script)
         self.assertNotIn('i===0?"open"', script)
         self.assertIn("research?.timeline", script)
+        self.assertNotIn("exploration-compare", script)
+        self.assertNotIn("function comparison", script)
+        self.assertIn("advancedOpen", script)
+        self.assertIn("updateAdvanced", script)
+        self.assertIn("selectedResourceKind", script)
+        self.assertIn("data-open-resource", script)
+        self.assertIn('n.initial_goal||"未登记"', script)
+        self.assertIn('n.final_judgment||"未登记"', script)
 
     @unittest.skipUnless(shutil.which("node"), "Node is a development-only optional test runtime")
     def test_frontend_state_helpers_without_browser(self) -> None:

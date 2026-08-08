@@ -136,29 +136,6 @@ def bfs_neighborhood(graph: dict, start_id: str, depth: int = 1) -> dict:
     }
 
 
-def exploration_comparison(snapshot: dict) -> list[dict]:
-    records: list[dict] = []
-    attempt = snapshot.get("attempt") or None
-    if attempt:
-        records.append({
-            "id": attempt.get("attempt_id"), "branch": attempt.get("branch"),
-            "goal": attempt.get("goal"), "hypothesis": attempt.get("hypothesis"),
-            "stage": attempt.get("stage_id"), "current_step": attempt.get("current_step"),
-            "evidence": attempt.get("evidence") or [], "result": attempt.get("conclusion"),
-            "state": attempt.get("state") or "active", "is_current": True,
-        })
-    for item in snapshot.get("explorations") or []:
-        evidence = item.get("evidence") or ""
-        records.append({
-            "id": item.get("event_id"), "branch": item.get("branch"),
-            "goal": item.get("goal"), "hypothesis": None, "stage": None,
-            "current_step": None, "evidence": [evidence] if evidence else [],
-            "result": item.get("result"), "state": item.get("result") or "inconclusive",
-            "is_current": False,
-        })
-    return records
-
-
 def evidence_matrix(snapshot: dict) -> dict:
     """Project only explicit evidence; missing cells deliberately mean unregistered."""
     items = {item["item_id"]: item for item in snapshot.get("catalog_items") or []}
@@ -213,13 +190,17 @@ def version_timeline(snapshot: dict) -> dict:
             record = versions.setdefault(current_version, {
                 "id": f"version:{current_version}", "version": current_version,
                 "first_at": event.get("occurred_at"), "last_at": event.get("occurred_at"),
-                "goal": None, "judgment": None, "status": None,
+                "initial_goal": None, "final_judgment": None, "latest_status": None,
                 "task_ids": set(), "decision_count": 0,
             })
-            record["last_at"] = event.get("occurred_at")
-            for key in ("goal", "judgment", "status"):
-                if payload.get(key):
-                    record[key] = payload[key]
+            if payload.get("goal") and not record["initial_goal"]:
+                record["initial_goal"] = payload["goal"]
+            if payload.get("judgment"):
+                record["final_judgment"] = payload["judgment"]
+            if payload.get("status"):
+                record["latest_status"] = payload["status"]
+        if current_version:
+            versions[current_version]["last_at"] = event.get("occurred_at")
         task_id = event.get("task_id")
         if task_id and current_version:
             task_versions[str(task_id)] = current_version
@@ -321,11 +302,10 @@ def version_timeline(snapshot: dict) -> dict:
 
 
 def web_snapshot(snapshot: dict) -> dict:
-    """Attach the three research views without altering the source snapshot."""
+    """Attach the active research views without altering the source snapshot."""
     projected = dict(snapshot)
     projected["research"] = {
         "timeline": version_timeline(snapshot),
-        "explorations": exploration_comparison(snapshot),
         "evidence_matrix": evidence_matrix(snapshot),
     }
     projected["status_glossary"] = glossary_snapshot()

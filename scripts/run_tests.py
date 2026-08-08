@@ -158,9 +158,10 @@ def validate_release_tag(application_version: str, tag: str | None = None) -> No
         raise RuntimeError(f"release tag/version mismatch: tag={tag}, application={application_version}")
 
 
-def visible_window_title(process_id: int) -> str | None:
+def descendant_process_ids(process_id: int) -> set[int]:
+    """Return a process and all descendants using the Windows process snapshot."""
     if os.name != "nt":
-        return None
+        return {process_id}
     import ctypes
     from ctypes import wintypes
 
@@ -192,6 +193,16 @@ def visible_window_title(process_id: int) -> str | None:
             if parent in process_ids and child not in process_ids:
                 process_ids.add(child)
                 changed = True
+    return process_ids
+
+
+def visible_window_title(process_id: int) -> str | None:
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    process_ids = descendant_process_ids(process_id)
 
     titles: list[str] = []
     user32 = ctypes.windll.user32
@@ -210,6 +221,16 @@ def visible_window_title(process_id: int) -> str | None:
 
     user32.EnumWindows(collect, 0)
     return next((title for title in titles if title), None)
+
+
+def wait_for_frozen_child(process: subprocess.Popen, timeout: float = 10.0) -> bool:
+    """Exclude unavoidable one-file extraction from the application UI gate."""
+    deadline = time.monotonic() + timeout
+    while process.poll() is None and time.monotonic() < deadline:
+        if len(descendant_process_ids(process.pid)) > 1:
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def wait_for_dashboard_window(process: subprocess.Popen, timeout: float) -> tuple[str | None, float]:
@@ -303,6 +324,9 @@ def release_smoke() -> int:
                 [str(copied)],
                 cwd=portable, env=web_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
+            if not wait_for_frozen_child(web_dashboard):
+                stop_smoke_process(web_dashboard)
+                raise RuntimeError("frozen Web Dashboard application process did not start")
             title, elapsed = wait_for_dashboard_window(web_dashboard, 2.0)
             if title != "Workflow Monitor":
                 stop_smoke_process(web_dashboard)
