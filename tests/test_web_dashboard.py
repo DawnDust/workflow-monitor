@@ -23,6 +23,7 @@ from project_hooks.web_projection import (
     evidence_matrix,
     exploration_comparison,
     research_graph,
+    version_timeline,
     web_snapshot,
 )
 
@@ -32,7 +33,11 @@ def sample_snapshot() -> dict:
         "branch": "experiment/web-dashboard-v2",
         "health": {"status": "passed", "events": 3},
         "context": {"active_task": {"task_id": "task-1", "goal": "Build web UI"}},
-        "history": [], "decisions": [], "events": [], "search_index": [],
+        "history": [], "decisions": [], "events": [
+            {"event_id":"v5","occurred_at":"2026-01-01 00:00:00","event_type":"project_state.updated","task_id":"task-0","payload":{"main_goal_version":"v5","goal":"Foundation"}},
+            {"event_id":"v6","occurred_at":"2026-02-01 00:00:00","event_type":"project_state.updated","task_id":"task-1","payload":{"main_goal_version":"v6","goal":"Web"}},
+            {"event_id":"done","occurred_at":"2026-02-02 00:00:00","event_type":"task.finished","task_id":"task-1","payload":{}},
+        ], "search_index": [],
         "resource_directories": [{"name":"theory","path":"resources/theory","label":"理论","actual_files":1,"indexed_files":1,"status":"ok"}], "external_tools": [], "diagnostics": {},
         "task_details": {
             "task-1": {"goal": "Build web UI", "branch": "experiment/web-dashboard-v2"},
@@ -44,7 +49,7 @@ def sample_snapshot() -> dict:
         },
         "explorations": [{
             "event_id": "explore-1", "goal": "Prior experiment", "result": "negative",
-            "branch": "experiment/web-dashboard-v2", "task_id": "task-1", "evidence": "too large",
+            "branch": "experiment/web-dashboard-v2", "task_id": "task-1", "occurred_at":"2026-02-03 00:00:00", "evidence": "too large",
         }],
         "catalog_items": [
             {"item_id": "t1", "kind": "theory", "kind_label": "理论", "title": "Theory",
@@ -119,6 +124,32 @@ class WebProjectionTests(unittest.TestCase):
         projected = web_snapshot(source)
         self.assertNotIn("research", source)
         self.assertIn("research", projected)
+        self.assertIn("timeline", projected["research"])
+        self.assertNotIn("graph", projected["research"])
+
+    def test_version_timeline_aggregates_tasks_and_has_no_isolated_nodes(self) -> None:
+        timeline = version_timeline(sample_snapshot())
+        self.assertEqual([row["version"] for row in timeline["versions"]], ["v5", "v6"])
+        self.assertEqual(timeline["versions"][1]["task_count"], 1)
+        self.assertEqual(timeline["explorations"][0]["version"], "v6")
+        self.assertEqual(timeline["files"][0]["version"], "v6")
+        endpoints = {value for edge in timeline["edges"] for value in (edge["source"], edge["target"])}
+        node_ids = {row["id"] for key in ("versions", "explorations", "files") for row in timeline[key]}
+        self.assertEqual(node_ids, endpoints)
+
+    def test_version_timeline_strict_files_and_groups_more_than_five(self) -> None:
+        source = sample_snapshot()
+        source["catalog_relations"] = []
+        source["catalog_items"] = [
+            {"item_id": f"f{i}", "title": f"File {i}", "path": f"resources/theory/{i}.md",
+             "status": "active", "task_id": "task-1", "branch": "main",
+             "kind": "theory", "tags": ["core"]} for i in range(6)
+        ] + [{"item_id":"ignored","title":"Ignored","path":"resources/theory/x.md",
+              "status":"active","task_id":"unrelated-task","branch":"main","kind":"theory","tags":[]}]
+        timeline = version_timeline(source)
+        self.assertEqual(len(timeline["files"]), 1)
+        self.assertEqual(timeline["files"][0]["kind"], "file-group")
+        self.assertEqual(len(timeline["files"][0]["items"]), 6)
 
 
 class WebDashboardBridgeTests(unittest.TestCase):
@@ -220,6 +251,11 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('disclosure("diagnostics"', script)
         self.assertIn("draftQuery", script)
         self.assertIn("committedQuery", script)
+        self.assertIn("selectedKind", script)
+        self.assertIn("compositionstart", script)
+        self.assertIn("changed_sections", script)
+        self.assertNotIn('i===0?"open"', script)
+        self.assertIn("research?.timeline", script)
 
     @unittest.skipUnless(shutil.which("node"), "Node is a development-only optional test runtime")
     def test_frontend_state_helpers_without_browser(self) -> None:

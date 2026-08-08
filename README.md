@@ -13,7 +13,8 @@
 3. 新建一个空文件夹，把下载的 `workflow-monitor.exe` 放进去。
 4. 双击 `workflow-monitor.exe`。
 
-首次双击会自动创建 `main` Git 仓库、初始化工作流并打开 Dashboard；以后继续双击同一个 EXE 即可。EXE 必须保持文件名 `workflow-monitor.exe`，并保留在项目根目录。
+首次双击会自动创建 `main` Git 仓库、初始化工作流并打开 Web 工作台；以后继续双击同一个 EXE 即可。EXE 必须保持文件名 `workflow-monitor.exe`，并保留在项目根目录。
+科研地图按主目标版本展示演进线索，历史任务聚合进版本详情；只有与探索或 catalog 关系关联，或带 `core`/`map` 标签的关键文件会进入地图。搜索页可按任务、探索、决策和资料快速筛选。
 
 当前 EXE 未配置商业代码签名；Windows SmartScreen 首次提示时，需要确认文件来自本项目的正式 GitHub Release。
 
