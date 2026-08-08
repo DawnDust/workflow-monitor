@@ -8,6 +8,7 @@ without a browser or WebView2 runtime.
 from __future__ import annotations
 
 from collections import defaultdict, deque
+import re
 from typing import Iterable
 
 from .status_glossary import glossary_snapshot
@@ -15,6 +16,7 @@ from .status_glossary import glossary_snapshot
 
 EVIDENCE_RELATIONS = frozenset({"supports", "validates", "contradicts"})
 RESULT_KINDS = frozenset({"output", "report"})
+KEY_FILE_TAGS = frozenset({"core", "map"})
 
 
 def _node(identifier: str, kind: str, label: str, **metadata: object) -> dict:
@@ -197,11 +199,132 @@ def evidence_matrix(snapshot: dict) -> dict:
     return {"columns": columns, "rows": rows, "empty_label": "未登记"}
 
 
+def version_timeline(snapshot: dict) -> dict:
+    """Project a sparse, connected evolution map from existing event data."""
+    events = sorted(snapshot.get("events") or [], key=lambda item: str(item.get("occurred_at") or ""))
+    versions: dict[str, dict] = {}
+    task_versions: dict[str, str] = {}
+    current_version: str | None = None
+    for event in events:
+        payload = event.get("payload") or {}
+        explicit = payload.get("main_goal_version")
+        if explicit:
+            current_version = str(explicit)
+            record = versions.setdefault(current_version, {
+                "id": f"version:{current_version}", "version": current_version,
+                "first_at": event.get("occurred_at"), "last_at": event.get("occurred_at"),
+                "goal": None, "judgment": None, "status": None,
+                "task_ids": set(), "decision_count": 0,
+            })
+            record["last_at"] = event.get("occurred_at")
+            for key in ("goal", "judgment", "status"):
+                if payload.get(key):
+                    record[key] = payload[key]
+        task_id = event.get("task_id")
+        if task_id and current_version:
+            task_versions[str(task_id)] = current_version
+            versions[current_version]["task_ids"].add(str(task_id))
+            if event.get("event_type") == "decision.recorded":
+                versions[current_version]["decision_count"] += 1
+
+    def version_key(value: dict) -> tuple[int, str]:
+        match = re.search(r"(\d+)", value["version"])
+        return (int(match.group(1)) if match else 10**9, value["version"])
+
+    version_rows = sorted(versions.values(), key=version_key)
+    for row in version_rows:
+        row["task_count"] = len(row.pop("task_ids"))
+        row["exploration_count"] = 0
+        row["file_count"] = 0
+
+    by_version = {row["version"]: row for row in version_rows}
+    exploration_rows: list[dict] = []
+    unassigned_explorations: list[dict] = []
+    for item in snapshot.get("explorations") or []:
+        version = task_versions.get(str(item.get("task_id") or ""))
+        if not version:
+            occurred = str(item.get("occurred_at") or "")
+            candidates = [row for row in version_rows if str(row.get("first_at") or "") <= occurred]
+            version = candidates[-1]["version"] if candidates else None
+        record = {
+            "id": f"exploration:{item.get('event_id') or item.get('branch')}",
+            "record_id": item.get("event_id"), "version": version,
+            "label": item.get("goal") or item.get("branch") or "探索",
+            "branch": item.get("branch"), "task_id": item.get("task_id"),
+            "occurred_at": item.get("occurred_at"), "result": item.get("result"),
+        }
+        if version in by_version:
+            exploration_rows.append(record)
+            by_version[version]["exploration_count"] += 1
+        else:
+            unassigned_explorations.append(record)
+
+    relations = snapshot.get("catalog_relations") or []
+    related_ids = {str(value) for relation in relations
+                   for value in (relation.get("source_id"), relation.get("target_id")) if value}
+    exploration_tasks = {str(item.get("task_id")) for item in exploration_rows if item.get("task_id")}
+    exploration_branches = {str(item.get("branch")) for item in exploration_rows if item.get("branch")}
+    file_rows: list[dict] = []
+    unassigned_files: list[dict] = []
+    for item in snapshot.get("catalog_items") or []:
+        tags = {str(tag).casefold() for tag in item.get("tags") or []}
+        item_id = str(item.get("item_id") or "")
+        task_id = str(item.get("task_id") or "")
+        branch = str(item.get("branch") or "")
+        linked = item_id in related_ids or task_id in exploration_tasks or branch in exploration_branches
+        if not item.get("path") or item.get("status") == "missing" or not (linked or tags & KEY_FILE_TAGS):
+            continue
+        version = task_versions.get(task_id)
+        if not version and branch in exploration_branches:
+            version = next((row["version"] for row in exploration_rows if row.get("branch") == branch), None)
+        record = {
+            "id": f"file:{item_id}", "item_id": item_id, "version": version,
+            "label": item.get("title") or item_id, "path": item.get("path"),
+            "kind": item.get("kind"), "tags": list(item.get("tags") or []),
+            "relation_count": sum(item_id in {str(rel.get("source_id")), str(rel.get("target_id"))} for rel in relations),
+        }
+        if version in by_version:
+            file_rows.append(record)
+            by_version[version]["file_count"] += 1
+        else:
+            unassigned_files.append(record)
+
+    displayed_files: list[dict] = []
+    for version in (row["version"] for row in version_rows):
+        members = [item for item in file_rows if item["version"] == version]
+        if len(members) <= 5:
+            displayed_files.extend(members)
+        else:
+            displayed_files.append({
+                "id": f"file-group:{version}", "version": version,
+                "label": f"关键文件 {len(members)}", "kind": "file-group", "items": members,
+            })
+
+    edges: list[dict] = []
+    for left, right in zip(version_rows, version_rows[1:]):
+        edges.append({"source": left["id"], "target": right["id"], "kind": "version"})
+    for item in exploration_rows:
+        edges.append({"source": f"version:{item['version']}", "target": item["id"], "kind": "derived"})
+    for item in displayed_files:
+        edges.append({"source": f"version:{item['version']}", "target": item["id"], "kind": "derived"})
+    visible_files = {item.get("item_id"): item["id"] for item in displayed_files if item.get("item_id")}
+    for relation in relations:
+        source, target = visible_files.get(relation.get("source_id")), visible_files.get(relation.get("target_id"))
+        if source and target:
+            edges.append({"source": source, "target": target, "kind": "explicit",
+                          "relation": relation.get("relation_type")})
+    return {
+        "versions": version_rows, "explorations": exploration_rows,
+        "files": displayed_files, "edges": edges,
+        "unassigned": {"explorations": unassigned_explorations, "files": unassigned_files},
+    }
+
+
 def web_snapshot(snapshot: dict) -> dict:
     """Attach the three research views without altering the source snapshot."""
     projected = dict(snapshot)
     projected["research"] = {
-        "graph": research_graph(snapshot),
+        "timeline": version_timeline(snapshot),
         "explorations": exploration_comparison(snapshot),
         "evidence_matrix": evidence_matrix(snapshot),
     }
