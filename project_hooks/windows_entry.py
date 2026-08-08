@@ -152,7 +152,9 @@ def show_error(message: str) -> None:
             pass
 
 
-def run_portable_dashboard(root: Path | None = None, refresh_seconds: float = 3.0) -> int:
+def run_portable_dashboard(
+    root: Path | None = None, refresh_seconds: float = 3.0, ui: str = "auto",
+) -> int:
     project = (root or portable_root()).resolve()
     import tkinter as tk
     from tkinter import ttk
@@ -179,6 +181,7 @@ def run_portable_dashboard(root: Path | None = None, refresh_seconds: float = 3.
             check_repository, classify_branch, dashboard_action_service, read_model, set_project_root,
         )
         from project_hooks.dashboard import DashboardDataProvider, launch_dashboard
+        from project_hooks.web_dashboard import launch_dashboard_mode
 
         set_project_root(project)
         # The Dashboard itself explains version/install/health blockers and
@@ -190,7 +193,29 @@ def run_portable_dashboard(root: Path | None = None, refresh_seconds: float = 3.
             read_model(), classify_branch, None,
             action_service=dashboard_action_service(),
         )
-        launch_dashboard(provider, refresh_seconds, root_factory=lambda: root_window)
+        root_factory = lambda: root_window
+        web_launcher = None
+        if ui == "web":
+            from project_hooks.web_dashboard import launch_web_dashboard
+
+            loader_handle = root_window.winfo_id()
+
+            def close_loader() -> None:
+                import ctypes
+                ctypes.windll.user32.PostMessageW(loader_handle, 0x0010, 0, 0)
+
+            def web_launcher(current_provider, current_refresh_seconds) -> None:
+                launch_web_dashboard(
+                    current_provider, current_refresh_seconds,
+                    shown_callback=close_loader,
+                )
+        launch_dashboard_mode(
+            provider, refresh_seconds, ui,
+            legacy_launcher=launch_dashboard,
+            **({"web_launcher": web_launcher} if web_launcher is not None else {}),
+            legacy_root_factory=root_factory,
+            fallback_notifier=show_error,
+        )
         return 0
     except Exception:
         if root_window.winfo_exists():
@@ -217,6 +242,15 @@ def _dashboard_refresh_seconds(args: list[str]) -> float:
         return 3.0
 
 
+def _dashboard_ui(args: list[str]) -> str:
+    try:
+        index = args.index("--ui")
+        value = args[index + 1]
+    except (ValueError, IndexError):
+        return "auto"
+    return value if value in {"auto", "web", "legacy"} else "auto"
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_utf8_stdio()
     args = list(sys.argv[1:] if argv is None else argv)
@@ -235,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         # shared refresh scheduler after startup.
         try:
             return run_portable_dashboard(
-                _dashboard_project(args, project), _dashboard_refresh_seconds(args),
+                _dashboard_project(args, project), _dashboard_refresh_seconds(args), _dashboard_ui(args),
             )
         except Exception as exc:
             from project_hooks.diagnostics import execution_mode, format_failure, record_failure
