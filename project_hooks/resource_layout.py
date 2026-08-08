@@ -157,7 +157,7 @@ def catalog_consistency_errors(root: Path, items: list[dict]) -> list[str]:
         resource = resource_for_path(relative)
         if resource is None:
             hint = (
-                "；请运行 `.\\project-hooks.exe catalog migrate-layout --dry-run`"
+                "；请运行 `.\\workflow-monitor.exe catalog migrate-layout --dry-run`"
                 if legacy_resource_for_path(relative) else ""
             )
             errors.append(f"资料条目路径不在标准 resources 目录: {item['item_id']} -> {relative}{hint}")
@@ -173,7 +173,7 @@ def catalog_consistency_errors(root: Path, items: list[dict]) -> list[str]:
         directory = root / resource.relative_path
         if not directory.is_dir():
             errors.append(
-                f"缺少标准资源目录: {resource.relative_path}；请运行 `.\\project-hooks.exe install`"
+                f"缺少标准资源目录: {resource.relative_path}；请运行 `.\\workflow-monitor.exe install`"
             )
             continue
         for path in files_under(root, resource.relative_path):
@@ -190,6 +190,6 @@ def catalog_consistency_errors(root: Path, items: list[dict]) -> list[str]:
         errors.append(
             "发现旧版根目录资料: " + ", ".join(legacy_files[:5])
             + (" 等" if len(legacy_files) > 5 else "")
-            + "；请运行 `.\\project-hooks.exe catalog migrate-layout --dry-run`"
+            + "；请运行 `.\\workflow-monitor.exe catalog migrate-layout --dry-run`"
         )
     return errors

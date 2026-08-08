@@ -3,9 +3,9 @@
 <!-- project-maintenance-hooks:begin -->
 ## 项目维护生命周期
 
-- 所有命令使用仓库根目录的 `.\project-hooks.exe`。
-- 新 clone 或 worktree 首次写入前，将 `project-hooks.exe` 放到仓库根目录并运行 `.\project-hooks.exe install`。
-- 每次任务先运行 `.\project-hooks.exe context --format markdown`，再按 `core_read_order` 阅读静态规范；首次写入前必须运行 `start`。
+- 所有命令使用仓库根目录的 `.\workflow-monitor.exe`。
+- 新 clone 或 worktree 首次写入前，将 `workflow-monitor.exe` 放到仓库根目录并运行 `.\workflow-monitor.exe install`。
+- 每次任务先运行 `.\workflow-monitor.exe context --format markdown`，再按 `core_read_order` 阅读静态规范；首次写入前必须运行 `start`。
 - 用户只需用自然语言描述任务；AI 从对话提取目标、验收和证据，任务 ID、时间、分支、状态令牌和安全默认值由工作流代码处理，不要求用户复制提示词或命令。
 - 稳定维护只在 `main` 使用 `--track stable`；新理论、算法、实验和不确定改动使用 `--track research|experiment|sandbox --topic <slug>`。
 - 无法可靠判断稳定维护还是探索时必须在对话中询问用户，不得静默选择轨道。

@@ -12,8 +12,13 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import __version__
-from .build_identity import build_identity, build_warning
+from . import EXECUTABLE_NAME, __version__
+from .build_identity import (
+    SOFTWARE_SOURCE_PATHS,
+    build_identity,
+    build_warning,
+    exe_matches_repository,
+)
 from .launcher import ACTIVE_ENV, is_frozen, runtime_root
 from .project_manager import INSTALLATION_PATH, apply_project_update, preflight_update
 from .store import SCHEMA_VERSION, load_events
@@ -26,6 +31,9 @@ LATEST_MANIFEST = (
 VERSIONED_MANIFEST = (
     "https://github.com/DawnDust/project-maintenance-template/"
     "releases/download/v{version}/release-manifest.json"
+)
+LATEST_RELEASE_API = (
+    "https://api.github.com/repos/DawnDust/project-maintenance-template/releases/latest"
 )
 LAUNCHER_VERSION = "1.0.0"
 
@@ -66,7 +74,7 @@ def load_manifest(url: str) -> dict:
         download = executable.get("url") or executable.get("file")
         raise UpdateError(
             "当前稳定启动 EXE 过旧；请从 GitHub Release 下载新版 "
-            f"{download} 并替换项目根目录的 project-hooks.exe"
+            f"{download} 并替换项目根目录的 {EXECUTABLE_NAME}"
         )
     return manifest
 
@@ -86,14 +94,14 @@ def verify_digest(content: bytes, expected: str) -> None:
 def cache_executable(content: bytes, version: str, project_root: Path) -> Path:
     """Store a verified executable inside the project's ignored runtime directory."""
     folder = runtime_root(project_root) / "executables" / version
-    target = folder / "project-hooks.exe"
+    target = folder / EXECUTABLE_NAME
     content_digest = hashlib.sha256(content).hexdigest()
     digest_file = folder / ".exe-sha256"
     if (target.is_file() and digest_file.is_file()
             and digest_file.read_text(encoding="ascii").strip() == content_digest):
         return target
     folder.mkdir(parents=True, exist_ok=True)
-    descriptor, name = tempfile.mkstemp(prefix="project-hooks-", suffix=".exe", dir=folder)
+    descriptor, name = tempfile.mkstemp(prefix="workflow-monitor-", suffix=".exe", dir=folder)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(content)
@@ -170,6 +178,123 @@ def check_latest_update(root: Path, manifest_url: str | None = None) -> dict:
     return check_update(root.resolve(), manifest)
 
 
+def _load_release_api(url: str, gh_path: str) -> dict:
+    """Read Release metadata, using an authenticated gh session for private repos."""
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "project-hooks/" + __version__,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            content = response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code not in {403, 404}:
+            raise UpdateError(f"无法查询 GitHub Release: HTTP {exc.code}") from exc
+        try:
+            completed = subprocess.run(
+                [
+                    "gh", "api", gh_path,
+                ],
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as fallback_exc:
+            raise UpdateError("无法查询 GitHub Release；匿名访问失败且 gh 不可用") from fallback_exc
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise UpdateError(f"无法查询 GitHub Release: {detail or 'gh 查询失败'}")
+        content = completed.stdout.encode("utf-8")
+    except (OSError, urllib.error.URLError) as exc:
+        raise UpdateError(f"无法查询 GitHub Release: {exc}") from exc
+    try:
+        value = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateError("GitHub Release 元数据不是合法 JSON") from exc
+    if not isinstance(value, dict):
+        raise UpdateError("GitHub Release 元数据格式无效")
+    return value
+
+
+def _load_latest_release() -> dict:
+    return _load_release_api(
+        LATEST_RELEASE_API,
+        "repos/DawnDust/project-maintenance-template/releases/latest",
+    )
+
+
+def check_latest_release() -> dict:
+    """Return the latest non-draft, non-prerelease GitHub Release metadata."""
+    release = _load_latest_release()
+    if release.get("draft") or release.get("prerelease"):
+        raise UpdateError("GitHub latest Release 不是正式发布")
+    tag = str(release.get("tag_name") or "")
+    if not tag:
+        raise UpdateError("GitHub latest Release 缺少标签")
+    return {
+        "status": "latest-release",
+        "release_tag": tag,
+        "release_version": tag.removeprefix("v"),
+        "published_at": release.get("published_at"),
+        "url": release.get("html_url"),
+    }
+
+
+def _git_paths(root: Path, *args: str) -> list[str] | None:
+    try:
+        completed = subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return [
+        item.decode("utf-8", errors="replace").replace("\\", "/")
+        for item in completed.stdout.split(b"\0") if item
+    ]
+
+
+def software_changes_since_release(root: Path, release_tag: str) -> list[str] | None:
+    """List committed, tracked-worktree and untracked software changes after a Release."""
+    root = root.resolve()
+    tracked_source = _git_paths(
+        root, "ls-files", "--error-unmatch", "-z", "--", "project_hooks/__init__.py",
+    )
+    if not tracked_source:
+        return None
+    changed = _git_paths(
+        root, "diff", "--name-only", "-z", release_tag, "--", *SOFTWARE_SOURCE_PATHS,
+    )
+    if changed is None:
+        return None
+    untracked = _git_paths(
+        root, "ls-files", "--others", "--exclude-standard", "-z", "--", *SOFTWARE_SOURCE_PATHS,
+    ) or []
+    return sorted(set(changed + untracked))
+
+
+def refresh_software_delivery(root: Path, release: dict) -> dict:
+    """Combine cached Release metadata with current local software state."""
+    root = root.resolve()
+    result = dict(release)
+    result["exe_repository_match"] = exe_matches_repository(root)
+    changes = software_changes_since_release(root, str(release.get("release_tag") or ""))
+    result["software_source_available"] = changes is not None
+    result["unreleased_software_changes"] = changes or []
+    return result
+
+
+def software_delivery_report(root: Path) -> dict:
+    """Read latest formal Release metadata and current local software state."""
+    return refresh_software_delivery(root, check_latest_release())
+
+
 def run_update(
     root: Path,
     *,
@@ -216,7 +341,7 @@ def run_update(
             "conflicts": [],
         }
     if not is_frozen():
-        raise UpdateError("更新只能通过项目根目录的 project-hooks.exe 执行")
+        raise UpdateError(f"更新只能通过项目根目录的 {EXECUTABLE_NAME} 执行")
     executable_asset = manifest["windows_exe"]
     content = fetch_bytes(asset_url(url, executable_asset))
     verify_digest(content, str(executable_asset["sha256"]))
@@ -258,4 +383,5 @@ def version_report(root: Path | None) -> dict:
         "build_identity": identity,
         "project_build_id": project_build_id,
         "build_warning": build_warning(project_build_id),
+        "exe_repository_match": exe_matches_repository(root, identity) if root else None,
     }

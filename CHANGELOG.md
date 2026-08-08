@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- 将对外产品名更新为 **Workflow Monitor**，Windows 可执行文件更名为 `workflow-monitor.exe`，并加入工作台图标与版本资源。
+
 ## 1.5.0
 
 - 将 Dashboard 收敛为只读观察台，统一展示当前任务、阶段、探索、动作可用性和历史。
@@ -22,6 +26,9 @@
 - 精简 Dashboard 阶段展示，并在任务完成但阶段未更新时给出非阻塞提醒。
 
 ## Unreleased
+
+- Dashboard 将软件交付移出主窗口并收纳到“高级查看”：显示 EXE 与仓库源码一致性、最近正式 Release 的版本与时间，以及 Release 后尚未发布的软件文件修改；左上角明确标注稳定或探索分支。
+- Dashboard 有未提交修改时不再重复显示任务文件数，也不再把仅有 HEAD 同步表述为修改已推送。
 
 - 新增本地轮转、脱敏且不自动上传的诊断记录，以及 CLI/Dashboard 诊断 ZIP 导出和 GitHub Bug 报告入口。
 - 为错误与冲突增加稳定分类、事件编号和安全下一步提示，Dashboard 刷新失败继续保留上次正常数据。

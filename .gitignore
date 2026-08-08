@@ -8,6 +8,6 @@ __pycache__/
 .venv/
 build/
 dist/
-/project-hooks.exe
+/workflow-monitor.exe
 /diagnostics-export/
 # project-maintenance-hooks:end
