@@ -65,8 +65,8 @@ def main() -> int:
     root = ROOT
     build_info = write_build_info(root)
     version_info = write_version_info(root)
-    icon_png = root / "project_hooks" / "ui" / "windows" / "assets" / "crafting_table_icon.png"
-    icon_ico = root / "project_hooks" / "ui" / "windows" / "assets" / "crafting_table_icon.ico"
+    icon_png = root / "project_hooks" / "ui" / "windows" / "assets" / "workflow_monitor_icon.png"
+    icon_ico = root / "project_hooks" / "ui" / "windows" / "assets" / "workflow_monitor_icon.ico"
     web_assets = root / "project_hooks" / "ui" / "web" / "assets"
     PyInstaller.__main__.run([
         str(root / "project_hooks" / "windows_entry.py"),

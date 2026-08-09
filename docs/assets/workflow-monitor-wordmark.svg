@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 256" role="img" aria-label="Workflow Monitor">
+  <style>
+    .word { fill: #10283A; font: 700 74px 'Segoe UI', Arial, sans-serif; letter-spacing: -2px; }
+    .sub { fill: #627785; font: 600 22px 'Segoe UI', Arial, sans-serif; letter-spacing: 7px; }
+    @media (prefers-color-scheme: dark) { .word { fill: #F4F8F8; } .sub { fill: #A7B8C2; } }
+  </style>
+  <g>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M82 72L120 110L158 112M120 110L82 168" stroke="#10283A" stroke-width="20"/>
+    <path d="M82 72L120 110L158 112M120 110L82 168" stroke="#D9E8E8" stroke-width="7"/>
+  </g>
+  <rect x="53" y="43" width="58" height="58" rx="10" fill="#0B8F87" transform="rotate(45 82 72)"/>
+  <rect x="129" y="83" width="58" height="58" rx="10" fill="#6657C8" transform="rotate(45 158 112)"/>
+  <rect x="53" y="139" width="58" height="58" rx="10" fill="#B67A1F" transform="rotate(45 82 168)"/>
+  <circle cx="120" cy="110" r="19" fill="#10283A"/>
+  <circle cx="120" cy="110" r="12" fill="#F4F8F8"/>
+  <circle cx="120" cy="110" r="7" fill="#0B8F87"/>
+</g>
+  <text class="word" x="250" y="118">Workflow</text>
+  <text class="word" x="250" y="190">Monitor</text>
+  <text class="sub" x="573" y="190">LOCAL · AUDITABLE</text>
+</svg>

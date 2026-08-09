@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ASSET_DIRECTORY = Path(__file__).resolve().parent / "assets"
-PNG_ICON = ASSET_DIRECTORY / "crafting_table_icon.png"
+PNG_ICON = ASSET_DIRECTORY / "workflow_monitor_icon.png"
 
 
 def apply_window_icon(window, tk) -> bool:

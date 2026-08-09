@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import yaml
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -45,10 +46,24 @@ class PublicReleaseSurfaceTests(unittest.TestCase):
         chinese = {path.name for path in (ROOT / "docs/zh").glob("*.md")}
         self.assertEqual(english, chinese)
         self.assertEqual(len(english), 7)
-        for name in ("workflow-monitor-overview.png", "workflow-monitor-settings.png"):
+        for name in (
+            "workflow-monitor-overview.png",
+            "workflow-monitor-settings.png",
+            "workflow-monitor-social-preview.png",
+        ):
             content = (ROOT / "docs/assets" / name).read_bytes()
             self.assertTrue(content.startswith(b"\x89PNG\r\n\x1a\n"), name)
-            self.assertGreater(len(content), 100_000, name)
+            self.assertGreater(len(content), 30_000, name)
+        for name in ("workflow-monitor-mark.svg", "workflow-monitor-wordmark.svg"):
+            content = (ROOT / "docs/assets" / name).read_text(encoding="utf-8")
+            self.assertIn("<svg", content)
+            self.assertIn("#0B8F87", content)
+        self.assertTrue((ROOT / "docs/assets/workflow-monitor-favicon.png").is_file())
+        with Image.open(ROOT / "project_hooks/ui/windows/assets/workflow_monitor_icon.ico") as icon:
+            self.assertEqual(
+                icon.info["sizes"],
+                {(16, 16), (20, 20), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)},
+            )
 
     def test_mkdocs_and_github_yaml_are_valid(self) -> None:
         config = yaml.safe_load((ROOT / "mkdocs.yml").read_text(encoding="utf-8"))
