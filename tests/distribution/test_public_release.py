@@ -85,7 +85,7 @@ class PublicReleaseSurfaceTests(unittest.TestCase):
         self.assertNotIn("project-maintenance-template", combined)
         headings = re.findall(r"^## (.+)$", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), re.M)
         self.assertEqual(headings.count("Unreleased"), 1)
-        self.assertIn("1.6.0", headings)
+        self.assertIn("1.6.1", headings)
 
 
 if __name__ == "__main__":

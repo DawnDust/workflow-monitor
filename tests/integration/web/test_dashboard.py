@@ -236,7 +236,10 @@ class WebDashboardBridgeTests(unittest.TestCase):
 
     def test_refresh_contract_and_unchanged_token(self) -> None:
         bridge = WebDashboardBridge(FakeProvider(self.root), refresh_seconds=2.5)
-        self.assertEqual(bridge.ready()["data"]["refresh_seconds"], 2.5)
+        ready = bridge.ready()["data"]
+        self.assertEqual(ready["refresh_seconds"], 2.5)
+        self.assertEqual(ready["version"], "1.6.1")
+        self.assertIn("source_commit", ready["build_identity"])
         first = bridge.bootstrap()
         self.assertTrue(first["ok"])
         token = first["data"]["state_token"]
@@ -401,6 +404,14 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('settingsSection:"language"', script)
         self.assertIn('data-settings-section', script)
         self.assertIn('name="language"', script)
+        self.assertIn('["about",l("关于","About")]', script)
+        self.assertIn("DawnDust", script)
+        self.assertIn("https://github.com/DawnDust/workflow-monitor", script)
+        self.assertIn("https://dawndust.github.io/workflow-monitor/", script)
+        self.assertIn("security/advisories/new", script)
+        self.assertIn('target="_blank" rel="noopener noreferrer"', script)
+        self.assertIn('id="about-report-bug"', script)
+        self.assertIn("build_identity", script)
         self.assertIn("saveLanguage", script)
         self.assertIn("esc(item.summary)", script)
         self.assertNotIn("knownStatus", script)
