@@ -1,5 +1,7 @@
 # Workflow Monitor
 
+<p align="center"><img src="docs/assets/workflow-monitor-wordmark.svg" alt="Workflow Monitor" width="430"></p>
+
 [简体中文](README.zh-CN.md) · [User manual](https://dawndust.github.io/workflow-monitor/) · [Download](https://github.com/DawnDust/workflow-monitor/releases/latest)
 
 [![Release](https://img.shields.io/github/v/release/DawnDust/workflow-monitor?display_name=tag)](https://github.com/DawnDust/workflow-monitor/releases/latest)

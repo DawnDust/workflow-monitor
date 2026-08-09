@@ -162,8 +162,8 @@ class ArchitectureTests(unittest.TestCase):
     def test_web_script_is_local(self): self.assertTrue((PACKAGE / "ui/web/assets/app.js").is_file())
     def test_web_state_script_is_local(self): self.assertTrue((PACKAGE / "ui/web/assets/state.js").is_file())
     def test_web_styles_are_local(self): self.assertTrue((PACKAGE / "ui/web/assets/styles.css").is_file())
-    def test_windows_png_icon_exists(self): self.assertTrue((PACKAGE / "ui/windows/assets/crafting_table_icon.png").is_file())
-    def test_windows_ico_icon_exists(self): self.assertTrue((PACKAGE / "ui/windows/assets/crafting_table_icon.ico").is_file())
+    def test_windows_png_icon_exists(self): self.assertTrue((PACKAGE / "ui/windows/assets/workflow_monitor_icon.png").is_file())
+    def test_windows_ico_icon_exists(self): self.assertTrue((PACKAGE / "ui/windows/assets/workflow_monitor_icon.ico").is_file())
 
     def test_core_event_schema_is_three(self): self.assertEqual(SCHEMA_VERSION, 3)
     def test_core_json_is_canonical(self): self.assertEqual(canonical_json({"b": 1, "a": 2}), '{"a":2,"b":1}')

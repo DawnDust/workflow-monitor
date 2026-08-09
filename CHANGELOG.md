@@ -6,6 +6,7 @@ No changes yet.
 
 ## 1.6.0
 
+- Replaced the unrelated crafting-table icon with the original Workflow Beacon identity: three connected workflow nodes and a local status beacon, delivered as reproducible SVG, PNG, multi-size Windows ICO, favicon, wordmark, and social preview assets.
 - Added a bottom-left Settings entry with Language, Explanations, and Advanced view sections; Simplified Chinese and English system text switches immediately and persists only in local WebView2 storage, while user content and recorded data remain unchanged.
 - Added a concise bilingual public README, a bilingual MkDocs user and maintainer manual, an MIT license, community governance files, structured Issue/PR templates, documentation CI, Pages deployment, and dependency update configuration.
 - Renamed public repository links from the legacy template address to `DawnDust/workflow-monitor` across downloads, updates, diagnostics, manifests, and support entry points.

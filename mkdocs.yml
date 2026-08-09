@@ -5,6 +5,8 @@ repo_name: DawnDust/workflow-monitor
 copyright: Copyright &copy; 2026 DawnDust and contributors
 theme:
   name: material
+  logo: assets/workflow-monitor-mark.svg
+  favicon: assets/workflow-monitor-favicon.png
   features:
     - navigation.sections
     - navigation.top
