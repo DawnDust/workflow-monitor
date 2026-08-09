@@ -293,7 +293,8 @@ class WebDashboardBridgeTests(unittest.TestCase):
             bridge.bootstrap()
             result = bridge.reveal_resource_file("bundle-1")
         self.assertTrue(result["ok"])
-        opener.assert_called_once_with(bundle)
+        opener.assert_called_once()
+        self.assertTrue(opener.call_args.args[0].samefile(bundle))
 
     def test_diagnostic_export_rejects_path_components(self) -> None:
         bridge = WebDashboardBridge(FakeProvider(self.root))
