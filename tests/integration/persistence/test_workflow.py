@@ -47,6 +47,11 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             directory = cls.seed_root / "resources" / name
             directory.mkdir(parents=True)
             (directory / ".gitkeep").write_text("\n", encoding="utf-8")
+        for name in ("local", "imported", "exports"):
+            directory = cls.seed_root / "workbench" / name
+            directory.mkdir(parents=True)
+            if name != "exports":
+                (directory / ".gitkeep").write_text("\n", encoding="utf-8")
         for name in ("AGENTS.md", ".gitignore", ".gitattributes"):
             shutil.copy2(SOURCE_ROOT / name, cls.seed_root / name)
         (cls.seed_root / "maintenance/events.jsonl").write_text("", encoding="utf-8")
@@ -694,6 +699,58 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.update_state("external tools recorded")
         self.end(task_id)
 
+    def test_workbench_items_and_packages_are_indexed_but_not_in_context(self) -> None:
+        task_id = "20260809_workbench_package_001"
+        self.start(task_id, "--track", "stable")
+        markdown = self.root / "workbench/local/limit-check.md"
+        markdown.write_text("# 极限检查\n\n检查 $x \\to 0$。\n", encoding="utf-8")
+        added = json.loads(self.hooks(
+            "workbench", "item", "add", "limit-check",
+            "--kind", "checklist", "--purpose", "validation", "--title", "极限检查",
+            "--summary", "检查已知极限", "--path", "workbench/local/limit-check.md",
+            "--tag", "physics",
+        ).stdout)
+        self.assertEqual(added["origin"], "local")
+        self.assertEqual(added["kind"], "checklist")
+        self.assertEqual(added["purposes"], ["validation"])
+        listed = json.loads(self.hooks(
+            "workbench", "item", "list", "--kind", "checklist", "--purpose", "validation", "--format", "json",
+        ).stdout)
+        self.assertTrue(any(item["item_id"] == "limit-check" for item in listed))
+        context = json.loads(self.hooks("context", "--format", "json").stdout)
+        self.assertNotIn("workbench_items", context)
+        self.assertNotIn("极限检查", json.dumps(context, ensure_ascii=False))
+
+        exported = json.loads(self.hooks(
+            "workbench", "package", "export", "physics-methods",
+            "--name", "物理方法", "--version", "1.0.0", "--author", "Researcher",
+            "--item", "limit-check",
+        ).stdout)
+        archive = self.root / exported["output"]
+        self.assertTrue(archive.is_file())
+        preview = self.hooks("workbench", "package", "inspect", str(archive)).stdout
+        self.assertIn("物理方法", preview)
+        self.assertIn("检查清单", preview)
+        imported = json.loads(self.hooks("workbench", "package", "import", str(archive)).stdout)
+        self.assertEqual(imported["package_id"], "physics-methods")
+        imported_id = imported["items"][0]["item_id"]
+        reviewed = json.loads(self.hooks(
+            "workbench", "item", "update", imported_id,
+            "--purpose", "theory_derivation", "--review-state", "reviewed", "--tag", "reviewed",
+        ).stdout)
+        self.assertEqual(reviewed["origin"], "imported")
+        self.assertEqual(reviewed["purposes"], ["theory_derivation"])
+        repeated = json.loads(self.hooks("workbench", "package", "import", str(archive)).stdout)
+        self.assertEqual(repeated["status"], "unchanged")
+
+        markdown.write_text("# 极限检查\n\n内容已更新。\n", encoding="utf-8")
+        failed = self.hooks("check", check=False)
+        self.assertIn("内容哈希不一致", failed.stderr)
+        self.hooks("workbench", "item", "update", "limit-check", "--refresh-content")
+        self.hooks("check")
+        self.update_state("workbench package round trip completed")
+        self.end(task_id)
+
     def test_stage_validation_and_legacy_projects_do_not_infer_profile(self) -> None:
         context = MaintenanceReadModel(
             self.root / ".project_hooks/maintenance.sqlite3",
@@ -738,6 +795,8 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             lambda: "research/search-index",
         ).dashboard_snapshot()
         self.assertEqual({"task", "decision", "exploration"}, {item["kind"] for item in snapshot["search_index"]})
+        exploration = next(item for item in snapshot["search_index"] if item["kind"] == "exploration")
+        self.assertEqual(exploration["status"], "待合并")
 
     def test_legacy_migration_is_complete_idempotent_and_deletes_sources(self) -> None:
         maintenance = self.root / "maintenance"
@@ -819,6 +878,58 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(result["merge_method"], "squash_pr")
         self.assertFalse(result["network_actions_performed"])
 
+    def test_exploration_identity_is_branch_across_multiple_tasks_and_commits(self) -> None:
+        branch = "experiment/branch-scoped"
+        first_task = "20260722_branch_scoped_001"
+        self.start(first_task, "--track", "experiment", "--topic", "branch-scoped")
+        self.update_state("first cycle complete")
+        self.hooks(
+            "attempt", "update", "--hypothesis", "one branch is one exploration",
+            "--evidence", "first cycle evidence", "--conclusion", "first cycle supports it",
+        )
+        self.end(first_task, state="validated")
+        self.commit_all("first exploration cycle")
+
+        first_attempt = json.loads(self.hooks("context", "--format", "json").stdout)["attempts"][0]
+        second_task = "20260722_branch_scoped_002"
+        self.start(second_task, "--track", "experiment", "--topic", "branch-scoped")
+        active_context = json.loads(self.hooks("context", "--format", "json").stdout)
+        current = next(item for item in active_context["attempts"] if item["branch"] == branch)
+        self.assertEqual(current["state"], "active")
+        self.assertEqual(current["attempt_id"], first_attempt["attempt_id"])
+        self.assertEqual(current["exploration_id"], branch)
+
+        self.update_state("second cycle complete")
+        self.hooks("attempt", "update", "--evidence", "second cycle evidence")
+        self.end(second_task, state="validated")
+        self.commit_all("second exploration cycle")
+
+        explorations = json.loads(self.hooks("explorations", "--format", "json").stdout)
+        branch_records = [item for item in explorations if item["exploration_id"] == branch]
+        self.assertEqual(len(branch_records), 1)
+        self.assertEqual(branch_records[0]["task_id"], second_task)
+        self.assertIn("first cycle evidence", branch_records[0]["evidence"])
+        self.assertIn("second cycle evidence", branch_records[0]["evidence"])
+        events = json.loads(self.hooks("history", "--format", "json").stdout)
+        self.assertEqual({item["task_id"] for item in events[:2]}, {first_task, second_task})
+        recorded = [
+            event for event in load_events(self.root / "maintenance/events.jsonl")
+            if event["event_type"] == "exploration.recorded" and event["branch"] == branch
+        ]
+        self.assertEqual(len(recorded), 2)
+
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        merged_snapshot = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: branch,
+        ).dashboard_snapshot()
+        merged_record = next(
+            item for item in merged_snapshot["search_index"]
+            if item["kind"] == "exploration" and item["branch"] == branch
+        )
+        self.assertEqual(merged_record["status"], "已合并")
+
     def test_validated_attempt_requires_all_evidence_fields(self) -> None:
         task_id = "20260722_missing_001"
         self.start(task_id, "--track", "research", "--topic", "missing-proof")
@@ -864,6 +975,16 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.end(stable)
         explorations = json.loads(self.hooks("explorations", "--format", "json").stdout)
         self.assertEqual(explorations[0]["result"], "negative")
+        archived_snapshot = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).dashboard_snapshot()
+        archived_record = next(
+            item for item in archived_snapshot["search_index"]
+            if item["kind"] == "exploration" and item["summary"] == "negative"
+        )
+        self.assertEqual(archived_record["status"], "已遗弃")
 
     def test_database_missing_or_corrupt_rebuilds_from_journal(self) -> None:
         task_id = "20260722_rebuild_001"

@@ -50,7 +50,7 @@ def sample_snapshot() -> dict:
             {"event_id":"v6-final","occurred_at":"2026-02-01 12:00:00","event_type":"project_state.updated","task_id":"task-1","payload":{"main_goal_version":"v6","goal":"Maintenance task","judgment":"Web delivered","status":"completed"}},
             {"event_id":"done","occurred_at":"2026-02-02 00:00:00","event_type":"task.finished","task_id":"task-1","payload":{}},
         ], "search_index": [],
-        "resource_directories": [{"name":"theory","kind":"theory","path":"resources/theory","label":"理论","description":"理论、假设、定义和推导","actual_files":1,"indexed_files":1,"status":"ok"}], "external_tools": [], "diagnostics": {},
+        "resource_directories": [{"name":"theory","kind":"theory","path":"resources/theory","label":"理论","description":"理论、假设、定义和推导","actual_files":1,"indexed_files":1,"status":"ok"}], "external_tools": [], "workbench_items": [], "diagnostics": {},
         "task_details": {
             "task-1": {"goal": "Build web UI", "branch": "experiment/web-dashboard-v2",
                        "started_at": "2026-02-02 00:00:00", "finished_at": "2026-02-02 12:00:00"},
@@ -211,6 +211,18 @@ class WebProjectionTests(unittest.TestCase):
         self.assertNotIn("graph", projected["research"])
         self.assertNotIn("explorations", projected["research"])
 
+    def test_workbench_items_are_added_to_search_without_entering_context(self) -> None:
+        source = sample_snapshot()
+        source["workbench_items"] = [{
+            "item_id": "limit-check", "kind": "checklist", "kind_label": "检查清单",
+            "purposes": ["validation"], "purpose_labels": ["理论、计算或实验验证"],
+            "title": "极限检查", "summary": "检查已知极限", "tags": ["physics"],
+        }]
+        projected = web_snapshot(source)
+        result = next(item for item in projected["search_index"] if item["kind"] == "workbench")
+        self.assertEqual(result["title"], "极限检查")
+        self.assertNotIn("workbench_items", source.get("context", {}))
+
 
 class WebDashboardBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -293,6 +305,30 @@ class WebDashboardBridgeTests(unittest.TestCase):
         bridge = WebDashboardBridge(FakeProvider(self.root))
         self.assertEqual(bridge.refresh_software_delivery(None)["error"]["code"], "invalid_parameters")
         self.assertEqual(bridge.copy_context([1])["error"]["code"], "invalid_parameters")
+        self.assertEqual(bridge.copy_workbench_items([])["error"]["code"], "invalid_parameters")
+
+    def test_bridge_copies_only_explicitly_selected_workbench_items(self) -> None:
+        folder = self.root / "workbench" / "local"
+        folder.mkdir(parents=True)
+        first = folder / "first.md"
+        second = folder / "second.md"
+        first.write_text("# First\n\nSelected content.\n", encoding="utf-8")
+        second.write_text("# Second\n\nUnselected content.\n", encoding="utf-8")
+        import hashlib
+        source = sample_snapshot()
+        source["workbench_items"] = [
+            {"item_id": "first", "kind": "instruction", "kind_label": "AI 指令", "purposes": ["theory_derivation"], "purpose_labels": ["理论与公式推导"], "review_state": "reviewed", "title": "First", "summary": "First summary", "path": "workbench/local/first.md", "content_sha256": hashlib.sha256(first.read_bytes()).hexdigest(), "tags": ["physics"], "reference": "", "status": "active", "origin": "local", "origin_label": "本地创建"},
+            {"item_id": "second", "kind": "instruction", "kind_label": "AI 指令", "purposes": [], "purpose_labels": [], "review_state": "reviewed", "title": "Second", "summary": "Second summary", "path": "workbench/local/second.md", "content_sha256": hashlib.sha256(second.read_bytes()).hexdigest(), "tags": [], "reference": "", "status": "active", "origin": "local", "origin_label": "本地创建"},
+        ]
+        provider = FakeProvider(self.root)
+        with patch.object(provider, "load", return_value=source):
+            bridge = WebDashboardBridge(provider)
+            copied = bridge.copy_workbench_items(["first"])
+        self.assertTrue(copied["ok"])
+        self.assertIn("Selected content", copied["data"]["text"])
+        self.assertIn("主类型：AI 指令", copied["data"]["text"])
+        self.assertIn("科研用途：理论与公式推导", copied["data"]["text"])
+        self.assertNotIn("Unselected content", copied["data"]["text"])
 
 
 class WebDashboardIntegrationTests(unittest.TestCase):
@@ -320,6 +356,15 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertNotIn("https://", html)
         self.assertIn("prefers-color-scheme", script)
         self.assertIn("location.hash.slice(1)", script)
+        self.assertIn("copy_workbench_items", script)
+        self.assertIn("data-workbench-kind", script)
+        self.assertIn("data-workbench-purpose", script)
+        self.assertIn("workbench-kind-sidebar", script)
+        self.assertIn("workbench-kind-select", script)
+        self.assertIn("workbench-purpose-menu", script)
+        self.assertIn("clear-workbench-purposes", script)
+        self.assertNotIn("purpose-chips", script)
+        self.assertNotIn("复制全部登记资料上下文", script)
         self.assertIn('data-theme=light', styles)
         build_script = (Path(__file__).resolve().parents[3] / "scripts/build_windows_exe.py").read_text(encoding="utf-8")
         windows_entry = (Path(__file__).resolve().parents[3] / "project_hooks/ui/windows/main.py").read_text(encoding="utf-8")
@@ -340,6 +385,7 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('disclosure("diagnostics"', script)
         self.assertIn("draftQuery", script)
         self.assertIn("committedQuery", script)
+        self.assertIn('["status","处置状态"]', script)
         self.assertIn("selectedKind", script)
         self.assertIn("compositionstart", script)
         self.assertIn("changed_sections", script)
