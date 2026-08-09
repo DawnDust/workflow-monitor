@@ -86,10 +86,27 @@ from ...application.action_service import ActionProgress, WorkflowActionService,
 from ...composition import build_action_service
 from ...application.workbench_service import (
     EXTERNAL_TOOL_KINDS,
+    KIND_LABELS,
+    ORIGIN_LABELS,
+    PURPOSE_LABELS,
     WorkbenchError,
     external_tools_from_events,
+    legacy_item_type_taxonomy,
     normalize_external_tool,
+    normalize_workbench_item,
+    sha256_file,
+    validate_item_id,
     validate_tool_id,
+    workbench_consistency_errors,
+    workbench_items_from_events,
+)
+from ...infrastructure.system.workbench_packages import (
+    WORKBENCH_LOCAL,
+    export_package,
+    import_package,
+    inspect_package_for_project,
+    remove_imported_package,
+    workbench_package_consistency_errors,
 )
 from ...core.branches import classify_branch as classify_branch_with_policy
 
@@ -243,6 +260,10 @@ def command_is_read_only(args: argparse.Namespace) -> bool:
         return True
     if args.command == "workbench" and args.workbench_command == "external":
         return args.external_command in {"list", "show"}
+    if args.command == "workbench" and args.workbench_command == "item":
+        return args.item_command in {"list", "show"}
+    if args.command == "workbench" and args.workbench_command == "package":
+        return args.package_command == "inspect"
     return False
 
 
@@ -408,6 +429,9 @@ def check_repository(
                 INSTALLATION_PATH.as_posix(), f"{TRACKED_HOOKS_DIR}/pre-commit"]:
         if not (ROOT / rel).is_file():
             errors.append(f"缺少维护文件: {rel}")
+    for rel in ("workbench/local", "workbench/imported"):
+        if not (ROOT / rel).is_dir():
+            errors.append(f"缺少工作台目录: {rel}")
     for rel in ("maintenance/current_task.md", "maintenance/change_archive.md", "maintenance/decision_log.md", "maintenance/exploration_log.md"):
         if (ROOT / rel).exists():
             errors.append(f"旧动态维护文件仍存在: {rel}")
@@ -424,6 +448,9 @@ def check_repository(
             errors.append(f"SQLite integrity_check: {integrity}")
         if include_catalog_consistency:
             errors.extend(catalog_consistency_errors(ROOT, catalog_items))
+        events = load_events(journal_path())
+        errors.extend(workbench_consistency_errors(ROOT, workbench_items_from_events(events)))
+        errors.extend(workbench_package_consistency_errors(ROOT, events))
     except (WorkflowError, DatabaseError) as exc:
         errors.append(f"维护数据库检查失败: {exc}")
     finally:
@@ -762,6 +789,12 @@ def start_task(args: argparse.Namespace) -> dict:
             "base_commit": base_head, "goal": args.scope, "acceptance": args.acceptance,
             "stage_id": linked_stage["stage_id"] if linked_stage else None,
         }))
+    elif classification["kind"] == "exploration":
+        attempt = get_attempt(branch)
+        if attempt and attempt["state"] != "active":
+            events.append(emit("attempt.state_changed", branch=branch, task_id=args.task_id, payload={
+                "attempt_id": attempt["attempt_id"], "state": "active",
+            }))
     try:
         save_active(record, phase="starting")
         persist(events)
@@ -1148,6 +1181,7 @@ def finish_task(args: argparse.Namespace) -> dict:
         }))
         if args.attempt_state == "validated":
             events.append(emit("exploration.recorded", branch=branch, task_id=args.task_id, payload={
+                "exploration_id": branch,
                 "branch": branch, "goal": attempt["goal"], "result": "validated",
                 "evidence": "; ".join(attempt["evidence"]), "disposition_ref": "pending PR",
             }))
@@ -1433,7 +1467,8 @@ def exploration_import(args: argparse.Namespace) -> dict:
     start, state = starts[-1], states[-1]
     updates = [event for event in branch_events if event["event_type"] == "attempt.updated" and event["payload"].get("attempt_id") == start["payload"]["attempt_id"]]
     evidence = [item for event in updates for item in event["payload"].get("evidence", [])]
-    payload = {"branch": args.archive_branch, "goal": start["payload"]["goal"], "result": state["payload"]["state"],
+    payload = {"exploration_id": start["branch"], "branch": args.archive_branch,
+               "goal": start["payload"]["goal"], "result": state["payload"]["state"],
                "evidence": "; ".join(evidence), "disposition_ref": args.archive_branch}
     persist([emit("exploration.recorded", branch="main", task_id=record["task_id"], payload=payload)])
     return payload
@@ -1663,6 +1698,10 @@ def external_tools() -> list[dict]:
     return external_tools_from_events(load_events(journal_path()))
 
 
+def workbench_items() -> list[dict]:
+    return workbench_items_from_events(load_events(journal_path()))
+
+
 def _external_tool_text(items: list[dict]) -> str:
     lines = ["# 外置工作台工具", ""]
     if not items:
@@ -1674,58 +1713,217 @@ def _external_tool_text(items: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _workbench_item_text(items: list[dict]) -> str:
+    lines = ["# 科研工作台索引", ""]
+    if not items:
+        lines.append("尚未登记工作台条目。")
+    for item in items:
+        source = ORIGIN_LABELS.get(item.get("origin"), item.get("origin") or "未知")
+        package = f"｜{item.get('package_id')} {item.get('package_version')}" if item.get("package_id") else ""
+        purposes = "、".join(PURPOSE_LABELS[value] for value in item.get("purposes", [])) or "未指定用途"
+        review = "｜待复核" if item.get("review_state") == "needs_review" else ""
+        lines.append(
+            f"- `{item['item_id']}`｜{KIND_LABELS.get(item['kind'], item['kind'])}｜{purposes}"
+            f"｜{item['title']}｜{item['status']}｜{source}{package}{review}｜{item['summary']}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _package_text(package: dict) -> str:
+    lines = [
+        "# 工作台包预览", "",
+        f"- 包：`{package['package_id']}`",
+        f"- 名称：{package['name']}",
+        f"- 版本：{package['version']}",
+        f"- 包格式：v{package['schema_version']}（来源 v{package.get('source_schema_version', package['schema_version'])}）",
+        f"- 作者：{package['author']}",
+        f"- 说明：{package.get('description') or '未提供'}",
+        f"- 许可证：{package.get('license') or '未注明'}",
+        f"- 内容哈希：`{package['package_sha256']}`", "", "## 条目", "",
+    ]
+    if package.get("project_status"):
+        lines.insert(8, f"- 当前项目：{package['project_status']}｜目标 `{package.get('destination', '')}`")
+    actions = {item.get("item_id"): item.get("action") for item in package.get("item_actions") or []}
+    for item in package.get("items") or []:
+        original = item.get("original_item_id") or item.get("item_id")
+        action = f"｜{actions.get(original)}" if actions.get(original) else ""
+        purposes = "、".join(PURPOSE_LABELS[value] for value in item.get("purposes", [])) or "未指定用途"
+        lines.append(f"- `{original}`｜{KIND_LABELS.get(item['kind'], item['kind'])}｜{purposes}{action}｜{item['title']}｜{item['summary']}")
+    return "\n".join(lines) + "\n"
+
+
 def workbench_command(args: argparse.Namespace) -> dict | list[dict] | str:
-    if args.workbench_command != "external":
-        raise WorkflowError("未知工作台命令")
-    items = external_tools()
-    by_id = {item["tool_id"]: item for item in items}
-    command = args.external_command
-    if command == "list":
-        return items if args.format == "json" else _external_tool_text(items)
-    tool_id = validate_tool_id(args.tool_id)
-    current = by_id.get(tool_id)
-    if command == "show":
-        if current is None:
-            raise WorkflowError("没有找到该外置工具")
-        if args.format == "json":
-            return current
-        return _external_tool_text([current])
-    record, branch = stable_write_context()
-    if command == "add":
-        if current is not None:
-            raise WorkflowError("该外置工具已经存在；请使用 update")
-        payload = normalize_external_tool({
-            "tool_id": tool_id, "name": args.name, "kind": args.kind,
-            "purpose": args.purpose, "usage_hint": args.usage_hint,
-            "reference": args.reference, "status": "active",
-        })
-        event_type = "workbench.external_upserted"
-    elif command == "update":
-        if current is None:
-            raise WorkflowError("没有找到该外置工具；请先 add")
-        supplied = {
-            key: value for key, value in {
+    if args.workbench_command == "external":
+        items = external_tools()
+        by_id = {item["tool_id"]: item for item in items}
+        command = args.external_command
+        if command == "list":
+            return items if args.format == "json" else _external_tool_text(items)
+        tool_id = validate_tool_id(args.tool_id)
+        current = by_id.get(tool_id)
+        if command == "show":
+            if current is None:
+                raise WorkflowError("没有找到该外置工具")
+            return current if args.format == "json" else _external_tool_text([current])
+        record, branch = stable_write_context()
+        if command == "add":
+            if current is not None:
+                raise WorkflowError("该外置工具已经存在；请使用 update")
+            payload = normalize_external_tool({
+                "tool_id": tool_id, "name": args.name, "kind": args.kind,
+                "purpose": args.purpose, "usage_hint": args.usage_hint,
+                "reference": args.reference, "status": "active",
+            })
+            event_type = "workbench.external_upserted"
+        elif command == "update":
+            if current is None:
+                raise WorkflowError("没有找到该外置工具；请先 add")
+            supplied = {key: value for key, value in {
                 "tool_id": tool_id, "name": args.name, "kind": args.kind,
                 "purpose": args.purpose, "usage_hint": args.usage_hint,
                 "reference": args.reference,
-            }.items() if value is not None
-        }
-        if set(supplied) == {"tool_id"}:
-            raise WorkflowError("update 至少提供一个要修改的字段")
-        payload = normalize_external_tool(supplied, current=current)
-        event_type = "workbench.external_upserted"
-    else:
-        if current is None:
-            raise WorkflowError("没有找到该外置工具")
-        status = {"pause": "paused", "restore": "active", "retire": "retired"}[command]
+            }.items() if value is not None}
+            if set(supplied) == {"tool_id"}:
+                raise WorkflowError("update 至少提供一个要修改的字段")
+            payload = normalize_external_tool(supplied, current=current)
+            event_type = "workbench.external_upserted"
+        else:
+            if current is None:
+                raise WorkflowError("没有找到该外置工具")
+            payload = {"tool_id": tool_id, "status": {"pause": "paused", "restore": "active", "retire": "retired"}[command], "note": clean_text(args.note, "说明", 500) or ""}
+            event_type = "workbench.external_status_changed"
+        persist([emit(event_type, branch=branch, task_id=record["task_id"], payload=payload)])
+        return payload
+
+    if args.workbench_command == "item":
+        items = workbench_items()
+        by_id = {item["item_id"]: item for item in items}
+        command = args.item_command
+        if command == "list":
+            legacy_filter = legacy_item_type_taxonomy(args.legacy_item_type) if args.legacy_item_type else None
+            kind_filter = args.kind or (legacy_filter or {}).get("kind")
+            purpose_filters = set(args.purposes or (legacy_filter or {}).get("purposes") or [])
+            selected = [item for item in items if (
+                (not kind_filter or item["kind"] == kind_filter)
+                and (not purpose_filters or purpose_filters.intersection(item.get("purposes", [])))
+                and (not args.status or item["status"] == args.status)
+            )]
+            return selected if args.format == "json" else _workbench_item_text(selected)
+        item_id = validate_item_id(args.item_id)
+        current = by_id.get(item_id)
+        if command == "show":
+            if current is None:
+                raise WorkflowError("没有找到该工作台条目")
+            return current if args.format == "json" else _workbench_item_text([current])
+        record, branch = stable_write_context()
+        if command == "add":
+            if current is not None:
+                raise WorkflowError("该工作台条目已经存在；请使用 update")
+            relative = Path(str(args.path).replace("\\", "/"))
+            if not relative.as_posix().startswith(WORKBENCH_LOCAL.as_posix() + "/"):
+                raise WorkflowError("本地条目 Markdown 必须位于 workbench/local")
+            content = (ROOT / relative).resolve()
+            try:
+                content.relative_to((ROOT / WORKBENCH_LOCAL).resolve())
+            except ValueError as exc:
+                raise WorkflowError("本地条目 Markdown 路径越界") from exc
+            if not content.is_file():
+                raise WorkflowError("没有找到本地条目 Markdown")
+            if bool(args.kind) == bool(args.legacy_item_type):
+                raise WorkflowError("add 必须且只能提供 --kind；旧脚本可改用单独的 --type")
+            taxonomy = ({"kind": args.kind, "purposes": args.purposes or []}
+                        if args.kind else {**legacy_item_type_taxonomy(args.legacy_item_type), "source_schema_version": 2})
+            payload = normalize_workbench_item({
+                "item_id": item_id, **taxonomy, "title": args.title,
+                "summary": args.summary, "path": relative.as_posix(),
+                "content_sha256": sha256_file(content), "tags": args.tags or [],
+                "reference": args.reference, "status": "active", "origin": "local",
+            })
+            event_type = "workbench.entry_upserted"
+        elif command == "update":
+            if current is None:
+                raise WorkflowError("没有找到该工作台条目；请先 add")
+            if current.get("legacy_external"):
+                raise WorkflowError("旧版外置条目请使用 workbench external update")
+            imported_metadata_only = current.get("origin") == "imported"
+            if imported_metadata_only and any((args.title, args.summary, args.path, args.reference, args.refresh_content)):
+                raise WorkflowError("导入条目只允许复核主类型、科研用途、标签和复核状态；不能修改包内正文或来源")
+            if args.kind and args.legacy_item_type:
+                raise WorkflowError("update 不能同时提供 --kind 和弃用的 --type")
+            taxonomy = {}
+            if args.kind:
+                taxonomy["kind"] = args.kind
+            elif args.legacy_item_type:
+                taxonomy = {**legacy_item_type_taxonomy(args.legacy_item_type), "source_schema_version": 2}
+            supplied = {key: value for key, value in {
+                "item_id": item_id, **taxonomy, "purposes": args.purposes,
+                "title": args.title, "summary": args.summary, "path": args.path,
+                "tags": args.tags, "reference": args.reference,
+                "review_state": args.review_state, "review_note": args.review_note,
+            }.items() if value is not None}
+            if args.review_state == "reviewed" and args.review_note is None:
+                supplied["review_note"] = ""
+            if len(supplied) == 1 and not args.refresh_content:
+                raise WorkflowError("update 至少提供一个修改字段或 --refresh-content")
+            if not imported_metadata_only:
+                path_value = supplied.get("path") or current.get("path")
+                content = (ROOT / str(path_value)).resolve()
+                try:
+                    content.relative_to((ROOT / WORKBENCH_LOCAL).resolve())
+                except ValueError as exc:
+                    raise WorkflowError("本地条目 Markdown 路径越界") from exc
+                if not content.is_file():
+                    raise WorkflowError("没有找到本地条目 Markdown")
+                supplied["content_sha256"] = sha256_file(content)
+            payload = normalize_workbench_item(supplied, current=current)
+            event_type = "workbench.entry_upserted"
+        else:
+            if current is None:
+                raise WorkflowError("没有找到该工作台条目")
+            payload = {"item_id": item_id, "status": {"pause": "paused", "restore": "active", "retire": "retired"}[command], "note": clean_text(args.note, "说明", 500) or ""}
+            event_type = "workbench.entry_status_changed"
+        persist([emit(event_type, branch=branch, task_id=record["task_id"], payload=payload)])
+        return payload
+
+    if args.workbench_command == "package":
+        command = args.package_command
+        if command == "inspect":
+            package = inspect_package_for_project(ROOT, Path(args.archive))
+            current_ids = {item["item_id"] for item in workbench_items()}
+            package["item_actions"] = [{
+                "item_id": item["original_item_id"],
+                "action": "update" if item["item_id"] in current_ids else "add",
+            } for item in package["items"]]
+            return package if args.format == "json" else _package_text(package)
+        if command == "export":
+            by_id = {item["item_id"]: item for item in workbench_items()}
+            missing = [item_id for item_id in args.item_ids if item_id not in by_id]
+            if missing:
+                raise WorkflowError("没有找到工作台条目: " + ", ".join(missing))
+            return export_package(
+                ROOT, [by_id[item_id] for item_id in args.item_ids], package_id=args.package_id,
+                name=args.name, version=args.version, author=args.author,
+                description=args.description or "", license_name=args.license_name or "",
+            )
+        record, branch = stable_write_context()
+        result = import_package(ROOT, Path(args.archive))
+        if result["status"] == "unchanged":
+            return {key: value for key, value in result.items() if key != "items"}
         payload = {
-            "tool_id": tool_id,
-            "status": status,
-            "note": clean_text(args.note, "说明", 500) or "",
+            "package_id": result["package_id"], "name": result["name"],
+            "version": result["version"], "author": result["author"],
+            "source_schema_version": result.get("source_schema_version", 2),
+            "description": result.get("description", ""), "license": result.get("license", ""),
+            "package_sha256": result["package_sha256"], "destination": result["destination"],
+            "items": result["items"],
         }
-        event_type = "workbench.external_status_changed"
-    persist([emit(event_type, branch=branch, task_id=record["task_id"], payload=payload)])
-    return payload
+        try:
+            persist([emit("workbench.package_imported", branch=branch, task_id=record["task_id"], payload=payload)])
+        except Exception:
+            remove_imported_package(ROOT, result)
+            raise
+        return payload
+    raise WorkflowError("未知工作台命令")
 
 
 def _next_dashboard_task_id() -> str:

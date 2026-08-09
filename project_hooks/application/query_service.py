@@ -15,6 +15,7 @@ class WorkbenchQueryService:
         classifier: Callable[[str], dict],
         event_loader: Callable[[], list[dict]],
         external_tools_projector: Callable[[list[dict]], list[dict]],
+        workbench_items_projector: Callable[[list[dict]], list[dict]],
         diagnostics_loader: Callable[[], dict],
         branch: str | None = None,
     ):
@@ -22,6 +23,7 @@ class WorkbenchQueryService:
         self.classifier = classifier
         self.event_loader = event_loader
         self.external_tools_projector = external_tools_projector
+        self.workbench_items_projector = workbench_items_projector
         self.diagnostics_loader = diagnostics_loader
         self.branch = branch
 
@@ -30,6 +32,8 @@ class WorkbenchQueryService:
         snapshot["classification"] = self.classifier(snapshot["branch"])
         active = snapshot.get("context", {}).get("active_task")
         snapshot["active_task_warning"] = active_task_warning(active)
-        snapshot["external_tools"] = self.external_tools_projector(self.event_loader())
+        events = self.event_loader()
+        snapshot["external_tools"] = self.external_tools_projector(events)
+        snapshot["workbench_items"] = self.workbench_items_projector(events)
         snapshot["diagnostics"] = self.diagnostics_loader()
         return snapshot
