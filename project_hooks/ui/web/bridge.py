@@ -242,10 +242,13 @@ class WebDashboardBridge:
             return self._error("path is outside the project", code="invalid_path")
         if not rel.parts or rel.parts[0] != "resources":
             return self._error("catalog file is outside resources", code="invalid_path")
-        if not candidate.is_file():
-            return self._error("catalog file does not exist", code="missing_path")
+        if not candidate.is_file() and not candidate.is_dir():
+            return self._error("catalog path does not exist", code="missing_path")
         try:
-            reveal_file(candidate)
+            if candidate.is_dir():
+                open_directory(candidate)
+            else:
+                reveal_file(candidate)
             return self._ok({"item_id": item_id, "path": rel.as_posix()})
         except OSError as exc:
             return self._error(exc, code="open_failed")

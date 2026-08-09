@@ -1892,7 +1892,7 @@ def dashboard_execute_action(
         return exploration_import(_action_namespace(fields))
     catalog_defaults = {
         "id": None, "kind": None, "title": None, "summary": None, "path": None,
-        "source": None, "tag": None, "meta": None, "status": None,
+        "entrypoint": None, "source": None, "tag": None, "meta": None, "status": None,
         "clear_path": False, "clear_summary": False, "clear_source": False,
         "clear_tags": False, "clear_metadata": False, "note": None,
         "root": None, "dry_run": False, "name": None, "query": None,

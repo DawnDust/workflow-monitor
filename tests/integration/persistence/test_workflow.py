@@ -1014,6 +1014,99 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         )
         self.assertIn("与 --kind other 不一致", mismatch.stderr)
 
+    def test_simulation_directory_bundle_is_atomic_and_refreshes_digest(self) -> None:
+        task_id = "20260809_simulation_bundle_001"
+        self.start(task_id)
+        bundle = self.root / "resources/analysis/monte-carlo"
+        bundle.mkdir()
+        (bundle / "main.py").write_text("print('run')\n", encoding="utf-8")
+        (bundle / "model.py").write_text("VALUE = 1\n", encoding="utf-8")
+        cache = bundle / "__pycache__"
+        cache.mkdir()
+        (cache / "model.pyc").write_bytes(b"ignored")
+        (bundle / "scratch.tmp").write_bytes(b"ignored")
+
+        added = json.loads(self.hooks(
+            "catalog", "add", "--kind", "simulation", "--title", "Monte Carlo 主程序",
+            "--path", "resources/analysis/monte-carlo", "--entrypoint", "main.py",
+        ).stdout)
+        self.assertEqual(added["metadata"]["entry_type"], "bundle")
+        self.assertEqual(added["metadata"]["file_count"], 2)
+        self.assertEqual(added["metadata"]["entrypoint"], "main.py")
+        first_digest = added["metadata"]["tree_sha256"]
+        self.assertEqual(self.hooks("check", check=False).returncode, 0)
+
+        model = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl", lambda: "main",
+        )
+        analysis = next(
+            item for item in model.dashboard_snapshot()["resource_directories"]
+            if item["kind"] == "simulation"
+        )
+        self.assertEqual(analysis["logical_items"], 1)
+        self.assertEqual(analysis["indexed_items"], 1)
+        self.assertEqual(analysis["bundle_count"], 1)
+        self.assertEqual(analysis["contained_files"], 2)
+
+        (bundle / "model.py").write_text("VALUE = 2\n", encoding="utf-8")
+        changed = self.hooks("check", check=False)
+        self.assertNotEqual(changed.returncode, 0)
+        self.assertIn("模拟资料包内容已变化", changed.stderr)
+        refreshed = json.loads(self.hooks("catalog", "scan").stdout)
+        self.assertEqual(refreshed["scanned_files"], 2)
+        self.assertEqual(refreshed["scanned_items"], 1)
+        self.assertEqual(len(refreshed["changes"]), 1)
+        current = json.loads(self.hooks(
+            "catalog", "show", added["item_id"], "--format", "json",
+        ).stdout)["item"]
+        self.assertNotEqual(current["metadata"]["tree_sha256"], first_digest)
+        self.assertEqual(self.hooks("check", check=False).returncode, 0)
+
+        standalone = self.root / "resources/analysis/standalone.py"
+        standalone.write_text("print('standalone')\n", encoding="utf-8")
+        standalone_scan = json.loads(self.hooks("catalog", "scan").stdout)
+        self.assertEqual(len(standalone_scan["changes"]), 1)
+        simulations = json.loads(self.hooks(
+            "catalog", "list", "--kind", "simulation", "--format", "json",
+        ).stdout)
+        self.assertEqual(len(simulations), 2)
+        self.assertEqual(
+            {item["metadata"].get("entry_type", "file") for item in simulations},
+            {"bundle", "file"},
+        )
+        self.assertEqual(self.hooks("check", check=False).returncode, 0)
+
+        duplicate = self.hooks(
+            "catalog", "add", "--kind", "simulation", "--title", "重复文件",
+            "--path", "resources/analysis/monte-carlo/model.py", check=False,
+        )
+        self.assertIn("位于已登记模拟资料包内", duplicate.stderr)
+        nested = bundle / "nested"
+        nested.mkdir()
+        (nested / "run.py").write_text("pass\n", encoding="utf-8")
+        nested_result = self.hooks(
+            "catalog", "add", "--kind", "simulation", "--title", "嵌套资料包",
+            "--path", "resources/analysis/monte-carlo/nested", check=False,
+        )
+        self.assertIn("位于已登记模拟资料包内", nested_result.stderr)
+        invalid_entry = self.hooks(
+            "catalog", "update", added["item_id"], "--entrypoint", "missing.py",
+            check=False,
+        )
+        self.assertIn("入口文件不存在", invalid_entry.stderr)
+
+    def test_catalog_rejects_non_simulation_directory_bundle(self) -> None:
+        self.start("20260809_non_simulation_bundle_001")
+        directory = self.root / "resources/theory/theory-project"
+        directory.mkdir()
+        (directory / "README.md").write_text("# Theory\n", encoding="utf-8")
+        result = self.hooks(
+            "catalog", "add", "--kind", "theory", "--title", "Theory project",
+            "--path", "resources/theory/theory-project", check=False,
+        )
+        self.assertIn("只有 simulation 类型可以登记目录资料包", result.stderr)
+
     def test_catalog_migrate_layout_previews_preserves_ids_and_rejects_conflicts(self) -> None:
         task_id = "20260801_catalog_migrate_001"
         self.start(task_id)

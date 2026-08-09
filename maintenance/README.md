@@ -129,7 +129,7 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 
 双击或无参数运行 EXE 会直接启动随单文件打包的本地 WebView2 工作台。WebView2 Runtime 缺失或初始化失败时显示原因和官方安装地址后退出，不静默下载，也不回退旧界面。桥接只允许刷新、更新检查、软件交付刷新、诊断导出、报告 Bug、打开七个标准资料目录、定位已登记资料文件及复制资料上下文，不暴露任意命令、任意文件读取或业务写入。
 
-科研阶段以阶段序号为纵向主线，从新到旧概括阶段目标、完成工作、关联探索和登记资料。资料优先通过 `task_id` 对应的任务时间归属阶段，无法使用任务时按 `created_at` 回退；探索优先使用显式 `stage_id`，历史记录按 `created_at` 回退。无法归属的资料和探索保留在页面底部的独立折叠区。搜索页的类型按钮可在空关键词时直接浏览任务、探索、决策或资料，后台刷新不会替换正在进行的中文输入。
+科研阶段以阶段序号为纵向主线，从新到旧概括阶段目标、完成工作、关联探索和登记资料。资料优先通过 `task_id` 对应的任务时间归属阶段，无法使用任务时按 `created_at` 回退；探索优先使用显式 `stage_id`，历史记录按 `created_at` 回退。阶段前记录归最早阶段，阶段间记录归后一个阶段，最后阶段后的记录归最后阶段；只有缺少有效时间或项目没有阶段时才保留为未归属。搜索页的类型按钮可在空关键词时直接浏览任务、探索、决策或资料，后台刷新不会替换正在进行的中文输入。
 
 科研阶段中的资料只来自 catalog 登记，不扫描或推断未登记文件；证据矩阵仍只把已登记的 `supports`、`validates`、`contradicts` 作为证据。矩阵空白显示“未登记”，不推断为“没有证据”。
 
@@ -144,6 +144,7 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 .\workflow-monitor.exe catalog scan
 .\workflow-monitor.exe catalog ingest <文件> --kind literature
 .\workflow-monitor.exe catalog add --kind theory --title "理论名称" --summary "简短说明"
+.\workflow-monitor.exe catalog add --kind simulation --title "模拟名称" --path resources/analysis/my-simulation --entrypoint main.py
 .\workflow-monitor.exe catalog bulk-update --tag to-read --add-tag reviewed
 .\workflow-monitor.exe catalog link <source-id> supports <target-id>
 .\workflow-monitor.exe catalog list --kind literature
@@ -151,7 +152,7 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 .\workflow-monitor.exe catalog migrate-layout --dry-run
 ```
 
-默认扫描将 `resources/source/`、`data/`、`theory/`、`analysis/`、`outputs/`、`others/`、`reports/` 依次映射到七类资料。路径和资料类型必须匹配；扫描不会删除记录，文件消失时只标记为 `missing`。`check` 会拒绝缺失目录、错位条目和标准目录中的未索引文件。条目使用 `archive` 和 `restore` 软归档，关系使用 `link` 和 `unlink` 维护。
+默认扫描将 `resources/source/`、`data/`、`theory/`、`analysis/`、`outputs/`、`others/`、`reports/` 依次映射到七类资料。路径和资料类型必须匹配；扫描不会删除记录，文件消失时只标记为 `missing`。`simulation` 可将 `resources/analysis/` 下的目录登记为一个原子资料包，元数据保存入口、文件数、总大小和整体 SHA-256；扫描刷新摘要并跳过包内文件，`check` 拒绝内容漂移、嵌套资料包及包内文件重复登记。现有逐文件模拟记录保持兼容，不自动迁移。条目使用 `archive` 和 `restore` 软归档，关系使用 `link` 和 `unlink` 维护。
 
 `catalog ingest` 对标准目录内文件自动推断类型；项目外文件需要 `--kind`，并复制到对应标准目录。没有活动任务时命令自动包装一个小型生命周期，已有活动任务时只登记资料。旧项目使用 `catalog migrate-layout --dry-run` 预览根目录五类资料的迁移；实际迁移只允许在 main 的 stable 活动任务中执行，拒绝覆盖并保留资料 ID 与关系。`catalog bulk-update` 可按 ID、类型、状态、标签、关键词或关系筛选后统一补充标签、摘要和来源；批量更新全部资料必须显式使用 `--all`。
 
@@ -167,7 +168,7 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 - 动作状态分为 `available`、`needs_input`、`blocked` 和 `running`；Dashboard 不提供字段表单、执行、高风险确认或一键更新。
 - 用户只需在 AI 对话中描述任务；AI 自动读取项目规则并调用 CLI/结构化服务。放弃、迁移、数据库重建和软件更新在对话中取得确认。
 - 用户打开“高级查看”后才只读核对一次最近正式 Release，私有仓库可使用已登录的 `gh` 会话回退查询且不保存凭据；本地构建一致性与发布后软件修改随状态变化重新计算但不重复联网。“检查更新”按钮另行查询最新正式版本。诊断页按指纹展示问题、导出覆盖和清理回执，并集中提供脱敏 ZIP 导出与预填 GitHub Issue，不自动上传任何数据。
-- 概览以横向分割线显示项目、健康、当前阶段、当前总体状态、判决、断点、阻塞、下一步、代码交付、最近完成和科研资料摘要；当前阶段只显示阶段序号、标题和状态，不重复目标、资料或探索详情。
+- 概览以横向分割线显示项目、健康、当前阶段、当前总体状态、判决、断点、阻塞、下一步、代码交付和科研资料摘要；当前阶段只显示阶段序号、标题和状态，不重复目标、资料或探索详情。工作流页不重复展示最近完成任务。
 - 全局搜索框、搜索和清除按钮集中在“搜索”页；搜索覆盖科研资料、任务、阶段、决策、探索和事件索引，结果使用左侧列表、右侧完整详情的分栏布局。
 - 资料页是七个标准目录的导航与定位中心；选择目录后只显示该类索引，每页十条，打开文件夹与选择目录为独立操作，文字检索统一跳转到搜索页的资料类型。
 - 概览显示七类资料数量、缺失与归档数量和最近新增资料。
