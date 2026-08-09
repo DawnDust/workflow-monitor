@@ -12,7 +12,12 @@ from pathlib import Path
 
 from ..git.build_identity import build_identity
 from ..git import client as git_client
+from ...application.workbench_service import taxonomy_migration_items
 from .resource_layout import RESOURCE_DIRECTORIES, ensure_resource_directories
+from .workbench_packages import (
+    WORKBENCH_IMPORTED, WORKBENCH_LOCAL, ensure_workbench_directories,
+    migrate_installed_package_manifests,
+)
 from ..persistence.store import (
     SCHEMA_VERSION,
     append_events,
@@ -25,7 +30,7 @@ from ..persistence.store import (
 from ..persistence.database import integrity_check, latest_active_task_id
 
 
-TEMPLATE_VERSION = 3
+TEMPLATE_VERSION = 5
 INSTALLATION_PATH = Path(".codex/project-maintenance-installation.json")
 CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
 AGENTS_BEGIN = "<!-- project-maintenance-hooks:begin -->"
@@ -53,15 +58,16 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - 每次任务先运行 `.\\workflow-monitor.exe context --format markdown`，按 `core_read_order` 阅读规范，首次写入前运行 `start`。
 - 用户只需用自然语言描述任务；AI 提取目标、验收和证据，任务 ID、时间、分支、状态令牌和安全默认值由工作流代码处理。
 - 稳定维护只在 `main` 使用 `--track stable`；研究和实验使用独立探索分支；无法可靠判断轨道时必须在对话中询问用户。
+- 一个探索分支只对应一条探索记录；同一分支的后续任务复用该记录，任务回执和 Git 提交仅作为探索内部的过程证据。
 - 使用 `state update`、`decision add` 和 `attempt update` 保存进展，最后必须运行 `end`。
 - 项目资料和大阶段只通过 `project update` 与 `stage` 指令记录；探索进度使用 `attempt update` 的结构化步骤字段。
 - 科研资料文件只放在 `resources/` 的七个标准子目录，并通过 `catalog` 指令登记；`check` 必须保持通过。
-- 外置软件、Skill 和仓库提醒通过 `workbench external` 结构化登记；不得保存凭据或绝对路径，也不得仅因登记而自动启动或联网检查工具。
+- 科研辅助内容通过 `workbench item/package` 建立项目内索引；既有外置软件提醒继续兼容 `workbench external`。工作台不保存凭据或绝对路径，不自动执行、安装、启动、联网检查或加入日常 context。
 - 只有 `validated` 尝试可准备 Squash PR；推送和合并必须由用户明确确认。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态或绕过 `end`。
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
 - 遇到故障时使用 `diagnostics status/export` 生成脱敏本地诊断；程序不自动上传数据。
-- Dashboard 只读展示任务、阶段、动作可用性和阻塞原因；搜索集中在搜索页，诊断页展示故障与导出覆盖，解释页说明中英文状态；工作台区分内置提示词和外置工具。生命周期与外置工具写入由 AI 调用结构化服务，高风险动作必须在对话中取得用户确认。
+- Dashboard 只读展示任务、阶段、动作可用性和阻塞原因；搜索集中在搜索页，诊断页展示故障与导出覆盖，解释页说明中英文状态；工作台只展示用户创建或外部导入的科研能力索引，用户明确选择后才复制给 AI。生命周期与工作台索引写入由 AI 调用结构化服务，高风险动作必须在对话中取得用户确认。
 <!-- project-maintenance-hooks:end -->"""
 
 GITIGNORE_BLOCK = """# project-maintenance-hooks:begin
@@ -76,6 +82,7 @@ build/
 dist/
 /workflow-monitor.exe
 /diagnostics-export/
+/workbench/exports/
 # project-maintenance-hooks:end"""
 
 GITATTRIBUTES_BLOCK = """# project-maintenance-hooks:begin
@@ -85,6 +92,8 @@ GITATTRIBUTES_BLOCK = """# project-maintenance-hooks:begin
 AGENTS.md text eol=lf
 maintenance/*.md text eol=lf
 maintenance/events.jsonl text eol=lf merge=union
+workbench/**/*.md text eol=lf
+workbench/**/manifest.json text eol=lf
 # project-maintenance-hooks:end"""
 
 MAINTENANCE_README = """# 项目维护规范
@@ -107,11 +116,11 @@ MAINTENANCE_README = """# 项目维护规范
 当前阶段，并通过 `attempt update --current-step ... --progress ... --next-step ...` 保存进度。
 Dashboard 是只读观察台：“工作流”页合并当前任务、当前阶段、探索、动作可用性和历史记录，
 顶部近实时显示当前周期、文件变化、进度、写锁和阻塞原因。用户只需在 AI 对话中描述任务，
-AI 按受管理规则调用结构化服务；搜索集中在搜索页，诊断页显示故障、导出覆盖和清理回执，解释页说明中英文状态；工作台按内置与外置折叠展示。Dashboard 不执行业务写入、push、创建 PR、合并或发布。
+AI 按受管理规则调用结构化服务；搜索集中在搜索页，诊断页显示故障、导出覆盖和清理回执，解释页说明中英文状态；工作台只读展示本地创建和外部导入的科研能力索引。Dashboard 不执行业务写入、push、创建 PR、合并或发布。
 
 稳定维护只在 `main` 使用 `--track stable`。新理论、算法、实验和不确定改动使用
 `--track research|experiment|sandbox --topic <slug>`。只有 `validated` 尝试可以准备
-Squash PR，合并必须等待用户明确确认。
+Squash PR，合并必须等待用户明确确认。分支名是稳定的探索身份；同一探索分支内可以有多个任务和提交，但只投影为一条探索记录。
 
 ## 项目目录
 
@@ -124,6 +133,8 @@ Squash PR，合并必须等待用户明确确认。
 | `resources/outputs/` | 图表、模型和其他成果 |
 | `resources/others/` | 暂时无法可靠分类的资料 |
 | `resources/reports/` | 面向外部受众的项目总结与报告 |
+| `workbench/local/` | 用户创建的科研辅助 Markdown |
+| `workbench/imported/` | 从其他项目导入的工作台包 |
 
 原始资料不覆盖；过程与成果分开。Markdown 文件中的公式使用 Markdown/LaTeX 语法。
 `catalog scan` 固定扫描以上七个目录；`add`、`update` 和 `ingest` 拒绝目录与资料类型不一致。
@@ -141,9 +152,9 @@ Dashboard 只读显示诊断状态，并对不可执行动作提前显示稳定�
 
 诊断导出保存不含绝对路径的本地回执，以便确认每个事件是否进入诊断包。参数错误、工作流前置条件和普通冲突只显示提示，不持久化为 Bug 诊断；内部异常、数据完整性和外部依赖故障保留待复查。用户可在诊断页确认解决后原子删除对应指纹，故障再次出现时会重新记录。
 
-## 工作台外置工具
+## 科研工作台索引
 
-外置工具通过 `.\\workflow-monitor.exe workbench external add/update/pause/restore/retire` 追加审计记录，列表与详情由 `list/show` 读取。记录只包含名称、类型、用途、使用提示、参考链接或产品标识和状态；不保存凭据与绝对路径，不自动检测安装、启动程序、执行脚本或联网验证。外置工具只在 Dashboard 工作台展示，不加入日常 `context`。
+工作台不提供内置科研内容。每个条目使用一个互斥主类型（工具、AI 指令、科研方法、科研流程、检查清单、参考资料或模板）、零到多个受控科研用途和自由标签；跨项目理论属于参考资料并使用 `theory` 标签，当前项目理论仍位于 `resources/theory/`。用户通过 `.\\workflow-monitor.exe workbench item` 登记项目内 Markdown，通过 `workbench package inspect/import/export` 预览、导入和复用声明式 ZIP 包。既有 `workbench external` 命令继续兼容。完整内容只在用户明确选中后复制给 AI，不进入日常 `context`，也不会被自动执行、安装、启动或联网验证。
 
 ## 崩溃恢复
 
@@ -196,6 +207,7 @@ def template_files() -> dict[str, str]:
         "maintenance/README.md": MAINTENANCE_README,
     }
     files.update({f"{item.relative_path}/.gitkeep": "\n" for item in RESOURCE_DIRECTORIES})
+    files.update({f"{relative.as_posix()}/.gitkeep": "\n" for relative in (WORKBENCH_LOCAL, WORKBENCH_IMPORTED)})
     return files
 
 
@@ -273,6 +285,7 @@ def initialize_project(root: Path, application_version: str) -> dict:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8", newline="\n")
     ensure_resource_directories(root)
+    ensure_workbench_directories(root)
     agents = root / "AGENTS.md"
     agents_text = agents.read_text(encoding="utf-8") if agents.is_file() else "# Agent 操作规范\n"
     agents.write_text(
@@ -405,6 +418,9 @@ def validate_project(root: Path) -> None:
     for item in RESOURCE_DIRECTORIES:
         if not (root / item.relative_path).is_dir():
             raise ProjectManagerError(f"升级后缺少资源目录: {item.relative_path}")
+    for relative in (WORKBENCH_LOCAL, WORKBENCH_IMPORTED, Path("workbench/exports")):
+        if not (root / relative).is_dir():
+            raise ProjectManagerError(f"升级后缺少工作台目录: {relative.as_posix()}")
     load_events(root / "maintenance/events.jsonl")
     configured = git(root, "config", "--local", "--get", "core.hooksPath").stdout.strip()
     if configured != ".githooks":
@@ -440,6 +456,7 @@ def apply_project_update(root: Path, target_version: str) -> dict:
     database = root / ".project_hooks/maintenance.sqlite3"
     paths = [root / CONFIG_PATH, install_path, root / "maintenance/events.jsonl",
              database, Path(str(database) + "-wal"), Path(str(database) + "-shm")]
+    paths.extend(sorted((root / WORKBENCH_IMPORTED).glob("*/*/manifest.json")))
     paths.extend(root / item for item in template_files())
     paths.extend((root / "AGENTS.md", root / ".gitignore", root / ".gitattributes"))
     backup, existed = _backup(paths, root)
@@ -447,6 +464,8 @@ def apply_project_update(root: Path, target_version: str) -> dict:
     conflicts: list[str] = []
     try:
         migrate_config(root)
+        ensure_workbench_directories(root)
+        changed.extend(migrate_installed_package_manifests(root))
         changed.append(CONFIG_PATH.as_posix())
         candidates = root / ".project_hooks/update-conflicts" / target_version
         for relative, content in template_files().items():
@@ -492,6 +511,16 @@ def apply_project_update(root: Path, target_version: str) -> dict:
         write_json(install_path, installation)
         ensure_resource_directories(root)
         journal = root / "maintenance/events.jsonl"
+        timezone = json.loads((root / CONFIG_PATH).read_text(encoding="utf-8")).get("timezone", "Asia/Shanghai")
+        migration_items = taxonomy_migration_items(load_events(journal))
+        if migration_items:
+            migration_event = new_event(
+                "workbench.taxonomy_migrated", branch="main", task_id=None,
+                payload={"from_schema_version": 1, "to_schema_version": 2, "items": migration_items},
+                timezone=timezone,
+            )
+            _preserving_append(journal, migration_event)
+            changed.append("maintenance/events.jsonl:workbench-taxonomy-v2")
         event = new_event(
             "workflow.upgraded",
             branch="main",
@@ -502,7 +531,7 @@ def apply_project_update(root: Path, target_version: str) -> dict:
                 "template_version": TEMPLATE_VERSION,
                 "conflicts": conflicts,
             },
-            timezone=json.loads((root / CONFIG_PATH).read_text(encoding="utf-8")).get("timezone", "Asia/Shanghai"),
+            timezone=timezone,
         )
         _preserving_append(journal, event)
         database = root / ".project_hooks/maintenance.sqlite3"

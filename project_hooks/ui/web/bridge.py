@@ -14,6 +14,7 @@ from typing import Callable
 
 from ... import DISPLAY_NAME, __version__
 from ...core.catalog import render_context_markdown
+from ...application.workbench_service import WorkbenchError, render_workbench_context
 from ...infrastructure.system.dashboard_actions import export_bundle, report_bug as open_dashboard_bug
 from ...infrastructure.system.diagnostics import diagnostics_status
 from ...infrastructure.system.external_navigation import open_directory, reveal_file
@@ -265,6 +266,21 @@ class WebDashboardBridge:
                      if not requested or relation.get("source_id") in requested
                      or relation.get("target_id") in requested]
         return self._ok({"text": render_context_markdown(items, relations)})
+
+    def copy_workbench_items(self, item_ids: list[str]) -> dict:
+        if (not isinstance(item_ids, list) or not item_ids
+                or any(not isinstance(value, str) for value in item_ids)):
+            return self._error("item_ids must be a non-empty string array", code="invalid_parameters")
+        snapshot = self._last_snapshot or web_snapshot(self.provider.load())
+        by_id = {item.get("item_id"): item for item in snapshot.get("workbench_items") or []}
+        missing = [item_id for item_id in item_ids if item_id not in by_id]
+        if missing:
+            return self._error("workbench item not found: " + ", ".join(missing), code="not_found")
+        try:
+            text = render_workbench_context(self.project_root, [by_id[item_id] for item_id in item_ids])
+        except (OSError, UnicodeError, WorkbenchError) as exc:
+            return self._error(exc, code="invalid_workbench_content")
+        return self._ok({"text": text, "items": len(item_ids)})
 
 
 def launch_web_dashboard(

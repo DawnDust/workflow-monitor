@@ -6,4 +6,6 @@ AGENTS.md text eol=lf
 maintenance/*.md text eol=lf
 *.py text eol=lf
 maintenance/events.jsonl text eol=lf merge=union
+workbench/**/*.md text eol=lf
+workbench/**/manifest.json text eol=lf
 # project-maintenance-hooks:end

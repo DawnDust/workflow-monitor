@@ -32,6 +32,8 @@
 .\workflow-monitor.exe diagnostics status
 .\workflow-monitor.exe diagnostics export
 .\workflow-monitor.exe workbench external list
+.\workflow-monitor.exe workbench item list
+.\workflow-monitor.exe workbench package inspect <包文件>
 ```
 
 双击无参数启动 Dashboard；在 PowerShell 中带参数运行时执行完整 CLI。`--help` 显示日常入口，`--help-all` 显示全部命令。
@@ -42,8 +44,22 @@ Dashboard 顶部近实时显示当前工作周期、文件变化、进度、写�
 概览使用分割线显示项目资料、当前阶段、当前总体状态、判决、断点、阻塞、下一步、代码交付和资料摘要；完整任务、阶段、探索及动作详情仍统一由“工作流”页展示。
 
 大型模拟程序可以将 `resources/analysis/` 下的整个目录登记为一个模拟资料包，例如 `catalog add --kind simulation --title "模拟名称" --path resources/analysis/my-simulation --entrypoint main.py`。资料包在工作台和阶段统计中只算一项，内部文件通过文件数、总大小和整体摘要校验，不需要逐个登记。
-“资料”页使用与工作流一致的两栏折叠树：先显示七个标准资源目录的文件/索引数量，展开目录后才加载资料索引，右侧显示只读详情。“工作台”分为内置提示词和外置工具两个折叠区；外置工具只是项目提醒，不会被自动检测、启动或联网验证，由 AI 通过 `workbench external` 结构化登记。
+“资料”页使用与工作流一致的两栏折叠树：先显示七个标准资源目录的文件/索引数量，展开目录后才加载资料索引，右侧显示只读详情。“工作台”不提供内置科研内容，使用互斥主类型和可多选科研用途索引用户创建或外部导入的科研辅助条目；条目不会自动执行、安装、联网验证或进入日常 context，用户明确选择后才复制给 Codex。
 全局搜索框位于“搜索”页，不占用所有页面的顶部空间；“解释”页用中英文说明工作流、任务、动作、阶段、探索、决策、资料和 Git/Release 状态的含义及安全下一步。
+
+## 科研工作台索引
+
+工作台不内置提示词、科研流程、验证方法或理论内容。每个条目只有一个主类型：`tool`、`instruction`、`method`、`workflow`、`checklist`、`reference` 或 `template`；科研用途通过可重复的 `--purpose` 登记，学科与主题继续使用自由标签。跨项目常用理论使用 `reference` 和 `theory` 标签，当前项目理论仍放在 `resources/theory/`。Dashboard 只显示分类、概览、状态和来源；只有明确勾选后才复制对应全文给 Codex。
+
+```powershell
+.\workflow-monitor.exe workbench item add limit-check --kind checklist --purpose validation --title "极限检查" --summary "检查已知极限" --path workbench/local/limit-check.md
+.\workflow-monitor.exe workbench item list
+.\workflow-monitor.exe workbench package inspect .\physics-methods.workbench.zip
+.\workflow-monitor.exe workbench package import .\physics-methods.workbench.zip
+.\workflow-monitor.exe workbench package export physics-methods --name "物理方法" --version 1.0.0 --author "作者" --item limit-check
+```
+
+导入包只允许 `manifest.json` 与 Markdown，展开到 `workbench/imported/<包>/<版本>/`；导出包保存到被 Git 忽略的 `workbench/exports/`。工作台不会执行包内流程、检测或启动外置软件、安装 Skill、联网更新或把内容自动加入日常 `context`。当前研究实际采用的软件和方法仍通过探索证据、决策和项目资料记录。
 
 ## 崩溃恢复与遗忘任务
 
