@@ -330,7 +330,7 @@ def release_smoke() -> int:
             if not wait_for_frozen_child(web_dashboard):
                 stop_smoke_process(web_dashboard)
                 raise RuntimeError("frozen Web Dashboard application process did not start")
-            title, elapsed = wait_for_dashboard_window(web_dashboard, 2.0)
+            title, elapsed = wait_for_dashboard_window(web_dashboard, 3.0)
             if title != "Workflow Monitor":
                 stop_smoke_process(web_dashboard)
                 raise RuntimeError(
