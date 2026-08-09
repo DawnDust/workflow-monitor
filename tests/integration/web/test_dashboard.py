@@ -118,8 +118,8 @@ class WebProjectionTests(unittest.TestCase):
         projection = research_stages(sample_snapshot())
         by_id = {row["stage_id"]: row for row in projection["items"]}
         self.assertEqual([item["item_id"] for item in by_id["stage-2"]["materials"]], ["t1"])
-        self.assertEqual([item["item_id"] for item in by_id["stage-1"]["materials"]], ["p1"])
-        self.assertEqual([item["item_id"] for item in projection["unassigned_materials"]], ["s1"])
+        self.assertEqual([item["item_id"] for item in by_id["stage-1"]["materials"]], ["p1", "s1"])
+        self.assertEqual(projection["unassigned_materials"], [])
 
     def test_research_stages_assign_attempts_explicitly_then_by_time(self) -> None:
         source = sample_snapshot()
@@ -128,7 +128,7 @@ class WebProjectionTests(unittest.TestCase):
              "branch":"research/historic", "stage_id":None, "created_at":"2026-01-10 00:00:00",
              "conclusion":"No effect", "progress":""},
             {"attempt_id":"orphan", "goal":"Orphan", "state":"paused", "track":"sandbox",
-             "branch":"sandbox/orphan", "stage_id":None, "created_at":"2025-01-10 00:00:00",
+             "branch":"sandbox/orphan", "stage_id":None, "created_at":None,
              "conclusion":"", "progress":"Waiting"},
         ]
         projection = research_stages(source)
@@ -138,6 +138,25 @@ class WebProjectionTests(unittest.TestCase):
         self.assertEqual(by_id["stage-1"]["explorations"][0]["track"], "research")
         self.assertEqual(projection["unassigned_explorations"][0]["attempt_id"], "orphan")
 
+    def test_research_stages_assign_gap_to_following_stage(self) -> None:
+        source = sample_snapshot()
+        source["context"]["stages"][1].update({
+            "status": "completed", "finished_at": "2026-02-10 00:00:00",
+        })
+        source["context"]["stages"].append({
+            "stage_id": "stage-3", "sequence": 3, "title": "Maintain", "status": "active",
+            "goal": "Maintain", "summary": "", "current_step": "Refine",
+            "started_at": "2026-03-01 00:00:00", "finished_at": None,
+        })
+        source["attempts"] = [{
+            "attempt_id": "gap", "goal": "Gap work", "state": "validated", "track": None,
+            "branch": "experiment/gap", "stage_id": None, "created_at": "2026-02-20 00:00:00",
+            "conclusion": "done", "progress": "",
+        }]
+        projection = research_stages(source)
+        stage3 = next(stage for stage in projection["items"] if stage["stage_id"] == "stage-3")
+        self.assertEqual(stage3["explorations"][0]["attempt_id"], "gap")
+
     def test_research_stages_choose_highest_sequence_for_overlapping_intervals(self) -> None:
         source = sample_snapshot()
         source["context"]["stages"][0]["finished_at"] = None
@@ -145,7 +164,7 @@ class WebProjectionTests(unittest.TestCase):
         projection = research_stages(source)
         by_id = {row["stage_id"]: row for row in projection["items"]}
         self.assertEqual([item["item_id"] for item in by_id["stage-2"]["materials"]], ["t1", "p1"])
-        self.assertEqual(by_id["stage-1"]["materials"], [])
+        self.assertEqual([item["item_id"] for item in by_id["stage-1"]["materials"]], ["s1"])
 
     def test_research_stages_without_active_stage_has_no_current(self) -> None:
         source = sample_snapshot()
@@ -154,6 +173,25 @@ class WebProjectionTests(unittest.TestCase):
         projection = research_stages(source)
         self.assertIsNone(projection["current"])
         self.assertFalse(any(stage["is_current"] for stage in projection["items"]))
+
+    def test_research_stages_assign_after_last_and_keep_no_stage_records_unassigned(self) -> None:
+        source = sample_snapshot()
+        source["context"]["stages"][1].update({
+            "status": "completed", "finished_at": "2026-02-10 00:00:00",
+        })
+        source["attempts"] = [{
+            "attempt_id": "late", "goal": "Late work", "state": "validated", "track": None,
+            "branch": "experiment/late", "stage_id": None, "created_at": "2026-04-01 00:00:00",
+            "conclusion": "done", "progress": "",
+        }]
+        projection = research_stages(source)
+        stage2 = next(stage for stage in projection["items"] if stage["stage_id"] == "stage-2")
+        self.assertEqual(stage2["explorations"][0]["attempt_id"], "late")
+
+        source["context"]["stages"] = []
+        without_stages = research_stages(source)
+        self.assertEqual(without_stages["unassigned_explorations"][0]["attempt_id"], "late")
+        self.assertEqual(len(without_stages["unassigned_materials"]), 3)
 
     def test_evidence_matrix_uses_only_registered_evidence(self) -> None:
         matrix = evidence_matrix(sample_snapshot())
@@ -225,6 +263,25 @@ class WebDashboardBridgeTests(unittest.TestCase):
             self.assertTrue(bridge.reveal_resource_file("t1")["ok"])
             self.assertEqual(runner.call_count, 2)
         self.assertEqual(bridge.reveal_resource_file("fake")["error"]["code"], "not_found")
+
+    def test_resource_reveal_opens_simulation_bundle_directory(self) -> None:
+        bundle = self.root / "resources" / "analysis" / "simulation-project"
+        bundle.mkdir(parents=True)
+        source = sample_snapshot()
+        source["catalog_items"].append({
+            "item_id": "bundle-1", "kind": "simulation", "kind_label": "模拟资料包",
+            "title": "Simulation project", "status": "active",
+            "path": "resources/analysis/simulation-project", "metadata": {"entry_type": "bundle"},
+        })
+        provider = FakeProvider(self.root)
+        with patch.object(provider, "load", return_value=source), patch(
+            "project_hooks.ui.web.bridge.open_directory"
+        ) as opener:
+            bridge = WebDashboardBridge(provider)
+            bridge.bootstrap()
+            result = bridge.reveal_resource_file("bundle-1")
+        self.assertTrue(result["ok"])
+        opener.assert_called_once_with(bundle)
 
     def test_diagnostic_export_rejects_path_components(self) -> None:
         bridge = WebDashboardBridge(FakeProvider(self.root))
@@ -307,6 +364,8 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn("x.work_summary", script)
         self.assertIn("x.material_count", script)
         self.assertIn("x.exploration_count", script)
+        self.assertNotIn('panel("最近完成"', script)
+        self.assertNotIn("最近完成：", script)
 
     @unittest.skipUnless(shutil.which("node"), "Node is a development-only optional test runtime")
     def test_frontend_state_helpers_without_browser(self) -> None:

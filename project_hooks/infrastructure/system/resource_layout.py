@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +45,7 @@ IGNORED_DIRECTORY_NAMES = {
 }
 IGNORED_FILE_NAMES = {".gitkeep", ".ds_store", "thumbs.db", "desktop.ini"}
 IGNORED_FILE_SUFFIXES = (".tmp", ".temp", ".swp", ".swo", ".part")
+BUNDLE_ENTRY_TYPE = "bundle"
 
 
 def ensure_resource_directories(root: Path) -> list[str]:
@@ -106,6 +108,66 @@ def files_under(root: Path, relative_directory: str) -> list[Path]:
     return sorted(result, key=lambda value: value.as_posix().casefold())
 
 
+def is_simulation_bundle(item: dict) -> bool:
+    return (
+        item.get("kind") == "simulation"
+        and (item.get("metadata") or {}).get("entry_type") == BUNDLE_ENTRY_TYPE
+        and bool(item.get("path"))
+    )
+
+
+def bundle_contains(bundle_path: str, candidate_path: str) -> bool:
+    bundle = Path(bundle_path)
+    candidate = Path(candidate_path)
+    try:
+        candidate.relative_to(bundle)
+    except ValueError:
+        return False
+    return candidate != bundle
+
+
+def simulation_bundle_metadata(directory: Path, entrypoint: str | None = None) -> dict:
+    if not directory.is_dir():
+        raise ValueError(f"模拟资料包目录不存在: {directory}")
+    normalized_entrypoint = None
+    if entrypoint:
+        entry = Path(entrypoint)
+        if entry.is_absolute() or entry == Path(".") or ".." in entry.parts:
+            raise ValueError("入口文件必须是资料包内的相对文件路径")
+        target = (directory / entry).resolve()
+        try:
+            normalized_entrypoint = target.relative_to(directory.resolve()).as_posix()
+        except ValueError as exc:
+            raise ValueError("入口文件必须位于模拟资料包内") from exc
+        if not target.is_file():
+            raise ValueError(f"模拟资料包入口文件不存在: {normalized_entrypoint}")
+
+    digest = hashlib.sha256()
+    total_bytes = 0
+    files = files_under(directory, ".")
+    for path in files:
+        relative = path.relative_to(directory).as_posix()
+        size = path.stat().st_size
+        total_bytes += size
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(size).encode("ascii"))
+        digest.update(b"\0")
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        digest.update(b"\0")
+    result = {
+        "entry_type": BUNDLE_ENTRY_TYPE,
+        "file_count": len(files),
+        "total_bytes": total_bytes,
+        "tree_sha256": digest.hexdigest(),
+    }
+    if normalized_entrypoint:
+        result["entrypoint"] = normalized_entrypoint
+    return result
+
+
 def resource_directory_snapshot(root: Path, items: list[dict]) -> list[dict]:
     indexed_by_path = {
         str(item.get("path") or "").casefold(): item for item in items if item.get("path")
@@ -114,8 +176,23 @@ def resource_directory_snapshot(root: Path, items: list[dict]) -> list[dict]:
     for resource in RESOURCE_DIRECTORIES:
         files = files_under(root, resource.relative_path)
         paths = [path.relative_to(root).as_posix() for path in files]
-        indexed = [indexed_by_path[path.casefold()] for path in paths if path.casefold() in indexed_by_path]
-        unindexed = [path for path in paths if path.casefold() not in indexed_by_path]
+        bundles = [
+            item for item in items
+            if item.get("status") != "archived" and is_simulation_bundle(item)
+            and resource_for_path(str(item.get("path"))) == resource
+        ]
+        covered = {
+            path for path in paths
+            if any(bundle_contains(str(bundle["path"]), path) for bundle in bundles)
+        }
+        indexed = [
+            indexed_by_path[path.casefold()] for path in paths
+            if path.casefold() in indexed_by_path
+        ]
+        unindexed = [
+            path for path in paths
+            if path.casefold() not in indexed_by_path and path not in covered
+        ]
         mismatched = [
             item["path"] for item in indexed
             if item.get("kind") != resource.kind or item.get("status") == "missing"
@@ -135,7 +212,14 @@ def resource_directory_snapshot(root: Path, items: list[dict]) -> list[dict]:
             "path": resource.relative_path,
             "exists": directory.is_dir(),
             "actual_files": len(paths),
-            "indexed_files": len(indexed),
+            "indexed_files": len(indexed) + len(covered),
+            "logical_items": len(paths) - len(covered) + len(bundles),
+            "indexed_items": sum(
+                item.get("kind") == resource.kind and item.get("status") != "archived"
+                for item in items
+            ),
+            "bundle_count": len(bundles),
+            "contained_files": len(covered),
             "unindexed_files": unindexed,
             "mismatched_files": mismatched,
             "status": status,
@@ -146,6 +230,14 @@ def resource_directory_snapshot(root: Path, items: list[dict]) -> list[dict]:
 def catalog_consistency_errors(root: Path, items: list[dict]) -> list[str]:
     errors: list[str] = []
     indexed_by_path: dict[str, dict] = {}
+    bundles = [item for item in items if item.get("status") != "archived" and is_simulation_bundle(item)]
+    for index, bundle in enumerate(bundles):
+        for other in bundles[index + 1:]:
+            if (bundle_contains(str(bundle["path"]), str(other["path"]))
+                    or bundle_contains(str(other["path"]), str(bundle["path"]))):
+                errors.append(
+                    f"模拟资料包不能嵌套: {bundle['path']} 与 {other['path']}"
+                )
     for item in items:
         relative = item.get("path")
         if not relative:
@@ -166,8 +258,39 @@ def catalog_consistency_errors(root: Path, items: list[dict]) -> list[str]:
                 f"资料类型与目录不一致: {item['item_id']} 为 {item.get('kind')}，"
                 f"但 {relative} 必须为 {resource.kind}"
             )
-        elif (root / relative).is_file() and item.get("status") == "missing":
-            errors.append(f"资料文件已恢复但索引仍为 missing: {relative}；请运行 catalog scan")
+        else:
+            target = root / relative
+            if target.is_dir():
+                if not is_simulation_bundle(item):
+                    errors.append(f"只有 simulation 资料包可以登记目录路径: {relative}")
+                elif item.get("status") == "missing":
+                    errors.append(f"模拟资料包已恢复但索引仍为 missing: {relative}；请运行 catalog scan")
+                else:
+                    try:
+                        current = simulation_bundle_metadata(
+                            target, (item.get("metadata") or {}).get("entrypoint"),
+                        )
+                    except ValueError as exc:
+                        errors.append(str(exc))
+                    else:
+                        stored = item.get("metadata") or {}
+                        if any(stored.get(key) != value for key, value in current.items()):
+                            errors.append(f"模拟资料包内容已变化: {relative}；请运行 catalog scan")
+            elif target.is_file() and item.get("status") == "missing":
+                errors.append(f"资料文件已恢复但索引仍为 missing: {relative}；请运行 catalog scan")
+            elif not target.exists() and item.get("status") not in {"missing", "archived"}:
+                label = "模拟资料包" if is_simulation_bundle(item) else "资料文件"
+                errors.append(f"{label}不存在: {relative}；请运行 catalog scan")
+
+        if item.get("status") != "archived" and not is_simulation_bundle(item):
+            containing = next(
+                (bundle for bundle in bundles if bundle_contains(str(bundle["path"]), str(relative))),
+                None,
+            )
+            if containing is not None:
+                errors.append(
+                    f"模拟资料包内文件不得重复登记: {relative}（资料包 {containing['path']}）"
+                )
 
     for resource in RESOURCE_DIRECTORIES:
         directory = root / resource.relative_path
@@ -178,7 +301,8 @@ def catalog_consistency_errors(root: Path, items: list[dict]) -> list[str]:
             continue
         for path in files_under(root, resource.relative_path):
             relative = path.relative_to(root).as_posix()
-            if relative.casefold() not in indexed_by_path:
+            covered = any(bundle_contains(str(bundle["path"]), relative) for bundle in bundles)
+            if relative.casefold() not in indexed_by_path and not covered:
                 errors.append(f"标准资源目录存在未索引文件: {relative}；请运行 catalog scan")
 
     legacy_files: list[str] = []

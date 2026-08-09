@@ -60,12 +60,22 @@ def _stage_for_time(stages: list[dict], occurred_at: object) -> dict | None:
     timestamp = str(occurred_at or "")
     if not timestamp:
         return None
+    # The input is newest-first, so overlapping intervals resolve to the
+    # highest sequence.  Gaps are owned by the next stage, making the stage
+    # sequence a continuous historical partition without rewriting events.
     for stage in stages:
         started_at = str(stage.get("started_at") or "")
         finished_at = str(stage.get("finished_at") or "")
         if started_at and started_at <= timestamp and (not finished_at or timestamp <= finished_at):
             return stage
-    return None
+    chronological = sorted(
+        (stage for stage in stages if stage.get("started_at")),
+        key=lambda stage: (str(stage.get("started_at")), int(stage.get("sequence") or 0)),
+    )
+    for stage in chronological:
+        if timestamp < str(stage.get("started_at")):
+            return stage
+    return chronological[-1] if chronological else None
 
 
 def research_stages(snapshot: dict) -> dict:
@@ -92,6 +102,7 @@ def research_stages(snapshot: dict) -> dict:
 
     unassigned_materials = []
     for item in snapshot.get("catalog_items") or []:
+        metadata = item.get("metadata") or {}
         material = {
             "item_id": item.get("item_id"),
             "kind": item.get("kind"),
@@ -101,6 +112,10 @@ def research_stages(snapshot: dict) -> dict:
             "path": item.get("path"),
             "task_id": item.get("task_id"),
             "created_at": item.get("created_at"),
+            "is_bundle": metadata.get("entry_type") == "bundle",
+            "file_count": metadata.get("file_count"),
+            "total_bytes": metadata.get("total_bytes"),
+            "entrypoint": metadata.get("entrypoint"),
         }
         stage = task_stages.get(str(item.get("task_id") or ""))
         if stage is None:

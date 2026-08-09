@@ -25,6 +25,8 @@ def decode_item(row: dict) -> dict:
         value = item.pop(source, fallback)
         item[target] = json.loads(value) if isinstance(value, str) else value
     item["kind_label"] = CATALOG_KIND_LABELS.get(item.get("kind"), item.get("kind", ""))
+    if item.get("kind") == "simulation" and item["metadata"].get("entry_type") == "bundle":
+        item["kind_label"] = "模拟资料包"
     return item
 
 

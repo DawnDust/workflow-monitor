@@ -20,10 +20,13 @@ from ...infrastructure.system.resource_layout import (
     RESOURCE_DIRECTORIES,
     RESOURCE_KINDS,
     RESOURCE_KIND_LABELS,
+    bundle_contains,
     files_under,
+    is_simulation_bundle,
     is_indexable_resource_file,
     legacy_resource_for_path,
     resource_for_path,
+    simulation_bundle_metadata,
 )
 from ...core.catalog import (
     CATALOG_KIND_LABELS,
@@ -169,6 +172,49 @@ def file_metadata(path: Path) -> dict[str, str | int]:
     }
 
 
+def _existing_catalog_path(root: Path, value: str) -> tuple[str, Path]:
+    relative = normalize_project_path(root, value)
+    absolute = (root / relative).resolve()
+    if not absolute.is_file() and not absolute.is_dir():
+        raise CatalogError(f"资料路径不存在: {relative}")
+    return relative, absolute
+
+
+def _validate_catalog_path_overlap(
+    items: list[dict], path: str, *, bundle: bool, exclude_id: str | None = None,
+) -> None:
+    for item in items:
+        if item.get("item_id") == exclude_id or item.get("status") == "archived" or not item.get("path"):
+            continue
+        current_path = str(item["path"])
+        if current_path.casefold() == path.casefold():
+            raise CatalogError(f"资料路径已经登记: {path}")
+        if is_simulation_bundle(item) and bundle_contains(current_path, path):
+            raise CatalogError(f"资料路径位于已登记模拟资料包内: {current_path}")
+        if bundle and bundle_contains(path, current_path):
+            raise CatalogError(f"模拟资料包内已有独立资料条目: {current_path}")
+
+
+def _bundle_metadata(directory: Path, metadata: dict, entrypoint: str | None) -> dict:
+    selected_entrypoint = entrypoint if entrypoint is not None else metadata.get("entrypoint")
+    try:
+        summary = simulation_bundle_metadata(directory, selected_entrypoint)
+    except ValueError as exc:
+        raise CatalogError(str(exc)) from exc
+    result = dict(metadata)
+    for key in ("entry_type", "file_count", "total_bytes", "tree_sha256", "entrypoint"):
+        result.pop(key, None)
+    result.update(summary)
+    return result
+
+
+def _without_bundle_metadata(metadata: dict) -> dict:
+    result = dict(metadata)
+    for key in ("entry_type", "file_count", "total_bytes", "tree_sha256", "entrypoint"):
+        result.pop(key, None)
+    return result
+
+
 def catalog_item(connection: ProjectDatabase, item_id: str) -> dict:
     row = connection.catalog_item(item_id)
     if row is None:
@@ -239,7 +285,10 @@ def render_catalog_list(items: list[dict]) -> str:
 
 def add_item(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     record, branch = runtime.write_context()
-    item_path = normalize_project_path(runtime.root, args.path, require_file=True) if args.path else None
+    item_path = None
+    absolute_path = None
+    if args.path:
+        item_path, absolute_path = _existing_catalog_path(runtime.root, args.path)
     if item_path:
         validate_resource_path(item_path, args.kind)
     item_id = validate_identifier(args.id) if args.id else generated_item_id(args.kind, item_path)
@@ -247,10 +296,19 @@ def add_item(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     try:
         if connection.catalog_item_exists(item_id):
             raise CatalogError(f"科研资料条目已存在: {item_id}")
-        if item_path and connection.catalog_path_exists(item_path):
-            raise CatalogError(f"资料路径已经登记: {item_path}")
+        existing_items = [decode_item(row) for row in connection.catalog_items()]
+        if item_path:
+            is_bundle = bool(absolute_path and absolute_path.is_dir())
+            if is_bundle and args.kind != "simulation":
+                raise CatalogError("只有 simulation 类型可以登记目录资料包")
+            if args.entrypoint and not is_bundle:
+                raise CatalogError("--entrypoint 只能用于模拟目录资料包")
+            _validate_catalog_path_overlap(existing_items, item_path, bundle=is_bundle)
     finally:
         connection.close()
+    metadata = parse_metadata(args.meta)
+    if absolute_path is not None and absolute_path.is_dir():
+        metadata = _bundle_metadata(absolute_path, metadata, args.entrypoint)
     payload = {
         "item_id": item_id,
         "kind": args.kind,
@@ -260,7 +318,7 @@ def add_item(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         "status": "active",
         "tags": parse_tags(args.tag),
         "source": args.source or "",
-        "metadata": parse_metadata(args.meta),
+        "metadata": metadata,
         "created_at": runtime.timestamp(),
     }
     if not payload["title"]:
@@ -277,11 +335,9 @@ def update_item(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     try:
         item = catalog_item(connection, validate_identifier(args.item_id))
         if args.path is not None:
-            new_path = normalize_project_path(runtime.root, args.path, require_file=True)
-            conflict = connection.conflicting_catalog_path(new_path, item["item_id"])
-            if conflict:
-                raise CatalogError(f"资料路径已经登记: {new_path}")
+            new_path, _absolute = _existing_catalog_path(runtime.root, args.path)
             item["path"] = new_path
+        existing_items = [decode_item(row) for row in connection.catalog_items()]
         if args.clear_path:
             item["path"] = None
     finally:
@@ -289,7 +345,7 @@ def update_item(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     changed_fields = any(
         value is not None for value in (
             args.kind, args.title, args.summary, args.status, args.source, args.path,
-            args.tag, args.meta,
+            args.tag, args.meta, args.entrypoint,
         )
     ) or args.clear_path or args.clear_summary or args.clear_source or args.clear_tags or args.clear_metadata
     if not changed_fields:
@@ -298,6 +354,15 @@ def update_item(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         item["kind"] = args.kind
     if item.get("path"):
         validate_resource_path(item["path"], item["kind"])
+        absolute_path = (runtime.root / item["path"]).resolve()
+        is_bundle = absolute_path.is_dir()
+        if is_bundle and item["kind"] != "simulation":
+            raise CatalogError("只有 simulation 类型可以登记目录资料包")
+        if args.entrypoint and not is_bundle:
+            raise CatalogError("--entrypoint 只能用于模拟目录资料包")
+        _validate_catalog_path_overlap(
+            existing_items, item["path"], bundle=is_bundle, exclude_id=item["item_id"],
+        )
     if args.title is not None:
         if not args.title.strip():
             raise CatalogError("标题不能为空")
@@ -320,6 +385,12 @@ def update_item(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         item["metadata"] = parse_metadata(args.meta)
     if args.clear_metadata:
         item["metadata"] = {}
+    if item.get("path") and (runtime.root / item["path"]).is_dir():
+        item["metadata"] = _bundle_metadata(
+            runtime.root / item["path"], item.get("metadata", {}), args.entrypoint,
+        )
+    else:
+        item["metadata"] = _without_bundle_metadata(item.get("metadata", {}))
     payload = catalog_item_payload(item)
     runtime.persist([runtime.emit(
         "catalog.item_upserted", branch=branch, task_id=record["task_id"], payload=payload
@@ -421,6 +492,11 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         connection.close()
     discovered: dict[str, tuple[Path, str]] = {}
     scanned_prefixes: list[str] = []
+    physical_file_count = 0
+    bundle_items = [
+        item for item in existing.values()
+        if is_simulation_bundle(item) and item.get("status") != "archived"
+    ]
     for scan_root, kind in roots:
         if not scan_root.exists():
             continue
@@ -432,9 +508,41 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
                 except ValueError:
                     continue
                 relative = path.relative_to(runtime.root).as_posix()
+                physical_file_count += 1
+                if any(bundle_contains(str(item["path"]), relative) for item in bundle_items):
+                    continue
                 discovered[relative] = (path, kind)
     actions: list[dict] = []
     events: list[dict] = []
+    for item in bundle_items:
+        relative = str(item["path"])
+        in_scope = any(
+            relative == prefix.rstrip("/") or relative.startswith(prefix)
+            for prefix in scanned_prefixes
+        )
+        if not in_scope:
+            continue
+        directory = runtime.root / relative
+        if directory.is_dir():
+            refreshed = dict(item)
+            refreshed["metadata"] = _bundle_metadata(
+                directory, item.get("metadata", {}), None,
+            )
+            if refreshed["metadata"] != item.get("metadata") or item.get("status") == "missing":
+                refreshed["status"] = "active"
+                actions.append({"action": "update", "item_id": item["item_id"], "path": relative})
+                events.append(runtime.emit(
+                    "catalog.item_upserted", branch=branch, task_id=record["task_id"],
+                    payload=catalog_item_payload(refreshed),
+                ))
+        elif item.get("status") != "missing":
+            missing = dict(item)
+            missing["status"] = "missing"
+            actions.append({"action": "missing", "item_id": item["item_id"], "path": relative})
+            events.append(runtime.emit(
+                "catalog.item_upserted", branch=branch, task_id=record["task_id"],
+                payload=catalog_item_payload(missing),
+            ))
     for relative, (path, kind) in sorted(discovered.items()):
         current = existing.get(relative)
         metadata = dict(current.get("metadata", {})) if current else {}
@@ -466,6 +574,8 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         ))
     discovered_paths = set(discovered)
     for relative, item in existing.items():
+        if is_simulation_bundle(item):
+            continue
         in_scope = any(relative.startswith(prefix) for prefix in scanned_prefixes)
         if in_scope and relative not in discovered_paths and item.get("status") not in {"missing", "archived"}:
             item["status"] = "missing"
@@ -476,7 +586,16 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
             ))
     if events and not args.dry_run:
         runtime.persist(events)
-    return {"dry_run": args.dry_run, "scanned_files": len(discovered), "changes": actions}
+    return {
+        "dry_run": args.dry_run,
+        "scanned_files": physical_file_count,
+        "scanned_items": len(discovered) + sum(
+            any(str(item["path"]) == prefix.rstrip("/") or str(item["path"]).startswith(prefix)
+                for prefix in scanned_prefixes)
+            for item in bundle_items
+        ),
+        "changes": actions,
+    }
 
 
 def read_catalog(args: argparse.Namespace, runtime: CatalogRuntime) -> str | dict | list[dict]:
@@ -903,6 +1022,7 @@ def configure_catalog_parser(subparsers) -> None:
     add_parser.add_argument("--source")
     add_parser.add_argument("--tag", action="append")
     add_parser.add_argument("--meta", action="append")
+    add_parser.add_argument("--entrypoint")
     update_parser = catalog_sub.add_parser("update")
     update_parser.add_argument("item_id")
     update_parser.add_argument("--kind", choices=CATALOG_KINDS)
@@ -913,6 +1033,7 @@ def configure_catalog_parser(subparsers) -> None:
     update_parser.add_argument("--source")
     update_parser.add_argument("--tag", action="append")
     update_parser.add_argument("--meta", action="append")
+    update_parser.add_argument("--entrypoint")
     update_parser.add_argument("--clear-path", action="store_true")
     update_parser.add_argument("--clear-summary", action="store_true")
     update_parser.add_argument("--clear-source", action="store_true")
