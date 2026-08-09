@@ -18,6 +18,7 @@ from ...application.workbench_service import WorkbenchError, render_workbench_co
 from ...infrastructure.system.dashboard_actions import export_bundle, report_bug as open_dashboard_bug
 from ...infrastructure.system.diagnostics import diagnostics_status
 from ...infrastructure.system.external_navigation import open_directory, reveal_file
+from ...infrastructure.git.build_identity import build_identity
 from .projections import web_snapshot
 from ...infrastructure.system.resource_layout import RESOURCE_DIRECTORIES
 
@@ -112,6 +113,7 @@ class WebDashboardBridge:
                 pass
         return self._ok({
             "bridge": "ready", "version": __version__,
+            "build_identity": build_identity(),
             "refresh_seconds": self.refresh_seconds,
         })
 

@@ -10,11 +10,13 @@ The workbench is an observation and navigation surface. Lifecycle writes are per
 - **Resources:** navigates the seven standard resource directories and lazily loads registered entries.
 - **Workbench:** indexes user-created or imported Markdown tools, instructions, methods, workflows, checklists, references, and templates.
 - **Research stages:** groups the main goal, completed work, related attempts, and resources by stage.
-- **Settings:** language, status explanations, and advanced delivery or diagnostic views.
+- **Settings:** language, status explanations, advanced delivery or diagnostic views, and product information.
 
 ## Settings
 
-**Language** changes local system text only. **Explanations** describes known workflow and Git states. **Advanced view** preserves version status, action availability, diagnostics, and raw events; expensive sections load only when expanded.
+**Language** changes local system text only. **Explanations** describes known workflow and Git states. **Advanced view** preserves version status, action availability, diagnostics, and raw events; expensive sections load only when expanded. **About** identifies DawnDust as the author and provides the official repository, manual, version, build commit, MIT License, issue, and private vulnerability-reporting links.
+
+External links open only after an explicit click. Project content and diagnostic data are never uploaded automatically.
 
 ![Workflow Monitor Settings page](../assets/workflow-monitor-settings.png)
 

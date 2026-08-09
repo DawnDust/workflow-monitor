@@ -4,6 +4,11 @@
 
 No changes yet.
 
+## 1.6.1
+
+- Added a bilingual About section to Settings with author attribution, canonical repository and manual links, application version, build commit, MIT License, issue reporting, and private vulnerability reporting.
+- Kept external navigation user-initiated and preserved the local-only privacy boundary for project content and diagnostic data.
+
 ## 1.6.0
 
 - Replaced the unrelated crafting-table icon with the original Workflow Beacon identity: three connected workflow nodes and a local status beacon, delivered as reproducible SVG, PNG, multi-size Windows ICO, favicon, wordmark, and social preview assets.
