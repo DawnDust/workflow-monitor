@@ -18,6 +18,7 @@ from project_hooks.infrastructure.system.project_manager import (
     apply_project_update,
     initialize_project,
 )
+from project_hooks.infrastructure.persistence.store import append_events, load_events, new_event
 from project_hooks.infrastructure.system.updater import (
     UpdateError,
     check_latest_release,
@@ -308,6 +309,54 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(installation["application_version"], CURRENT_VERSION)
         self.assertTrue(installation["build_identity"]["build_id"])
         self.assertTrue((self.root / ".project_hooks/maintenance.sqlite3").is_file())
+
+    def test_project_update_appends_taxonomy_v2_migration_once(self) -> None:
+        self.init("1.3.0")
+        journal = self.root / "maintenance/events.jsonl"
+        append_events(journal, self.root / ".project_hooks", [new_event(
+            "workbench.entry_upserted", branch="main", task_id=None, timezone="Asia/Shanghai",
+            payload={
+                "item_id": "old-validation", "item_type": "validation_method",
+                "title": "旧验证", "summary": "检查结果", "path": "workbench/local/old.md",
+                "content_sha256": "0" * 64, "tags": [], "status": "active", "origin": "local",
+            },
+        )])
+        self.commit()
+        apply_project_update(self.root, CURRENT_VERSION)
+        migrated = [event for event in load_events(journal) if event["event_type"] == "workbench.taxonomy_migrated"]
+        self.assertEqual(len(migrated), 1)
+        item = migrated[0]["payload"]["items"][0]
+        self.assertEqual(item["kind"], "method")
+        self.assertEqual(item["purposes"], ["validation"])
+        self.assertEqual(item["review_state"], "needs_review")
+        self.commit("taxonomy migrated")
+        apply_project_update(self.root, CURRENT_VERSION)
+        self.assertEqual(len([event for event in load_events(journal) if event["event_type"] == "workbench.taxonomy_migrated"]), 1)
+
+    def test_failed_package_manifest_migration_rolls_back_prior_manifest(self) -> None:
+        self.init("1.3.0")
+        imported = self.root / "workbench/imported"
+        body = b"# Item\n"
+        digest = hashlib.sha256(body).hexdigest()
+        valid = imported / "a-valid/1.0"
+        invalid = imported / "z-invalid/1.0"
+        for directory in (valid, invalid):
+            (directory / "items").mkdir(parents=True)
+            (directory / "items/item.md").write_bytes(body)
+        valid_manifest = {
+            "schema_version": 1, "package_id": "a-valid", "name": "Valid", "version": "1.0",
+            "author": "A", "items": [{"item_id": "item", "item_type": "prompt", "title": "I",
+            "summary": "I", "file": "items/item.md", "tags": [], "reference": "", "sha256": digest}],
+        }
+        invalid_manifest = {**valid_manifest, "package_id": "z-invalid", "name": "Invalid"}
+        invalid_manifest["items"] = [{**valid_manifest["items"][0], "sha256": "0" * 64}]
+        (valid / "manifest.json").write_text(json.dumps(valid_manifest), encoding="utf-8")
+        (invalid / "manifest.json").write_text(json.dumps(invalid_manifest), encoding="utf-8")
+        before = (valid / "manifest.json").read_bytes()
+        self.commit()
+        with self.assertRaises(Exception):
+            apply_project_update(self.root, CURRENT_VERSION)
+        self.assertEqual((valid / "manifest.json").read_bytes(), before)
 
     def test_customized_managed_file_is_preserved_and_reported(self) -> None:
         self.init()

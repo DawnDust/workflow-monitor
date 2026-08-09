@@ -19,6 +19,8 @@
 | `resources/outputs/` | 图表、模型和其他可交付成果 |
 | `resources/others/` | 暂时无法可靠分类的资料 |
 | `resources/reports/` | 面向外部受众的项目总结与报告 |
+| `workbench/local/` | 用户创建的科研辅助 Markdown 与索引来源 |
+| `workbench/imported/` | 从其他项目导入的声明式工作台包 |
 
 软件源码按 `core → application → infrastructure/ui` 的单向边界组织；完整职责、依赖限制和新增代码放置规则见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
@@ -69,7 +71,7 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 | 探索流程 | `attempt`、`exploration`、`prepare-pr`、`archive-attempt` |
 | 数据维护 | `db status`、`db verify`、`db rebuild`、`db migrate` |
 | 故障反馈 | `diagnostics status/export/resolve/cleanup` |
-| 工作台工具 | `workbench external list/show/add/update/pause/restore/retire` |
+| 科研工作台 | `workbench item list/show/add/update/pause/restore/retire`、`workbench package inspect/import/export`；旧版 `workbench external` 继续兼容 |
 
 使用 `.\workflow-monitor.exe <命令> --help` 查看具体参数。`pre-commit` 是仓库 Hook 的内部入口，不属于用户命令。
 
@@ -111,7 +113,7 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 | `sandbox/<topic>` | 方向尚未稳定的短期试验 |
 | `archive/<type>/<topic>` | 失败、暂停或不可判决尝试的长期保留 |
 
-`topic` 只使用小写字母、数字和连字符。一个探索分支对应一条尝试记录；同一分支上的后续任务复用该记录。
+`topic` 只使用小写字母、数字和连字符。一个探索分支对应一条探索记录，分支名就是稳定的 `exploration_id`；同一分支上的后续任务会重新激活并更新该记录。任务回执和 Git 提交仍分别保留为探索内部的过程证据，不再各自投影成新的探索。
 
 探索结束必须显式选择：
 
@@ -172,7 +174,7 @@ SQLite 并验证完整性。升级器不自动提交或推送。用户修改过�
 - 全局搜索框、搜索和清除按钮集中在“搜索”页；搜索覆盖科研资料、任务、阶段、决策、探索和事件索引，结果使用左侧列表、右侧完整详情的分栏布局。
 - 资料页是七个标准目录的导航与定位中心；选择目录后只显示该类索引，每页十条，打开文件夹与选择目录为独立操作，文字检索统一跳转到搜索页的资料类型。
 - 概览显示七类资料数量、缺失与归档数量和最近新增资料。
-- 工作台将十五项内置提示词与项目外置工具分成两个折叠区；外置工具只作提醒，由 AI 通过追加式事件登记，不加入日常 context，不检测、启动或联网验证。对外报告提示词写入前必须确认受众、周期、语言、语气和保密边界，产物保存在 `resources/reports/` 并登记为 `report`，不自动提交、推送或发布。
+- 工作台不提供内置科研内容。每个条目使用一个互斥主类型（工具、AI 指令、科研方法、科研流程、检查清单、参考资料或模板）、零到多个受控科研用途和自由标签。跨项目理论属于参考资料并使用 `theory` 标签，当前项目理论仍位于 `resources/theory/`。完整 Markdown 仅在用户明确选择后复制给 Codex；不加入日常 context，不自动执行、安装、启动或联网验证。工作台包可预览、导入和导出，但不包含任务、项目资料、凭据、绝对路径或可执行文件。
 - 决策和探索在工作流各自的折叠类别中查看；原始事件、Schema、日志哈希和刷新诊断集中在独立的只读“高级查看”窗口。
 - 工作流、搜索结果与原始事件之间支持双向定位。
 - “解释”页按类别折叠展示英文状态、中文含义、实际影响和安全下一步，覆盖工作流、任务、动作、阶段、探索、决策、资料及 Git/Release。

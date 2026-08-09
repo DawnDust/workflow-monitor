@@ -12,7 +12,7 @@
 - 通过 `state update` 更新进度、`decision add` 记录路线变化、`attempt update` 保存探索证据，最后必须运行 `end`。只有 `validated` 尝试可准备 Squash PR，合并必须等待用户明确确认。
 - 项目资料和大阶段只通过 `project update` 与 `stage` 指令记录；探索当前步骤、进展和下一步使用 `attempt update` 的结构化字段。
 - 科研资料文件只放在 `resources/` 的七个标准子目录，并通过 `catalog` 指令登记；`check` 必须保持通过。
-- 外置软件、Skill 和仓库提醒通过 `workbench external` 结构化登记；不得保存凭据或绝对路径，也不得仅因登记而自动启动或联网检查工具。
+- 科研辅助内容通过 `workbench item/package` 建立项目内索引；既有外置工具继续兼容 `workbench external`。工作台不保存凭据或绝对路径，不自动执行、安装、启动、联网检查或加入日常 context。
 - 仅当用户明确要求纯 Git 发布，且 `main` 没有活动任务、不再编辑、改动已经结束并验证通过时，才可直接检查、暂存、提交和推送。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态、绕过 `end`、在 `main` 试改、自动合并。
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。

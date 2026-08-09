@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         command_parts = [str((args.command if args is not None else (raw_args[0] if raw_args else None)) or "overview")]
         for attribute in ("diagnostics_command", "db_command", "catalog_command", "project_command",
                           "stage_command", "attempt_command", "exploration_command", "task_command",
-                          "workbench_command", "external_command"):
+                          "workbench_command", "external_command", "item_command", "package_command"):
             value = getattr(args, attribute, None) if args is not None else None
             if value:
                 command_parts.append(str(value))

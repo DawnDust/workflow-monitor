@@ -202,6 +202,7 @@ REQUIRED_SCHEMA_COLUMNS = {
     "attempts": {
         "attempt_id", "branch", "stage_id", "current_step", "progress", "next_step", "state",
     },
+    "explorations": {"event_id", "branch", "occurred_at", "goal", "result", "evidence", "disposition_ref"},
     "active_tasks": {"task_id", "branch", "record_json", "state_updated", "decisions_added"},
 }
 
@@ -212,6 +213,8 @@ def schema_layout_is_current(connection: sqlite3.Connection) -> bool:
             row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
         }
         if not required.issubset(columns):
+            return False
+        if table == "explorations" and columns != required:
             return False
     return True
 
@@ -344,6 +347,11 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
              payload["goal"], canonical_json(payload["acceptance"]), payload.get("stage_id"),
              event["occurred_at"], event["occurred_at"]),
         )
+        connection.execute(
+            "INSERT INTO explorations VALUES (?, ?, ?, ?, 'active', '', ?)",
+            (event["event_id"], event["branch"], event["occurred_at"],
+             payload["goal"], event["branch"]),
+        )
     elif kind == "attempt.updated":
         attempt_id = payload["attempt_id"]
         if payload.get("hypothesis") is not None:
@@ -370,11 +378,43 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
             "UPDATE attempts SET state=?, pr=COALESCE(?, pr), archive_branch=COALESCE(?, archive_branch), updated_at=? WHERE attempt_id=?",
             (payload["state"], payload.get("pr"), payload.get("archive_branch"), event["occurred_at"], payload["attempt_id"]),
         )
+        attempt = connection.execute(
+            "SELECT branch, goal, archive_branch FROM attempts WHERE attempt_id=?",
+            (payload["attempt_id"],),
+        ).fetchone()
+        if attempt is not None:
+            evidence = "; ".join(
+                row[0] for row in connection.execute(
+                    "SELECT evidence FROM attempt_evidence WHERE attempt_id=? ORDER BY occurred_at, event_id",
+                    (payload["attempt_id"],),
+                ).fetchall()
+            )
+            connection.execute(
+                "INSERT INTO explorations VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (event["event_id"], attempt["branch"], event["occurred_at"], attempt["goal"],
+                 payload["state"], evidence,
+                 payload.get("archive_branch") or attempt["archive_branch"] or attempt["branch"]),
+            )
     elif kind == "attempt.archived":
         connection.execute(
             "UPDATE attempts SET archive_branch=?, updated_at=? WHERE attempt_id=?",
             (payload["archive_branch"], event["occurred_at"], payload["attempt_id"]),
         )
+        attempt = connection.execute(
+            "SELECT branch, goal, state FROM attempts WHERE attempt_id=?", (payload["attempt_id"],),
+        ).fetchone()
+        if attempt is not None:
+            evidence = "; ".join(
+                row[0] for row in connection.execute(
+                    "SELECT evidence FROM attempt_evidence WHERE attempt_id=? ORDER BY occurred_at, event_id",
+                    (payload["attempt_id"],),
+                ).fetchall()
+            )
+            connection.execute(
+                "INSERT INTO explorations VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (event["event_id"], payload["archive_branch"], event["occurred_at"],
+                 attempt["goal"], attempt["state"], evidence, payload["archive_branch"]),
+            )
     elif kind == "exploration.recorded":
         connection.execute(
             "INSERT INTO explorations VALUES (?, ?, ?, ?, ?, ?, ?)",

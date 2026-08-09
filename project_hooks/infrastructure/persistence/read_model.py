@@ -254,10 +254,13 @@ class MaintenanceReadModel:
                 continue
             for commit_hash in hashes:
                 commit = by_hash.setdefault(commit_hash, {
-                    "hash": commit_hash, "task_ids": [], "parents": [], "published": None,
+                    "hash": commit_hash, "task_ids": [], "event_ids": [],
+                    "parents": [], "published": None,
                 })
                 if task_id not in commit["task_ids"]:
                     commit["task_ids"].append(task_id)
+                if event_id not in commit["event_ids"]:
+                    commit["event_ids"].append(event_id)
         available = True
         try:
             published = set(self._git("rev-list", f"refs/remotes/{publication_ref}").splitlines())
@@ -290,7 +293,7 @@ class MaintenanceReadModel:
             elif ref.startswith("refs/remotes/origin/"):
                 branch = ref.removeprefix("refs/remotes/origin/")
                 refs.setdefault(branch, ref)
-        attempts: dict[str, dict] = {}
+        attempts_by_branch: dict[str, dict] = {}
         journal_relative = self.journal_path.relative_to(self.repo_path).as_posix()
         for ref in refs.values():
             try:
@@ -306,6 +309,7 @@ class MaintenanceReadModel:
                 if isinstance(event, dict):
                     events.append(event)
             events.sort(key=lambda item: (item.get("occurred_at", ""), item.get("event_id", "")))
+            attempts_in_ref: dict[tuple[str, str], dict] = {}
             for event in events:
                 payload = event.get("payload") or {}
                 kind = event.get("event_type")
@@ -313,7 +317,9 @@ class MaintenanceReadModel:
                     attempt_id = payload.get("attempt_id")
                     if not attempt_id:
                         continue
-                    attempts[attempt_id] = {
+                    attempt_key = (str(event.get("branch") or ""), str(attempt_id))
+                    attempts_in_ref[attempt_key] = {
+                        "exploration_id": event.get("branch"),
                         "attempt_id": attempt_id, "branch": event.get("branch"),
                         "track": payload.get("track"), "topic": payload.get("topic"),
                         "base_commit": payload.get("base_commit"), "goal": payload.get("goal"),
@@ -325,7 +331,7 @@ class MaintenanceReadModel:
                     }
                     continue
                 attempt_id = payload.get("attempt_id")
-                attempt = attempts.get(attempt_id)
+                attempt = attempts_in_ref.get((str(event.get("branch") or ""), str(attempt_id)))
                 if not attempt:
                     continue
                 if kind == "attempt.updated":
@@ -342,7 +348,12 @@ class MaintenanceReadModel:
                 elif kind == "attempt.archived":
                     attempt["archive_branch"] = payload.get("archive_branch")
                 attempt["updated_at"] = event.get("occurred_at") or attempt["updated_at"]
-        return list(attempts.values())
+            for attempt in attempts_in_ref.values():
+                branch = str(attempt.get("branch") or "")
+                current = attempts_by_branch.get(branch)
+                if current is None or attempt.get("updated_at", "") > current.get("updated_at", ""):
+                    attempts_by_branch[branch] = attempt
+        return list(attempts_by_branch.values())
 
     def attempts_across_branches(self) -> list[dict]:
         return self._branch_attempts()
@@ -376,6 +387,7 @@ class MaintenanceReadModel:
     @staticmethod
     def _decode_attempt(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
         result = dict(row)
+        result["exploration_id"] = result["branch"]
         result["acceptance"] = json.loads(result.pop("acceptance_json"))
         result["evidence"] = [item["evidence"] for item in rows(
             connection,
@@ -491,6 +503,7 @@ class MaintenanceReadModel:
             "SELECT * FROM attempts ORDER BY updated_at DESC, branch"
         ).fetchall():
             item = dict(row)
+            item["exploration_id"] = item["branch"]
             item["acceptance"] = json.loads(item.pop("acceptance_json"))
             item["evidence"] = [evidence["evidence"] for evidence in rows(
                 connection,
@@ -498,13 +511,13 @@ class MaintenanceReadModel:
                 (item["attempt_id"],),
             )]
             attempts.append(item)
-        by_attempt = {item["attempt_id"]: item for item in attempts}
+        by_branch = {item["branch"]: item for item in attempts}
         for item in self._branch_attempts():
-            current = by_attempt.get(item["attempt_id"])
+            current = by_branch.get(item["branch"])
             if current is None or item.get("updated_at", "") > current.get("updated_at", ""):
-                by_attempt[item["attempt_id"]] = item
+                by_branch[item["branch"]] = item
         attempts = sorted(
-            by_attempt.values(), key=lambda item: (item.get("updated_at", ""), item["attempt_id"]),
+            by_branch.values(), key=lambda item: (item.get("updated_at", ""), item["branch"]),
             reverse=True,
         )
         current_stage = next((item for item in stages if item["status"] == "active"), None)
@@ -544,6 +557,31 @@ class MaintenanceReadModel:
         finally:
             connection.close()
 
+    @staticmethod
+    def _exploration_rows(connection: sqlite3.Connection, limit: int | None = None) -> list[dict]:
+        raw = rows(
+            connection,
+            "SELECT x.event_id, x.branch, x.occurred_at, x.goal, x.result, x.evidence, "
+            "x.disposition_ref, e.task_id, e.event_type, e.branch AS event_branch, e.payload_json "
+            "FROM explorations x JOIN events e ON e.event_id=x.event_id "
+            "ORDER BY x.occurred_at DESC, x.event_id DESC",
+        )
+        by_exploration: dict[str, dict] = {}
+        for item in raw:
+            payload = json.loads(item.pop("payload_json"))
+            event_type = item.pop("event_type")
+            event_branch = item.pop("event_branch")
+            if event_type.startswith("attempt."):
+                exploration_id = event_branch
+            else:
+                exploration_id = payload.get("exploration_id") or item["branch"]
+            if exploration_id in by_exploration:
+                continue
+            item["exploration_id"] = exploration_id
+            by_exploration[exploration_id] = item
+        values = list(by_exploration.values())
+        return values if limit is None else values[:limit]
+
     def records(self, kind: str, limit: int = 20) -> list[dict]:
         connection, _ = self._connection()
         try:
@@ -552,7 +590,7 @@ class MaintenanceReadModel:
             if kind == "decisions":
                 return rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch, task_id FROM decisions ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             if kind == "explorations":
-                return rows(connection, "SELECT x.event_id, x.branch, x.occurred_at, x.goal, x.result, x.evidence, x.disposition_ref, e.task_id FROM explorations x JOIN events e ON e.event_id=x.event_id ORDER BY x.occurred_at DESC, x.event_id DESC LIMIT ?", (limit,))
+                return self._exploration_rows(connection, limit)
             if kind == "events":
                 values = rows(connection, "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
                 for value in values:
@@ -563,12 +601,23 @@ class MaintenanceReadModel:
             connection.close()
 
     @staticmethod
-    def _search_index(connection: sqlite3.Connection) -> list[dict]:
+    def _search_index(
+        connection: sqlite3.Connection, task_details: dict[str, dict] | None = None,
+        publication: dict | None = None,
+    ) -> list[dict]:
         result: list[dict] = []
+        task_details = task_details or {}
+        publication = publication or {}
+        publication_available = publication.get("publication", {}).get("available", False)
+        published_event_ids = {
+            event_id
+            for commit in publication.get("commits", []) if commit.get("published")
+            for event_id in commit.get("event_ids", [])
+        }
 
         def add(kind: str, label: str, target: str, record_id: str, occurred_at: str,
                 branch: str, title: str, summary: str, values: list[object],
-                task_ids: list[str] | None = None) -> None:
+                task_ids: list[str] | None = None, status: str = "") -> None:
             search_text = " ".join(str(value or "") for value in values)
             result.append({
                 "kind": kind,
@@ -579,6 +628,7 @@ class MaintenanceReadModel:
                 "branch": branch,
                 "title": title,
                 "summary": summary,
+                "status": status,
                 "search_text": search_text,
                 "task_ids": task_ids or [],
             })
@@ -597,12 +647,33 @@ class MaintenanceReadModel:
                 [item["decision_id"], item["decision"], item["alternatives"], item["basis"], item["reopen_condition"], item["branch"], item["task_id"]],
                 [item["task_id"]] if item["task_id"] else [])
 
-        exploration_rows = rows(connection, "SELECT x.event_id, x.branch, x.occurred_at, x.goal, x.result, x.evidence, x.disposition_ref, e.task_id FROM explorations x JOIN events e ON e.event_id=x.event_id")
+        exploration_rows = MaintenanceReadModel._exploration_rows(connection)
         for item in exploration_rows:
+            publication_status = task_details.get(item.get("task_id") or "", {}).get("publication_status")
+            archived = (
+                str(item.get("branch") or "").startswith("archive/")
+                or str(item.get("disposition_ref") or "").startswith("archive/")
+            )
+            if archived or item["result"] == "abandoned":
+                disposition_status = "已遗弃"
+            elif item["result"] == "validated" and item["event_id"] in published_event_ids:
+                disposition_status = "已合并"
+            elif (item["result"] == "validated" and not publication_available
+                  and publication_status != "仅记录"):
+                disposition_status = "合并状态未知"
+            elif item["result"] == "validated":
+                disposition_status = "待合并"
+            elif item["result"] == "active":
+                disposition_status = "进行中"
+            elif item["result"] in {"negative", "inconclusive", "paused"}:
+                disposition_status = "待归档"
+            else:
+                disposition_status = "未处置"
             add("exploration", "探索", "explorations", item["event_id"], item["occurred_at"], item["branch"],
                 item["goal"] or item["branch"], item["result"] or "",
-                [item["branch"], item["goal"], item["result"], item["evidence"], item["disposition_ref"], item["task_id"]],
-                [item["task_id"]] if item["task_id"] else [])
+                [item["branch"], item["goal"], item["result"], item["evidence"], item["disposition_ref"],
+                 item["task_id"], disposition_status],
+                [item["task_id"]] if item["task_id"] else [], disposition_status)
 
         relation_values: dict[str, list[str]] = {}
         for relation in rows(
@@ -658,11 +729,10 @@ class MaintenanceReadModel:
             "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch, task_id "
             "FROM decisions WHERE task_id IS NOT NULL",
         )
-        explorations = rows(
-            connection,
-            "SELECT x.event_id, x.branch, x.occurred_at, x.goal, x.result, x.evidence, x.disposition_ref, e.task_id "
-            "FROM explorations x JOIN events e ON e.event_id=x.event_id WHERE e.task_id IS NOT NULL",
-        )
+        explorations = [
+            item for item in MaintenanceReadModel._exploration_rows(connection)
+            if item.get("task_id") is not None
+        ]
         decisions_by_task: dict[str, list[dict]] = {}
         explorations_by_task: dict[str, list[dict]] = {}
         commits_by_task: dict[str, list[dict]] = {}
@@ -822,7 +892,7 @@ class MaintenanceReadModel:
             context = self._context(connection, branch)
             history = rows(connection, "SELECT event_id, occurred_at, task_id, summary, evidence, result, branch, payload_json FROM task_archive ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             decisions = rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch, task_id FROM decisions ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
-            explorations = rows(connection, "SELECT x.event_id, x.branch, x.occurred_at, x.goal, x.result, x.evidence, x.disposition_ref, e.task_id FROM explorations x JOIN events e ON e.event_id=x.event_id ORDER BY x.occurred_at DESC, x.event_id DESC LIMIT ?", (limit,))
+            explorations = self._exploration_rows(connection, limit)
             events = rows(connection, "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             for event in events:
                 event["payload"] = json.loads(event.pop("payload_json"))
@@ -858,7 +928,7 @@ class MaintenanceReadModel:
                 "attempt": self._attempt(connection, branch),
                 "attempts": self._attempts(connection),
                 "events": events,
-                "search_index": self._search_index(connection),
+                "search_index": self._search_index(connection, task_details, publication),
                 "task_details": task_details,
                 "catalog_items": catalog_items,
                 "catalog_relations": catalog_relations,
