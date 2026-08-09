@@ -33,7 +33,7 @@ def main() -> int:
     if not executable.is_file():
         raise SystemExit(f"missing Windows executable: {executable}")
     base = (
-        "https://github.com/DawnDust/project-maintenance-template/"
+        "https://github.com/DawnDust/workflow-monitor/"
         f"releases/download/v{args.version}/"
     )
     build_info_path = ROOT / "build" / "build-info.json"

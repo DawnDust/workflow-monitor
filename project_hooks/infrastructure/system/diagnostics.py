@@ -29,7 +29,7 @@ LEDGER_MAX_RECORDS = 200
 PROTECTED_CATEGORIES = {"internal_error", "data_integrity", "external_dependency"}
 AUTO_CLEAN_CATEGORIES = {"validation", "conflict"}
 NON_DIAGNOSTIC_CATEGORIES = {"validation", "conflict"}
-ISSUE_URL = "https://github.com/DawnDust/project-maintenance-template/issues/new"
+ISSUE_URL = "https://github.com/DawnDust/workflow-monitor/issues/new"
 _LOCK = threading.RLock()
 
 _WINDOWS_PATH = re.compile(r"(?i)(?:[a-z]:\\|\\\\)[^\s\r\n\"']+")

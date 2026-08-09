@@ -1,0 +1,16 @@
+.settings-button{margin-top:auto;border:0;background:transparent;color:var(--muted);padding:9px 13px;border-radius:7px;text-align:left;cursor:pointer;display:flex;gap:13px;align-items:center;font-size:12px;z-index:1}
+.settings-button span{font-size:17px;width:20px;text-align:center}
+.settings-button:hover{background:var(--panel2);color:var(--text)}
+.settings-button.active{background:linear-gradient(90deg,color-mix(in srgb,var(--cyan) 16%,transparent),transparent);box-shadow:inset 2px 0 var(--cyan);color:var(--text)}
+.settings-button+.runtime{margin-top:0}
+.settings-layout{display:grid;grid-template-columns:170px minmax(0,1fr);gap:14px;align-items:start}
+.settings-nav{display:grid;gap:3px;border:1px solid var(--line);border-radius:9px;background:var(--panel);padding:8px;position:sticky;top:12px}
+.settings-nav button{border:0;border-left:2px solid transparent;background:transparent;color:var(--muted);border-radius:5px;padding:10px;text-align:left;cursor:pointer}
+.settings-nav button:hover{background:var(--panel2);color:var(--text)}
+.settings-nav button.active{border-left-color:var(--cyan);background:color-mix(in srgb,var(--cyan) 9%,var(--panel));color:var(--text)}
+.language-options{display:grid;gap:9px;max-width:440px}
+.language-options label{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:12px;cursor:pointer}
+.language-options label:has(input:checked){border-color:var(--cyan);background:color-mix(in srgb,var(--cyan) 8%,var(--panel))}
+.language-options input{accent-color:var(--cyan)}
+@media(max-width:1050px){.settings-button b{display:none}.settings-button{justify-content:center;padding:9px;font-size:0}.settings-button span{font-size:17px}.settings-nav button{justify-content:flex-start;padding:10px;font-size:12px}}
+@media(max-width:720px){.settings-button{margin-top:0;flex:0 0 auto}.settings-layout{display:block}.settings-nav{position:static;display:flex;overflow:auto;margin-bottom:11px}.settings-nav button{white-space:nowrap;border-left:0;border-bottom:2px solid transparent}.settings-nav button.active{border-left-color:transparent;border-bottom-color:var(--cyan)}}

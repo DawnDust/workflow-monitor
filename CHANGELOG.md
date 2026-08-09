@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+No changes yet.
+
+## 1.6.0
+
+- Added a bottom-left Settings entry with Language, Explanations, and Advanced view sections; Simplified Chinese and English system text switches immediately and persists only in local WebView2 storage, while user content and recorded data remain unchanged.
+- Added a concise bilingual public README, a bilingual MkDocs user and maintainer manual, an MIT license, community governance files, structured Issue/PR templates, documentation CI, Pages deployment, and dependency update configuration.
+- Renamed public repository links from the legacy template address to `DawnDust/workflow-monitor` across downloads, updates, diagnostics, manifests, and support entry points.
+
 - Web 工作台 2.3 为版本主线直接显示建立目标与最终判断，删除独立探索对比页，并让高级查看折叠在差量刷新时保持稳定。
 - 资料页改为七类标准目录的导航与定位中心；WebView2 主窗口显示后会立即隐藏启动壳并在退出时清理。
 
@@ -8,8 +18,6 @@
 
 - WebView2 现为唯一图形工作台；无参数 EXE 直接启动 Web，并移除 `dashboard`、`--ui` 与 legacy 回退。
 - 补齐实时生命周期、资料目录/文件打开、完整双语解释、10 条分页搜索，以及高级查看中的折叠动作、诊断和原始事件。
-
-## Unreleased
 
 - 探索改为严格按分支聚合：分支名作为稳定探索 ID，同一分支内的多个任务和提交只更新一条探索记录，旧事件在数据库重建时自动折叠且仍保留原始审计；搜索页同时显示进行中、待合并、已合并、待归档或已遗弃的处置状态。
 - 工作台分类升级为互斥主类型、受控多用途和自由标签；新增待复核状态，旧六类索引与 v1 包在升级或导入时保守迁移到 v2。
@@ -47,7 +55,7 @@
 - 增加本地脱敏诊断导出、Dashboard Bug 报告入口与分层并行测试。
 - 精简 Dashboard 阶段展示，并在任务完成但阶段未更新时给出非阻塞提醒。
 
-## Unreleased
+## Historical development notes
 
 - Dashboard 将软件交付移出主窗口并收纳到“高级查看”：显示 EXE 与仓库源码一致性、最近正式 Release 的版本与时间，以及 Release 后尚未发布的软件文件修改；左上角明确标注稳定或探索分支。
 - Dashboard 有未提交修改时不再重复显示任务文件数，也不再把仅有 HEAD 同步表述为修改已推送。

@@ -123,6 +123,10 @@ class DistributionTests(unittest.TestCase):
         )
         self.assertIn("build_id", manifest["build_identity"])
         self.assertEqual(manifest["windows_exe"]["file"], EXECUTABLE_NAME)
+        self.assertEqual(
+            manifest["windows_exe"]["url"],
+            f"https://github.com/DawnDust/workflow-monitor/releases/download/v{CURRENT_VERSION}/{EXECUTABLE_NAME}",
+        )
 
     def test_release_tag_must_match_application_version(self) -> None:
         validate_release_tag(CURRENT_VERSION, f"v{CURRENT_VERSION}")
