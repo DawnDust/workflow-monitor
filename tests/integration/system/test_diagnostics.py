@@ -135,7 +135,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(status["records"], 1)
         self.assertFalse(status["automatic_upload"])
         url = bug_report_url(incident_id=status["latest_incident_id"], version="1.3.0")
-        self.assertIn("github.com", url)
+        self.assertIn("github.com/DawnDust/workflow-monitor/issues/new", url)
         self.assertIn("labels=bug", url)
         self.assertIn("body=", url)
 

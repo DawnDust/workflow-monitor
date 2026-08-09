@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage questions and ideas
+    url: https://github.com/DawnDust/workflow-monitor/discussions
+    about: Ask for help or discuss an idea before filing a focused issue.
+  - name: Security vulnerability
+    url: https://github.com/DawnDust/workflow-monitor/security/advisories/new
+    about: Report vulnerabilities privately. Do not disclose them in a public issue.
+  - name: User manual
+    url: https://dawndust.github.io/workflow-monitor/
+    about: Read installation, workflow, privacy, and troubleshooting guidance.

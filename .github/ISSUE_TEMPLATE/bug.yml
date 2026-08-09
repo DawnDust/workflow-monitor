@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible Workflow Monitor defect
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Search existing issues first. Diagnostic bundles are local and may contain project context; inspect and redact every attachment before uploading it.
+  - type: input
+    id: version
+    attributes:
+      label: Workflow Monitor version
+      placeholder: "For example: 1.6.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: windows
+    attributes:
+      label: Windows version
+      options:
+        - Windows 11
+        - Windows 10
+        - Other or unknown
+    validations:
+      required: true
+  - type: input
+    id: incident
+    attributes:
+      label: Incident ID
+      description: If available, copy it from the error or diagnostic report.
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include the smallest project setup and ordered steps that reproduce the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics or screenshots
+      description: Drag reviewed and redacted files here. The application never uploads them automatically.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I reviewed every attachment and removed information I do not want to publish.
+          required: true
+        - label: This report does not disclose a security vulnerability.
+          required: true

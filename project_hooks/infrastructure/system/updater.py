@@ -25,15 +25,15 @@ from ..persistence.store import SCHEMA_VERSION, load_events
 
 
 LATEST_MANIFEST = (
-    "https://github.com/DawnDust/project-maintenance-template/"
+    "https://github.com/DawnDust/workflow-monitor/"
     "releases/latest/download/release-manifest.json"
 )
 VERSIONED_MANIFEST = (
-    "https://github.com/DawnDust/project-maintenance-template/"
+    "https://github.com/DawnDust/workflow-monitor/"
     "releases/download/v{version}/release-manifest.json"
 )
 LATEST_RELEASE_API = (
-    "https://api.github.com/repos/DawnDust/project-maintenance-template/releases/latest"
+    "https://api.github.com/repos/DawnDust/workflow-monitor/releases/latest"
 )
 LAUNCHER_VERSION = "1.0.0"
 
@@ -224,7 +224,7 @@ def _load_release_api(url: str, gh_path: str) -> dict:
 def _load_latest_release() -> dict:
     return _load_release_api(
         LATEST_RELEASE_API,
-        "repos/DawnDust/project-maintenance-template/releases/latest",
+        "repos/DawnDust/workflow-monitor/releases/latest",
     )
 
 

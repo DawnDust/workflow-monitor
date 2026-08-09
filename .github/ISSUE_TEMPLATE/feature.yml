@@ -1,0 +1,34 @@
+name: Feature request
+description: Propose a focused improvement to Workflow Monitor
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Explain the user problem before the proposed implementation. Use Discussions for early or open-ended design exploration.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult today, and who is affected?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable success without prescribing internal code structure.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Project boundaries
+      options:
+        - label: I understand Workflow Monitor is local-first, Windows-only, and does not add telemetry by default.
+          required: true

@@ -348,15 +348,19 @@ class WebDashboardIntegrationTests(unittest.TestCase):
 
     def test_static_assets_are_local_es_modules_and_packaged(self) -> None:
         root = asset_root()
-        for name in ("index.html", "styles.css", "workbench.css", "app.js", "state.js"):
+        for name in ("index.html", "styles.css", "workbench.css", "settings.css", "app.js", "state.js", "i18n.js"):
             self.assertTrue((root / name).is_file(), name)
         html = (root / "index.html").read_text(encoding="utf-8")
         script = (root / "app.js").read_text(encoding="utf-8")
         styles = (root / "styles.css").read_text(encoding="utf-8")
+        settings_styles = (root / "settings.css").read_text(encoding="utf-8")
         self.assertIn('type="module"', html)
         self.assertNotIn("https://", html)
         self.assertIn("prefers-color-scheme", script)
         self.assertIn("location.hash.slice(1)", script)
+        self.assertIn('id="settings-button"', html)
+        self.assertIn('href="settings.css"', html)
+        self.assertIn('from "./i18n.js"', script)
         self.assertIn("copy_workbench_items", script)
         self.assertIn("data-workbench-kind", script)
         self.assertIn("data-workbench-purpose", script)
@@ -367,6 +371,8 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertNotIn("purpose-chips", script)
         self.assertNotIn("复制全部登记资料上下文", script)
         self.assertIn('data-theme=light', styles)
+        self.assertIn("@media(max-width:720px)", settings_styles)
+        self.assertIn(".settings-nav button{justify-content:flex-start", settings_styles)
         build_script = (Path(__file__).resolve().parents[3] / "scripts/build_windows_exe.py").read_text(encoding="utf-8")
         windows_entry = (Path(__file__).resolve().parents[3] / "project_hooks/ui/windows/main.py").read_text(encoding="utf-8")
         self.assertIn("project_hooks/ui/web/assets", build_script)
@@ -386,7 +392,15 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('disclosure("diagnostics"', script)
         self.assertIn("draftQuery", script)
         self.assertIn("committedQuery", script)
-        self.assertIn('["status","处置状态"]', script)
+        self.assertIn('["status","处置状态","Disposition"]', script)
+        self.assertNotIn('["explain","?"', script)
+        self.assertNotIn('["advanced","⋯"', script)
+        self.assertIn('settingsSection:"language"', script)
+        self.assertIn('data-settings-section', script)
+        self.assertIn('name="language"', script)
+        self.assertIn("saveLanguage", script)
+        self.assertIn("esc(item.summary)", script)
+        self.assertNotIn("knownStatus", script)
         self.assertIn("selectedKind", script)
         self.assertIn("compositionstart", script)
         self.assertIn("changed_sections", script)
@@ -423,6 +437,22 @@ class WebDashboardIntegrationTests(unittest.TestCase):
           const rows = filterRecords([{{title:'Alpha'}},{{title:'Beta'}}], 'alp', ['title']);
           const page = paginate(Array.from({{length: 21}}, (_, i) => i), 3, 10);
           if (rows.length !== 1 || evidenceLabel({{status:'unregistered'}}) !== '未登记' || page.items.length !== 1) process.exit(1);
+        """
+        subprocess.run(["node", "--input-type=module", "-e", script], check=True)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is a development-only optional test runtime")
+    def test_language_preference_helpers_are_local_and_safe(self) -> None:
+        source = (asset_root() / "i18n.js").read_bytes()
+        module_url = "data:text/javascript;base64," + base64.b64encode(source).decode("ascii")
+        script = f"""
+          import {{loadLanguage, saveLanguage}} from {json.dumps(module_url)};
+          const values = new Map();
+          const storage = {{getItem:k => values.get(k), setItem:(k,v) => values.set(k,v)}};
+          if (loadLanguage(storage) !== 'zh-CN') process.exit(1);
+          if (saveLanguage('en', storage) !== 'en' || loadLanguage(storage) !== 'en') process.exit(2);
+          if (saveLanguage('fr', storage) !== 'zh-CN') process.exit(3);
+          const broken = {{getItem:() => {{throw new Error('blocked')}}, setItem:() => {{throw new Error('blocked')}}}};
+          if (loadLanguage(broken) !== 'zh-CN' || saveLanguage('en', broken) !== 'en') process.exit(4);
         """
         subprocess.run(["node", "--input-type=module", "-e", script], check=True)
 
