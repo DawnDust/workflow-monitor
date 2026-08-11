@@ -45,7 +45,7 @@ Workflow Monitor 是面向 Windows 科研 Git 项目的本地单文件工作流�
 3. 双击运行。空目录会自动初始化 Git 仓库并打开本地工作台。
 4. 在 AI 编码工具中直接用自然语言描述任务；仓库规范会处理生命周期命令和安全边界。
 
-程序暂未使用商业代码签名，因此 Windows SmartScreen 可能在首次运行时提示。请确认文件来自本项目正式 GitHub Release，并可使用 `release-manifest.json` 核对 SHA-256。
+未签名的程序可能触发 Windows SmartScreen。请确认文件来自本项目正式 GitHub Release，使用 `release-manifest.json` 核对 SHA-256、检查 `workflow-monitor.spdx.json`，并运行 `gh attestation verify workflow-monitor.exe --repo DawnDust/workflow-monitor` 验证构建来源；manifest 会明确说明是否应用了 Authenticode 签名。
 
 ## 文档与社区
 

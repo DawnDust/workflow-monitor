@@ -132,7 +132,8 @@ CREATE TABLE IF NOT EXISTS project_profile (
 CREATE TABLE IF NOT EXISTS task_checkpoints (
   task_id TEXT PRIMARY KEY, branch TEXT NOT NULL, current_step TEXT NOT NULL,
   judgment TEXT NOT NULL, breakpoint TEXT NOT NULL, next_actions_json TEXT NOT NULL,
-  blocker TEXT NOT NULL, updated_at TEXT NOT NULL, field_sources_json TEXT NOT NULL
+  blocker TEXT NOT NULL, workspace_fingerprint TEXT, changed_paths_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL, field_sources_json TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS test_receipts (
   task_id TEXT NOT NULL, suite TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -212,7 +213,7 @@ REQUIRED_SCHEMA_COLUMNS = {
     "meta": {"key", "value"},
     "events": {"event_id", "schema_version", "event_type", "payload_json"},
     "project_profile": {"branch", "description", "big_goal", "main_goal_version", "event_id"},
-    "task_checkpoints": {"task_id", "current_step", "judgment", "breakpoint", "next_actions_json", "field_sources_json"},
+    "task_checkpoints": {"task_id", "current_step", "judgment", "breakpoint", "next_actions_json", "workspace_fingerprint", "changed_paths_json", "field_sources_json"},
     "test_receipts": {"task_id", "suite", "fingerprint", "receipt_json"},
     "stage_reviews": {"task_id", "stage_id", "result", "event_id"},
     "stages": {
@@ -244,7 +245,9 @@ def validate_projection(events: Iterable[dict]) -> None:
     connection.row_factory = sqlite3.Row
     try:
         connection.executescript(SCHEMA)
-        for event in sorted(events, key=lambda item: (item["occurred_at"], item["event_id"])):
+        for _, event in sorted(
+            enumerate(events), key=lambda item: (item[1]["occurred_at"], item[0]),
+        ):
             apply_event(connection, event)
     except sqlite3.DatabaseError as exc:
         raise StoreError(f"事件无法形成一致的数据库投影: {exc}") from exc
@@ -307,7 +310,8 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
         ).fetchone()
         current = dict(row) if row else {
             "current_step": "", "judgment": "", "breakpoint": "",
-            "next_actions_json": "[]", "blocker": "", "field_sources_json": "{}",
+            "next_actions_json": "[]", "blocker": "", "workspace_fingerprint": None,
+            "changed_paths_json": "[]", "field_sources_json": "{}",
         }
         sources = json.loads(current["field_sources_json"])
         values = {
@@ -325,13 +329,17 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
                     "task_id": task_id, "stage_id": payload.get("stage_id"),
                 }
         connection.execute(
-            """INSERT INTO task_checkpoints VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO task_checkpoints VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(task_id) DO UPDATE SET current_step=excluded.current_step,
                judgment=excluded.judgment, breakpoint=excluded.breakpoint,
                next_actions_json=excluded.next_actions_json, blocker=excluded.blocker,
+               workspace_fingerprint=excluded.workspace_fingerprint,
+               changed_paths_json=excluded.changed_paths_json,
                updated_at=excluded.updated_at, field_sources_json=excluded.field_sources_json""",
             (task_id, event["branch"], values["current_step"], values["judgment"],
              values["breakpoint"], canonical_json(values["next_actions"]), values["blocker"],
+             payload.get("workspace_fingerprint", current["workspace_fingerprint"]),
+             canonical_json(payload.get("changed_paths", json.loads(current["changed_paths_json"]))),
              event["occurred_at"], canonical_json(sources)),
         )
     elif kind == "stage.started":
@@ -622,7 +630,10 @@ def rebuild(database: Path, journal: Path, *, preserve_active: bool = True) -> s
             connection.execute(f"DELETE FROM {table}")
         if not preserve_active:
             connection.execute("DELETE FROM active_tasks")
-        for event in sorted(events, key=lambda item: (item["occurred_at"], item["event_id"])):
+        # JSONL order is authoritative when events share a timestamp.  Sorting
+        # only by time is stable, so declarations remain ahead of events that
+        # reference them instead of being reordered by unrelated UUID values.
+        for event in sorted(events, key=lambda item: item["occurred_at"]):
             apply_event(connection, event)
         connection.execute(
             "INSERT INTO meta(key, value) VALUES ('journal_hash', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",

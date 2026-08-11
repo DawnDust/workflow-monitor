@@ -12,9 +12,10 @@ from typing import Callable
 from ... import __version__
 from ...core.catalog import decode_item
 from ..git import client as git_client
+from ..system.finish_preflight import assemble_finish_preflight
 from ..system.resource_layout import resource_directory_snapshot
 from .store import SCHEMA_VERSION, ensure_database, journal_hash, rows
-from ..system.verification import changed_paths_from_baseline, verify_receipts
+from ..system.verification import changed_paths_from_baseline
 
 
 class ReadModelError(RuntimeError):
@@ -555,6 +556,7 @@ class MaintenanceReadModel:
         checkpoint_data = dict(checkpoint) if checkpoint else {}
         if checkpoint_data:
             checkpoint_data["next_actions"] = json.loads(checkpoint_data.pop("next_actions_json"))
+            checkpoint_data["changed_paths"] = json.loads(checkpoint_data.pop("changed_paths_json"))
             checkpoint_sources = json.loads(checkpoint_data.pop("field_sources_json"))
         active_attempt = next((item for item in attempts if item["state"] == "active" and item["branch"] == branch), None)
         latest_archive = connection.execute(
@@ -569,6 +571,7 @@ class MaintenanceReadModel:
             if recent_checkpoint:
                 checkpoint_data = dict(recent_checkpoint)
                 checkpoint_data["next_actions"] = json.loads(checkpoint_data.pop("next_actions_json"))
+                checkpoint_data["changed_paths"] = json.loads(checkpoint_data.pop("changed_paths_json"))
                 checkpoint_sources = json.loads(checkpoint_data.pop("field_sources_json"))
 
         def event_source(event_type: str, *, task_id: str | None = None, stage_id: str | None = None) -> dict:
@@ -687,22 +690,34 @@ class MaintenanceReadModel:
             (latest_archive["task_id"] if latest_archive else legacy.get("task_id"))
         )
         projection["branch"] = branch
-        verification = None
-        if active and active_record:
-            verification = verify_receipts(
-                root, active["task_id"],
-                profile=declaration.get("verification_profile", "auto"),
-                changed_paths=active_data["changed_paths"],
-            )
-        required_actions = []
-        if verification:
-            required_actions.extend(item["command"] for item in verification["problems"])
         linked_stage_id = (
             (active_record or {}).get("stage", {}).get("stage_id")
             or (active_attempt or {}).get("stage_id")
         )
-        if active and linked_stage_id:
-            required_actions.append("end 时明确提供 --stage-review updated|reviewed-no-change")
+        preflight = None
+        verification = None
+        checkpoint_status = "missing"
+        if active and active_record:
+            task_events = []
+            for event in connection.execute(
+                """SELECT event_id, occurred_at, event_type, branch, task_id, payload_json
+                   FROM events WHERE task_id=? ORDER BY occurred_at, rowid""",
+                (active["task_id"],),
+            ).fetchall():
+                item = dict(event)
+                item["payload"] = json.loads(item.pop("payload_json"))
+                task_events.append(item)
+            preflight = assemble_finish_preflight(
+                root,
+                active_record,
+                task_events,
+                linked_stage_id=linked_stage_id,
+                changed_paths=active_data["changed_paths"],
+            )
+            verification = preflight["verification"]
+            checkpoint_status = preflight["checkpoint_status"]
+        if active_data:
+            active_data["checkpoint_status"] = checkpoint_status
         try:
             config = json.loads((root / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -717,7 +732,9 @@ class MaintenanceReadModel:
                 "core_read_order": config.get("core_read_order", ["maintenance/CORE.md"]),
             },
             "verification": verification,
-            "required_actions": list(dict.fromkeys(required_actions)),
+            "finish_preflight": preflight,
+            "checkpoint_status": checkpoint_status if active else "not-applicable",
+            "required_actions": (preflight or {}).get("required_actions", []),
             "git_state": self.git_state(),
             "recent_handoffs": handoffs,
             "active_task": active_data,

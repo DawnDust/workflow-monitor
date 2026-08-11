@@ -123,8 +123,9 @@ class DistributionTests(unittest.TestCase):
         manifest = json.loads((dist / "release-manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(
             set(manifest),
-            {"version", "build_identity", "launcher_min_version", "event_schema", "windows_exe"},
+            {"version", "build_identity", "launcher_min_version", "event_schema", "authenticode", "windows_exe"},
         )
+        self.assertEqual(manifest["authenticode"], {"status": "unsigned"})
         self.assertIn("build_id", manifest["build_identity"])
         self.assertEqual(manifest["windows_exe"]["file"], EXECUTABLE_NAME)
         self.assertEqual(
@@ -132,10 +133,34 @@ class DistributionTests(unittest.TestCase):
             f"https://github.com/DawnDust/workflow-monitor/releases/download/v{CURRENT_VERSION}/{EXECUTABLE_NAME}",
         )
 
+    def test_release_manifest_can_describe_sbom_and_authenticode(self) -> None:
+        dist = Path(self.temp.name) / "dist"
+        dist.mkdir()
+        (dist / EXECUTABLE_NAME).write_bytes(b"signed executable")
+        sbom = dist / "workflow-monitor.spdx.json"
+        sbom.write_text('{"spdxVersion":"SPDX-2.3"}\n', encoding="utf-8")
+        signature = dist / "authenticode.json"
+        signature.write_text(json.dumps({
+            "status": "signed", "subject": "CN=Workflow Monitor", "thumbprint": "ABCD",
+        }), encoding="utf-8")
+
+        subprocess.run([
+            sys.executable, str(SOURCE_ROOT / "scripts/build_release.py"),
+            "--version", CURRENT_VERSION, "--dist", str(dist),
+            "--sbom", str(sbom), "--authenticode-json", str(signature),
+        ], cwd=SOURCE_ROOT, check=True, capture_output=True)
+        manifest = json.loads((dist / "release-manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["sbom"]["file"], sbom.name)
+        self.assertEqual(manifest["sbom"]["format"], "spdx-json")
+        self.assertEqual(manifest["authenticode"]["status"], "signed")
+
     def test_release_tag_must_match_application_version(self) -> None:
         validate_release_tag(CURRENT_VERSION, f"v{CURRENT_VERSION}")
         with self.assertRaisesRegex(RuntimeError, "tag/version mismatch"):
             validate_release_tag(CURRENT_VERSION, "v999.0.0")
+        with self.assertRaisesRegex(RuntimeError, "missing from CHANGELOG"):
+            validate_release_tag("999.0.0", "v999.0.0")
 
     def test_same_version_different_build_is_reported(self) -> None:
         self.init()
@@ -173,6 +198,7 @@ class DistributionTests(unittest.TestCase):
         self.git("tag", "v1.5.0")
         repository = repository_source_identity(self.root)
         identity = {
+            "build_input_fingerprint": repository["build_input_fingerprint"],
             "source_tree": repository["source_tree"],
             "source_tree_algorithm": repository["source_tree_algorithm"],
         }
@@ -196,8 +222,9 @@ class DistributionTests(unittest.TestCase):
         scratch.write_text("first\n", encoding="utf-8")
         repository = repository_source_identity(self.root)
         identity = {
+            "build_input_fingerprint": repository["build_input_fingerprint"],
             "source_tree": repository["source_tree"],
-            "source_tree_algorithm": "git-worktree-v2",
+            "source_tree_algorithm": repository["source_tree_algorithm"],
         }
         self.assertTrue(exe_matches_repository(self.root, identity))
 
@@ -212,6 +239,22 @@ class DistributionTests(unittest.TestCase):
         scratch.write_text("second\n", encoding="utf-8")
 
         self.assertFalse(exe_matches_repository(self.root, identity))
+
+    def test_repository_fingerprint_ignores_documentation_only_commits(self) -> None:
+        source = self.root / "project_hooks/__init__.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("VERSION = 1\n", encoding="utf-8")
+        readme = self.root / "README.md"
+        readme.write_text("first\n", encoding="utf-8")
+        self.commit("baseline")
+        before = repository_source_identity(self.root)
+
+        readme.write_text("second\n", encoding="utf-8")
+        self.commit("documentation only")
+        after = repository_source_identity(self.root)
+
+        self.assertNotEqual(before["source_commit"], after["source_commit"])
+        self.assertEqual(before["build_input_fingerprint"], after["build_input_fingerprint"])
 
     def test_project_root_is_discovered_from_descendant(self) -> None:
         self.init()

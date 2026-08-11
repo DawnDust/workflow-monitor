@@ -44,3 +44,15 @@ The updater reads the official manifest, verifies SHA-256, stores versioned runt
 - `workbench/` stores indexed reusable Markdown aids.
 
 Do not manually rewrite historical event lines or edit SQLite.
+
+## Verifying release artifacts
+
+Every release publishes `workflow-monitor.exe`, `release-manifest.json`, and an SPDX JSON SBOM. Verify the downloaded executable before installing it:
+
+```powershell
+(Get-FileHash .\workflow-monitor.exe -Algorithm SHA256).Hash
+gh attestation verify .\workflow-monitor.exe --repo DawnDust/workflow-monitor
+gh attestation verify .\workflow-monitor.spdx.json --repo DawnDust/workflow-monitor
+```
+
+Compare the SHA-256 value with `release-manifest.json`. The manifest also states whether the executable was Authenticode-signed; unsigned builds remain supported and are disclosed explicitly.
