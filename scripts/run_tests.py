@@ -279,7 +279,11 @@ def stop_smoke_process(process: subprocess.Popen) -> None:
         )
     else:
         process.terminate()
-    process.wait(timeout=5)
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
 
 
 def release_smoke() -> int:
@@ -325,14 +329,7 @@ def release_smoke() -> int:
             if title != "Workflow Monitor":
                 raise RuntimeError("frozen no-argument startup did not expose a Dashboard window within 3 seconds")
         if process.poll() is None:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-                )
-            else:
-                process.terminate()
-            process.wait(timeout=5)
+            stop_smoke_process(process)
         subprocess.run([str(copied), "check"], cwd=portable, check=True, capture_output=True)
         chinese = subprocess.run(
             [str(copied), "context", "--format", "markdown"], cwd=portable,
