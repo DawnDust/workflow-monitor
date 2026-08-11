@@ -18,6 +18,7 @@ from project_hooks.application.action_service import (
     state_token,
 )
 from project_hooks.composition import build_action_service
+from project_hooks.core.lifecycle import finish_preflight
 
 
 def action_service(project_root: Path, *, state_provider, executor) -> WorkflowActionService:
@@ -120,11 +121,38 @@ class WorkflowActionTests(unittest.TestCase):
         self.assertEqual(lifecycle_step({"sidecar": {"phase": "starting"}})["key"], "starting")
         self.assertEqual(lifecycle_step({"sidecar": {"phase": "finishing"}})["key"], "finishing")
         active = {"task_id": "task", "state_updated": False}
-        self.assertEqual(lifecycle_step({"active_task": active, "changed_paths": ["a"]})["key"], "working")
+        self.assertEqual(lifecycle_step({"active_task": active, "changed_paths": ["a"]})["key"], "checkpoint-required")
         active["state_updated"] = True
         self.assertEqual(lifecycle_step({
-            "active_task": active, "changed_paths": ["a"], "health_errors": [], "worktree_quiet": True,
+            "active_task": active, "checkpoint_status": "fresh",
+            "finish_preflight": {"status": "ready", "checkpoint_status": "fresh"},
+            "worktree_quiet": True,
         })["key"], "ready")
+
+    def test_finish_preflight_unifies_checkpoint_verification_and_inference(self) -> None:
+        blocked = finish_preflight({
+            "checkpoint_status": "stale",
+            "verification": {"problems": [{
+                "suite": "full", "reason": "missing", "command": "python scripts/run_tests.py full",
+            }]},
+            "linked_stage_id": "stage",
+            "decisions_added": 1,
+            "project_updated": True,
+        })
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(
+            {item["code"] for item in blocked["blockers"]},
+            {"CHECKPOINT_STALE", "VERIFICATION_MISSING", "STAGE_REVIEW_REQUIRED"},
+        )
+        self.assertEqual(blocked["inferred"]["route"], "changed")
+        self.assertEqual(blocked["inferred"]["main_goal"], "changed")
+
+        ready = finish_preflight({
+            "checkpoint_status": "fresh", "verification": {"problems": []},
+            "linked_stage_id": "stage", "stage_changed": True,
+        })
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual(ready["inferred"]["stage_review"], "updated")
 
     def test_availability_explains_active_branch_version_and_update_blocks(self) -> None:
         state = stable_state()

@@ -132,7 +132,8 @@ CREATE TABLE IF NOT EXISTS project_profile (
 CREATE TABLE IF NOT EXISTS task_checkpoints (
   task_id TEXT PRIMARY KEY, branch TEXT NOT NULL, current_step TEXT NOT NULL,
   judgment TEXT NOT NULL, breakpoint TEXT NOT NULL, next_actions_json TEXT NOT NULL,
-  blocker TEXT NOT NULL, updated_at TEXT NOT NULL, field_sources_json TEXT NOT NULL
+  blocker TEXT NOT NULL, workspace_fingerprint TEXT, changed_paths_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL, field_sources_json TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS test_receipts (
   task_id TEXT NOT NULL, suite TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -212,7 +213,7 @@ REQUIRED_SCHEMA_COLUMNS = {
     "meta": {"key", "value"},
     "events": {"event_id", "schema_version", "event_type", "payload_json"},
     "project_profile": {"branch", "description", "big_goal", "main_goal_version", "event_id"},
-    "task_checkpoints": {"task_id", "current_step", "judgment", "breakpoint", "next_actions_json", "field_sources_json"},
+    "task_checkpoints": {"task_id", "current_step", "judgment", "breakpoint", "next_actions_json", "workspace_fingerprint", "changed_paths_json", "field_sources_json"},
     "test_receipts": {"task_id", "suite", "fingerprint", "receipt_json"},
     "stage_reviews": {"task_id", "stage_id", "result", "event_id"},
     "stages": {
@@ -307,7 +308,8 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
         ).fetchone()
         current = dict(row) if row else {
             "current_step": "", "judgment": "", "breakpoint": "",
-            "next_actions_json": "[]", "blocker": "", "field_sources_json": "{}",
+            "next_actions_json": "[]", "blocker": "", "workspace_fingerprint": None,
+            "changed_paths_json": "[]", "field_sources_json": "{}",
         }
         sources = json.loads(current["field_sources_json"])
         values = {
@@ -325,13 +327,17 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
                     "task_id": task_id, "stage_id": payload.get("stage_id"),
                 }
         connection.execute(
-            """INSERT INTO task_checkpoints VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO task_checkpoints VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(task_id) DO UPDATE SET current_step=excluded.current_step,
                judgment=excluded.judgment, breakpoint=excluded.breakpoint,
                next_actions_json=excluded.next_actions_json, blocker=excluded.blocker,
+               workspace_fingerprint=excluded.workspace_fingerprint,
+               changed_paths_json=excluded.changed_paths_json,
                updated_at=excluded.updated_at, field_sources_json=excluded.field_sources_json""",
             (task_id, event["branch"], values["current_step"], values["judgment"],
              values["breakpoint"], canonical_json(values["next_actions"]), values["blocker"],
+             payload.get("workspace_fingerprint", current["workspace_fingerprint"]),
+             canonical_json(payload.get("changed_paths", json.loads(current["changed_paths_json"]))),
              event["occurred_at"], canonical_json(sources)),
         )
     elif kind == "stage.started":

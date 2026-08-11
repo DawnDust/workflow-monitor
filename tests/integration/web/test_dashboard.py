@@ -361,6 +361,8 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertNotIn("https://", html)
         self.assertIn("prefers-color-scheme", script)
         self.assertIn("location.hash.slice(1)", script)
+        self.assertIn("Checkpoint stale", script)
+        self.assertIn("门禁已通过", script)
         self.assertIn('id="settings-button"', html)
         self.assertIn('href="settings.css"', html)
         self.assertIn('href="workflow-monitor-mark.svg"', html)

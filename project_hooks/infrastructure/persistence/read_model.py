@@ -11,10 +11,13 @@ from typing import Callable
 
 from ... import __version__
 from ...core.catalog import decode_item
+from ...core.lifecycle import finish_preflight
 from ..git import client as git_client
 from ..system.resource_layout import resource_directory_snapshot
 from .store import SCHEMA_VERSION, ensure_database, journal_hash, rows
-from ..system.verification import changed_paths_from_baseline, verify_receipts
+from ..system.verification import (
+    changed_paths_from_baseline, verify_receipts, work_content_fingerprint,
+)
 
 
 class ReadModelError(RuntimeError):
@@ -555,6 +558,7 @@ class MaintenanceReadModel:
         checkpoint_data = dict(checkpoint) if checkpoint else {}
         if checkpoint_data:
             checkpoint_data["next_actions"] = json.loads(checkpoint_data.pop("next_actions_json"))
+            checkpoint_data["changed_paths"] = json.loads(checkpoint_data.pop("changed_paths_json"))
             checkpoint_sources = json.loads(checkpoint_data.pop("field_sources_json"))
         active_attempt = next((item for item in attempts if item["state"] == "active" and item["branch"] == branch), None)
         latest_archive = connection.execute(
@@ -569,6 +573,7 @@ class MaintenanceReadModel:
             if recent_checkpoint:
                 checkpoint_data = dict(recent_checkpoint)
                 checkpoint_data["next_actions"] = json.loads(checkpoint_data.pop("next_actions_json"))
+                checkpoint_data["changed_paths"] = json.loads(checkpoint_data.pop("changed_paths_json"))
                 checkpoint_sources = json.loads(checkpoint_data.pop("field_sources_json"))
 
         def event_source(event_type: str, *, task_id: str | None = None, stage_id: str | None = None) -> dict:
@@ -694,15 +699,44 @@ class MaintenanceReadModel:
                 profile=declaration.get("verification_profile", "auto"),
                 changed_paths=active_data["changed_paths"],
             )
-        required_actions = []
-        if verification:
-            required_actions.extend(item["command"] for item in verification["problems"])
         linked_stage_id = (
             (active_record or {}).get("stage", {}).get("stage_id")
             or (active_attempt or {}).get("stage_id")
         )
-        if active and linked_stage_id:
-            required_actions.append("end 时明确提供 --stage-review updated|reviewed-no-change")
+        checkpoint_status = "missing"
+        if checkpoint_data and active:
+            recorded_fingerprint = checkpoint_data.get("workspace_fingerprint")
+            if not recorded_fingerprint:
+                checkpoint_status = "legacy-unknown"
+            elif recorded_fingerprint == work_content_fingerprint(root):
+                checkpoint_status = "fresh"
+            else:
+                checkpoint_status = "stale"
+        stage_changed = False
+        project_updated = False
+        if active:
+            if linked_stage_id:
+                stage_changed = bool(connection.execute(
+                    """SELECT 1 FROM events WHERE task_id=?
+                       AND event_type IN ('stage.started','stage.updated','stage.state_changed')
+                       AND json_extract(payload_json, '$.stage_id')=? LIMIT 1""",
+                    (active["task_id"], linked_stage_id),
+                ).fetchone())
+            project_updated = bool(connection.execute(
+                "SELECT 1 FROM events WHERE task_id=? AND event_type='project.profile_updated' LIMIT 1",
+                (active["task_id"],),
+            ).fetchone())
+        preflight = finish_preflight({
+            "checkpoint_status": checkpoint_status,
+            "verification": verification,
+            "linked_stage_id": linked_stage_id,
+            "stage_changed": stage_changed,
+            "stage_review": None,
+            "decisions_added": (active_data or {}).get("decisions_added", 0),
+            "project_updated": project_updated,
+        }) if active else None
+        if active_data:
+            active_data["checkpoint_status"] = checkpoint_status
         try:
             config = json.loads((root / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -717,7 +751,9 @@ class MaintenanceReadModel:
                 "core_read_order": config.get("core_read_order", ["maintenance/CORE.md"]),
             },
             "verification": verification,
-            "required_actions": list(dict.fromkeys(required_actions)),
+            "finish_preflight": preflight,
+            "checkpoint_status": checkpoint_status if active else "not-applicable",
+            "required_actions": (preflight or {}).get("required_actions", []),
             "git_state": self.git_state(),
             "recent_handoffs": handoffs,
             "active_task": active_data,

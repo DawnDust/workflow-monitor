@@ -109,10 +109,13 @@ class ProjectHooksSqliteTests(unittest.TestCase):
                    "--next", "continue testing", "--blocker", "none")
 
     def end(self, task_id: str, *, state: str | None = None, route: str = "unchanged",
-            stage_review: str | None = "reviewed-no-change", check: bool = True) -> subprocess.CompletedProcess[str]:
+            stage_review: str | None = "reviewed-no-change", main_goal: str | None = None,
+            check: bool = True) -> subprocess.CompletedProcess[str]:
         args = ["end", task_id, "--result", "completed", "--route", route,
-                "--methods-action", "updated", "--main-goal", "unchanged", "--note", "test completed",
+                "--methods-action", "updated", "--note", "test completed",
                 "--evidence", "unit test"]
+        if main_goal:
+            args += ["--main-goal", main_goal]
         if state:
             args += ["--attempt-state", state]
         if stage_review:
@@ -165,6 +168,25 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(context["state"]["current_step"], "implement projection")
         self.assertEqual(context["field_sources"]["goal"]["event_type"], "task.started")
         self.assertEqual(context["field_sources"]["current_step"]["event_type"], "task.checkpointed")
+
+    def test_context_and_dashboard_share_finish_preflight(self) -> None:
+        task_id = "20260811_preflight_consistency_001"
+        self.start(task_id)
+        self.update_state()
+        (self.root / "project_hooks" / "preflight_probe.py").write_text("changed = True\n", encoding="utf-8")
+        model = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: self.git("branch", "--show-current").stdout.strip(),
+        )
+        context = model.context()
+        dashboard_context = model.dashboard_snapshot()["context"]
+        self.assertEqual(context["checkpoint_status"], "stale")
+        self.assertEqual(
+            [item["code"] for item in context["finish_preflight"]["blockers"]],
+            [item["code"] for item in dashboard_context["finish_preflight"]["blockers"]],
+        )
+        self.assertEqual(context["required_actions"], dashboard_context["required_actions"])
         event_types = [item["event_type"] for item in load_events(self.root / "maintenance/events.jsonl")]
         self.assertIn("task.checkpointed", event_types)
         self.assertNotIn("project_state.updated", event_types)
@@ -978,6 +1000,30 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertIn("state update", rejected.stderr)
         self.update_state()
         self.end(task_id)
+
+    def test_checkpoint_freshness_and_inferred_finish_fields(self) -> None:
+        task_id = "20260811_checkpoint_freshness_001"
+        self.start(task_id)
+        self.update_state("initial checkpoint")
+        (self.root / "notes.txt").write_text("changed after checkpoint\n", encoding="utf-8")
+
+        stale = self.hooks(
+            "end", task_id, "--result", "completed", "--note", "done", check=False,
+        )
+        self.assertIn("CHECKPOINT_STALE", stale.stderr)
+
+        self.update_state("fresh checkpoint")
+        finished = json.loads(self.hooks(
+            "end", task_id, "--result", "completed", "--note", "done",
+        ).stdout)
+        self.assertEqual(finished["route"], "unchanged")
+        self.assertEqual(finished["main_goal"], "unchanged")
+        events = [
+            event for event in load_events(self.root / "maintenance/events.jsonl")
+            if event.get("task_id") == task_id and event["event_type"] == "task.finished"
+        ]
+        self.assertNotIn("methods_action", events[0]["payload"])
+        self.assertNotIn("main_goal", events[0]["payload"])
         history = json.loads(self.hooks("history", "--format", "json").stdout)
         self.assertEqual(history[0]["task_id"], task_id)
 
@@ -1742,6 +1788,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.start(task_id, commit="always")
         self.update_state()
         (self.root / "result.txt").write_text("result\n", encoding="utf-8")
+        self.update_state("result ready")
         self.git("config", "user.name", "")
         self.git("config", "user.email", "")
         first = self.end(task_id, check=False)

@@ -160,14 +160,22 @@ class WorkflowActionService:
         if action_id == "attempt.update" and not state.get("attempt"):
             blockers.append(_block("ATTEMPT_REQUIRED", "当前活动任务没有探索记录"))
         if action_id == "task.finish" and active:
-            if state.get("health_errors"):
+            preflight = state.get("finish_preflight")
+            for item in (preflight or {}).get("blockers", []):
+                blockers.append(_block(
+                    str(item.get("code")), str(item.get("message")),
+                    next_action=item.get("next_action"),
+                ))
+            if preflight is None and state.get("health_errors"):
                 blockers.append(_block(
                     "HEALTH_CHECK_FAILED", "项目检查尚未通过",
                     "；".join(str(item) for item in state.get("health_errors") or []), "health.check",
                 ))
-            if fields and fields.get("route") == "changed" and int(active.get("decisions_added") or 0) < 1:
+            if (preflight is None and fields and fields.get("route") == "changed"
+                    and int(active.get("decisions_added") or 0) < 1):
                 blockers.append(_block(
-                    "DECISION_REQUIRED", "路线变化时必须先记录决策", "当前任务没有决策记录", "decision.add",
+                    "DECISION_REQUIRED", "路线变化时必须先记录决策",
+                    "当前任务没有决策记录", "decision.add",
                 ))
             if fields and not fields.get("writer_stopped"):
                 blockers.append(_block("WRITER_CONFIRMATION_REQUIRED", "请确认 AI 和其他编辑器已经停止写入"))

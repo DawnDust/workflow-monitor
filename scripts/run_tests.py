@@ -25,6 +25,7 @@ MODULES = (
     "tests.unit.application.test_workbench_service",
     "tests.integration.persistence.test_workflow",
     "tests.distribution.test_distribution",
+    "tests.distribution.test_public_release",
     "tests.integration.web.test_dashboard",
     "tests.unit.test_architecture",
 )
@@ -45,6 +46,7 @@ CORE_SMOKE = (
     "tests.integration.persistence.test_workflow.ProjectHooksSqliteTests.test_catalog_cli_scan_relations_context_and_rebuild",
 )
 DISTRIBUTION_CLASS = "tests.distribution.test_distribution.DistributionTests"
+PUBLIC_RELEASE_CLASS = "tests.distribution.test_public_release.PublicReleaseSurfaceTests"
 # The first measured branch baseline is 46%. CLI integration tests execute copied
 # project modules in child processes, so this conservative floor guards regressions
 # without pretending those child paths are uncovered product behavior.
@@ -89,6 +91,7 @@ def fast_ids() -> list[str]:
         names.extend(CORE_SMOKE)
     if distribution_changed or any(path.startswith("tests/") for path in changed):
         names.append(DISTRIBUTION_CLASS)
+        names.append(PUBLIC_RELEASE_CLASS)
     ids = load_ids(names)
     return list(dict.fromkeys(ids))
 
@@ -173,6 +176,10 @@ def validate_release_tag(application_version: str, tag: str | None = None) -> No
     tag = os.environ.get("GITHUB_REF_NAME", "") if tag is None else tag
     if tag.startswith("v") and tag[1:] != application_version:
         raise RuntimeError(f"release tag/version mismatch: tag={tag}, application={application_version}")
+    if tag.startswith("v"):
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        if f"## {application_version}" not in changelog:
+            raise RuntimeError(f"release version missing from CHANGELOG: {application_version}")
 
 
 def descendant_process_ids(process_id: int) -> set[int]:

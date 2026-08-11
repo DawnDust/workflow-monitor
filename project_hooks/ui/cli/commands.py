@@ -86,6 +86,7 @@ from ...infrastructure.system.verification import (
     load_test_receipts,
     receipt_summary,
     verify_receipts,
+    work_content_fingerprint,
 )
 from ...infrastructure.git.build_identity import build_identity
 from ...application.action_service import ActionProgress, WorkflowActionService, action_spec
@@ -115,6 +116,7 @@ from ...infrastructure.system.workbench_packages import (
     workbench_package_consistency_errors,
 )
 from ...core.branches import classify_branch as classify_branch_with_policy
+from ...core.lifecycle import finish_preflight as evaluate_finish_preflight
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -960,8 +962,6 @@ def task_abandon(args: argparse.Namespace) -> dict:
             "evidence": "",
             "result": "abandoned",
             "route": "unchanged",
-            "methods_action": "reviewed-no-change",
-            "main_goal": "unchanged",
             "note": args.reason,
             "verification": receipts,
             "stage_review": {"stage_id": record.get("stage", {}).get("stage_id"), "result": "abandoned"},
@@ -1002,7 +1002,66 @@ def checkpoint_payload(record: dict, args: argparse.Namespace) -> tuple[dict, li
         "next_actions": next_steps if args.next is not None else None,
         "blocker": args.blocker,
     }
-    return {key: value for key, value in values.items() if value is not None}, warnings
+    payload = {key: value for key, value in values.items() if value is not None}
+    if payload:
+        payload["workspace_fingerprint"] = work_content_fingerprint(ROOT)
+        payload["changed_paths"] = [
+            path for path in git_dirty_paths() if path != "maintenance/events.jsonl"
+        ]
+    return payload, warnings
+
+
+def task_finish_preflight(
+    record: dict,
+    *,
+    health_errors: list[str] | None = None,
+    stage_review_result: str | None = None,
+    checkpoint_override: str | None = None,
+    current_snapshot: dict | None = None,
+) -> dict:
+    branch = record["git"]["branch"]
+    task_id = record["task_id"]
+    task_events = [event for event in load_events(journal_path()) if event.get("task_id") == task_id]
+    checkpoints = [event for event in task_events if event["event_type"] == "task.checkpointed"]
+    checkpoint_status = checkpoint_override or "missing"
+    if checkpoint_override is None and checkpoints:
+        recorded = checkpoints[-1].get("payload", {}).get("workspace_fingerprint")
+        if not recorded:
+            checkpoint_status = "legacy-unknown"
+        elif recorded == work_content_fingerprint(ROOT):
+            checkpoint_status = "fresh"
+        else:
+            checkpoint_status = "stale"
+    linked_stage_id = (record.get("stage") or {}).get("stage_id")
+    if not linked_stage_id and record.get("git", {}).get("track") != "stable":
+        attempt = get_attempt(branch)
+        linked_stage_id = attempt.get("stage_id") if attempt else None
+    stage_changed = any(
+        event["event_type"] in {"stage.started", "stage.updated", "stage.state_changed"}
+        and event.get("payload", {}).get("stage_id") == linked_stage_id
+        for event in task_events
+    )
+    current = current_snapshot or snapshot()
+    paths = changed(record["baseline"], current)
+    verification = verify_receipts(
+        ROOT, task_id,
+        profile=record["declaration"].get("verification_profile", "auto"),
+        changed_paths=paths,
+    )
+    state = {
+        "checkpoint_status": checkpoint_status,
+        "verification": verification,
+        "health_errors": health_errors or [],
+        "linked_stage_id": linked_stage_id,
+        "stage_changed": stage_changed,
+        "stage_review": stage_review_result,
+        "decisions_added": sum(event["event_type"] == "decision.recorded" for event in task_events),
+        "project_updated": any(event["event_type"] == "project.profile_updated" for event in task_events),
+    }
+    result = evaluate_finish_preflight(state)
+    result["verification"] = verification
+    result["facts"] = state
+    return result
 
 
 def state_arguments_requested(args: argparse.Namespace) -> bool:
@@ -1176,6 +1235,8 @@ def stage_review(record: dict, requested: str | None) -> dict:
         and event["event_type"] in {"stage.started", "stage.updated", "stage.state_changed"}
         and event.get("payload", {}).get("stage_id") == stage_id
     ]
+    if requested is None and stage_events:
+        requested = "updated"
     if requested is None:
         raise WorkflowError("有关联阶段时必须使用 --stage-review updated|reviewed-no-change")
     if requested == "updated" and not stage_events:
@@ -1215,27 +1276,40 @@ def finish_task(args: argparse.Namespace) -> dict:
         return report
     check_repository(raise_on_error=True)
     final_state_requested = state_arguments_requested(args)
-    if not record["state_updated"] and not final_state_requested:
-        raise WorkflowError("结束前必须执行 state update 记录 task checkpoint")
-    if args.route == "changed" and record["decisions_added"] < 1:
-        raise WorkflowError("路线发生变化时必须在本任务执行 decision add")
     attempt = get_attempt(branch) if record["git"]["track"] != "stable" else None
     events: list[dict] = []
     if final_state_requested:
         checkpoint, _warnings = checkpoint_payload(record, args)
         if checkpoint:
             events.append(emit("task.checkpointed", branch=branch, task_id=args.task_id, payload=checkpoint))
-    paths = changed(record["baseline"], snapshot())
-    verification = verify_receipts(
-        ROOT, args.task_id,
-        profile=record["declaration"].get("verification_profile", "auto"),
-        changed_paths=paths,
-    )
-    if verification["problems"]:
-        remedies = "; ".join(item["command"] for item in verification["problems"])
-        details = ", ".join(f"{item['suite']}:{item['reason']}" for item in verification["problems"])
-        raise WorkflowError(f"测试回执门禁未通过（{details}）；请运行：{remedies}")
     review = stage_review(record, args.stage_review)
+    preflight = task_finish_preflight(
+        record,
+        stage_review_result=review["result"],
+        checkpoint_override="fresh" if final_state_requested else None,
+    )
+    if preflight["blockers"]:
+        details = "；".join(
+            f"[{item['code']}] {item['message']}"
+            + (f"；请运行：{item['next_action']}" if item.get("next_action") else "")
+            for item in preflight["blockers"]
+        )
+        raise WorkflowError(details)
+    inferred = preflight["inferred"]
+    if args.route is not None and args.route != inferred["route"]:
+        raise WorkflowError(f"--route {args.route} 与本任务事件推导值 {inferred['route']} 冲突")
+    route = args.route or inferred["route"]
+    if args.main_goal is not None and args.main_goal != inferred["main_goal"]:
+        raise WorkflowError(
+            f"--main-goal {args.main_goal} 与 project.profile_updated 推导值 {inferred['main_goal']} 冲突"
+        )
+    compatibility_warnings = []
+    if args.methods_action is not None:
+        compatibility_warnings.append("--methods-action 已弃用且不再写入 v4 task.finished")
+    if args.main_goal is not None:
+        compatibility_warnings.append("--main-goal 已弃用；主目标变化由 project.profile_updated 推导")
+    paths = changed(record["baseline"], snapshot())
+    verification = preflight["verification"]
     if attempt:
         if not args.attempt_state:
             raise WorkflowError("探索任务结束时必须显式使用 --attempt-state")
@@ -1255,7 +1329,7 @@ def finish_task(args: argparse.Namespace) -> dict:
     evidence = "; ".join(args.evidence or [])
     events.append(emit("task.finished", branch=branch, task_id=args.task_id, payload={
         "evidence": evidence, "result": args.result,
-        "route": args.route, "methods_action": args.methods_action, "main_goal": args.main_goal,
+        "route": route,
         "note": args.note,
         "verification": verification["accepted"], "stage_review": review,
     }))
@@ -1263,13 +1337,14 @@ def finish_task(args: argparse.Namespace) -> dict:
     finished_at = timestamp()
     finish_values = {
         "result": args.result,
-        "route": args.route,
-        "methods_action": args.methods_action,
-        "main_goal": args.main_goal,
+        "route": route,
+        "main_goal": inferred["main_goal"],
         "note": args.note,
         "attempt_state": args.attempt_state,
         "verification": verification["accepted"], "stage_review": review,
     }
+    if compatibility_warnings:
+        finish_values["deprecation_warnings"] = compatibility_warnings
     finish_state = {
         "signature": signature,
         "events": events,
@@ -2074,10 +2149,12 @@ def dashboard_action_state() -> dict:
     except ActiveTaskError as exc:
         sidecar = {"phase": "invalid", "error": str(exc)}
     active: dict | None = None
+    active_record: dict | None = None
     changed_paths: list[str] = []
     worktree_snapshot: dict = {}
     try:
         record = read_active()
+        active_record = record
         worktree_snapshot = snapshot()
         changed_paths = changed(record.get("baseline", {}), worktree_snapshot)
         active = {
@@ -2121,6 +2198,10 @@ def dashboard_action_state() -> dict:
         last_completed = connection.last_completed_task()
     finally:
         connection.close()
+    preflight = (
+        task_finish_preflight(active_record, current_snapshot=worktree_snapshot)
+        if active_record else None
+    )
     return {
         "application_version": __version__,
         "build_identity": build_identity(),
@@ -2139,6 +2220,8 @@ def dashboard_action_state() -> dict:
         "git": git_state,
         "attempt": attempt,
         "health_errors": health_errors,
+        "finish_preflight": preflight,
+        "checkpoint_status": (preflight or {}).get("checkpoint_status", "not-applicable"),
         "last_completed": last_completed,
     }
 
@@ -2187,6 +2270,7 @@ def dashboard_execute_action(
         return finish_task(_action_namespace(
             values,
             task_id=requested_task_id or record["task_id"], evidence=None, commit_message=None,
+            route=None, methods_action=None, main_goal=None,
             attempt_state=None, goal=None, judgment=None, breakpoint=None,
             blocker=None, current_step=None, status=None, main_goal_version=None, next=None,
             stage_review=None,

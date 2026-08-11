@@ -23,6 +23,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dist", type=Path, default=Path("dist"))
     parser.add_argument("--version", required=True)
+    parser.add_argument("--sbom", type=Path)
+    parser.add_argument("--authenticode-json", type=Path)
     args = parser.parse_args()
     if args.version != __version__:
         raise SystemExit(
@@ -41,17 +43,35 @@ def main() -> int:
         build_identity = json.loads(build_info_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         build_identity = {"build_id": "unknown"}
+    authenticode = {"status": "unsigned"}
+    if args.authenticode_json:
+        try:
+            authenticode = json.loads(args.authenticode_json.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"invalid Authenticode metadata: {exc}") from exc
+        if authenticode.get("status") not in {"signed", "unsigned"}:
+            raise SystemExit("invalid Authenticode status")
     manifest = {
         "version": args.version,
         "build_identity": build_identity,
         "launcher_min_version": "1.0.0",
         "event_schema": {"minimum": 1, "maximum": SCHEMA_VERSION},
+        "authenticode": authenticode,
         "windows_exe": {
             "file": executable.name,
             "url": base + executable.name,
             "sha256": digest(executable),
         },
     }
+    if args.sbom:
+        sbom = args.sbom.resolve()
+        if not sbom.is_file():
+            raise SystemExit(f"missing SPDX SBOM: {sbom}")
+        manifest["sbom"] = {
+            "file": sbom.name,
+            "format": "spdx-json",
+            "sha256": digest(sbom),
+        }
     (dist / "release-manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",

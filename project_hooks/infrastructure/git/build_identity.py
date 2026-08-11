@@ -9,11 +9,13 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
-SOFTWARE_SOURCE_PATHS = (
+BUILD_INPUT_PATHS = (
     "project_hooks", "scripts", "tests", ".github/workflows", ".githooks",
-    "requirements-dev.txt", ".coveragerc", ".gitattributes", ".gitignore",
-    "AGENTS.md", "README.md", "CHANGELOG.md", "maintenance/README.md",
+    "requirements-dev.txt", "requirements-docs.txt", "mkdocs.yml",
+    ".coveragerc", ".gitattributes", ".gitignore",
 )
+# Compatibility import for callers that use the old public constant.
+SOFTWARE_SOURCE_PATHS = BUILD_INPUT_PATHS
 
 
 def _git(root: Path, *args: str) -> str | None:
@@ -32,7 +34,7 @@ def _untracked_digests(root: Path) -> list[str]:
         completed = subprocess.run(
             [
                 "git", "ls-files", "--others", "--exclude-standard", "-z", "--",
-                *SOFTWARE_SOURCE_PATHS,
+                *BUILD_INPUT_PATHS,
             ],
             cwd=root,
             capture_output=True,
@@ -57,23 +59,45 @@ def _untracked_digests(root: Path) -> list[str]:
     return sorted(values)
 
 
+def _build_input_fingerprint(root: Path) -> str:
+    """Hash build-input paths by content, independently of the current commit."""
+    tracked = _git(root, "ls-files", "-z", "--", *BUILD_INPUT_PATHS)
+    relative_paths = set(tracked.split("\0")) if tracked is not None else set()
+    relative_paths.discard("")
+    for value in _untracked_digests(root):
+        relative_paths.add(value.split("\0", 1)[0])
+    digest = hashlib.sha256()
+    for relative in sorted(relative_paths):
+        path = root / relative
+        digest.update(relative.encode("utf-8", errors="surrogateescape") + b"\0")
+        try:
+            content = path.read_bytes() if path.is_file() else b"<missing>"
+        except OSError:
+            content = b"<unreadable>"
+        digest.update(hashlib.sha256(content).digest())
+    return digest.hexdigest()
+
+
 def repository_source_identity(root: Path) -> dict:
     """Fingerprint the current Git worktree, including untracked file contents."""
     root = root.resolve()
     commit = _git(root, "rev-parse", "HEAD")
     status = _git(
         root, "status", "--porcelain=v1", "--untracked-files=all", "--",
-        *SOFTWARE_SOURCE_PATHS,
+        *BUILD_INPUT_PATHS,
     )
-    diff = _git(root, "diff", "--binary", "HEAD", "--", *SOFTWARE_SOURCE_PATHS) or ""
+    diff = _git(root, "diff", "--binary", "HEAD", "--", *BUILD_INPUT_PATHS) or ""
     legacy_material = f"{commit or 'unknown'}\n{status or ''}\n{diff}"
     legacy_tree = hashlib.sha256(legacy_material.encode("utf-8")).hexdigest()
     material = legacy_material + "\nuntracked-content-v2\n" + "\n".join(_untracked_digests(root))
+    build_inputs = _build_input_fingerprint(root)
     return {
         "source_commit": commit,
-        "source_tree": hashlib.sha256(material.encode("utf-8", errors="surrogateescape")).hexdigest(),
+        "build_input_fingerprint": build_inputs,
+        "source_tree": build_inputs,
         "legacy_source_tree": legacy_tree,
-        "source_tree_algorithm": "git-worktree-v2",
+        "worktree_v2_source_tree": hashlib.sha256(material.encode("utf-8", errors="surrogateescape")).hexdigest(),
+        "source_tree_algorithm": "build-input-content-v3",
         "dirty": bool(status),
     }
 
@@ -84,15 +108,17 @@ def exe_matches_repository(root: Path, identity: dict | None = None) -> bool | N
     if tracked_source is None:
         return None
     executable = identity or build_identity()
-    expected = executable.get("source_tree")
+    expected = executable.get("build_input_fingerprint") or executable.get("source_tree")
     if not expected:
         return None
     repository = repository_source_identity(root)
-    actual = (
-        repository["source_tree"]
-        if executable.get("source_tree_algorithm") == "git-worktree-v2"
-        else repository["legacy_source_tree"]
-    )
+    algorithm = executable.get("source_tree_algorithm")
+    if executable.get("build_input_fingerprint") or algorithm == "build-input-content-v3":
+        actual = repository["build_input_fingerprint"]
+    elif algorithm == "git-worktree-v2":
+        actual = repository["worktree_v2_source_tree"]
+    else:
+        actual = repository["legacy_source_tree"]
     return str(expected) == str(actual)
 
 
@@ -116,6 +142,7 @@ def build_identity() -> dict:
     return {
         "build_id": f"source-{tree[:12]}",
         "source_commit": repository["source_commit"],
+        "build_input_fingerprint": repository["build_input_fingerprint"],
         "source_tree": tree,
         "source_tree_algorithm": repository["source_tree_algorithm"],
         "built_at": None,
@@ -124,8 +151,14 @@ def build_identity() -> dict:
     }
 
 
-def build_warning(project_build_id: str | None) -> str | None:
+def build_warning(
+    project_build_id: str | None,
+    project_build_input_fingerprint: str | None = None,
+) -> str | None:
     current = build_identity()["build_id"]
     if project_build_id and project_build_id != current:
+        current_inputs = build_identity().get("build_input_fingerprint")
+        if project_build_input_fingerprint and project_build_input_fingerprint == current_inputs:
+            return f"等价源码的不同构建：当前 {current}，项目记录 {project_build_id}"
         return f"同一版本检测到不同构建：当前 {current}，项目记录 {project_build_id}"
     return None
