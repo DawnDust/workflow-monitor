@@ -9,10 +9,12 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
+from ... import __version__
 from ...core.catalog import decode_item
 from ..git import client as git_client
 from ..system.resource_layout import resource_directory_snapshot
 from .store import SCHEMA_VERSION, ensure_database, journal_hash, rows
+from ..system.verification import changed_paths_from_baseline, verify_receipts
 
 
 class ReadModelError(RuntimeError):
@@ -409,10 +411,10 @@ class MaintenanceReadModel:
         return [cls._decode_attempt(connection, row) for row in attempt_rows]
 
     def _context(self, connection: sqlite3.Connection, branch: str) -> dict:
-        state = connection.execute("SELECT * FROM project_state WHERE branch=?", (branch,)).fetchone()
+        legacy_state = connection.execute("SELECT * FROM project_state WHERE branch=?", (branch,)).fetchone()
         state_branch = branch
-        if state is None and branch != "main":
-            state = connection.execute("SELECT * FROM project_state WHERE branch='main'").fetchone()
+        if legacy_state is None and branch != "main":
+            legacy_state = connection.execute("SELECT * FROM project_state WHERE branch='main'").fetchone()
             state_branch = "main"
         handoff_branch = branch
         archive_rows = rows(
@@ -472,23 +474,37 @@ class MaintenanceReadModel:
         )[:5]
         for item in handoffs:
             item.pop("event_id", None)
-        state_data = dict(state) if state else None
-        if state_data:
-            state_data["next_steps"] = json.loads(state_data.pop("next_steps_json"))
-            state_data["source_branch"] = state_branch
         active = connection.execute("SELECT * FROM active_tasks ORDER BY started_at DESC LIMIT 1").fetchone()
         active_data = None
+        active_record = None
         if active:
+            active_record = json.loads(active["record_json"])
             active_data = {
                 "task_id": active["task_id"],
                 "started_at": active["started_at"],
                 "branch": active["branch"],
                 "state_updated": bool(active["state_updated"]),
+                "checkpoint_recorded": bool(active["state_updated"]),
                 "decisions_added": active["decisions_added"],
+                "scope": active_record.get("declaration", {}).get("scope"),
+                "acceptance": active_record.get("declaration", {}).get("acceptance", []),
+                "track": active_record.get("git", {}).get("track"),
+                "lifecycle_phase": "active",
+                "changed_paths": changed_paths_from_baseline(
+                    self.database_path.parent.parent, active_record.get("baseline", {}),
+                ),
             }
         profile = connection.execute(
             "SELECT * FROM project_profile WHERE branch='main'"
         ).fetchone()
+        profile = dict(profile) if profile else None
+        profile_main_goal_explicit = False
+        if profile and profile.get("event_id"):
+            profile_event = connection.execute(
+                "SELECT payload_json FROM events WHERE event_id=?", (profile["event_id"],),
+            ).fetchone()
+            if profile_event:
+                profile_main_goal_explicit = "main_goal_version" in json.loads(profile_event[0])
         stage_rows = connection.execute(
             "SELECT * FROM stages ORDER BY sequence DESC"
         ).fetchall()
@@ -521,15 +537,198 @@ class MaintenanceReadModel:
             reverse=True,
         )
         current_stage = next((item for item in stages if item["status"] == "active"), None)
+        latest_stage_review = connection.execute(
+            "SELECT * FROM stage_reviews ORDER BY occurred_at DESC, event_id DESC LIMIT 1"
+        ).fetchone()
+        stage_review_data = dict(latest_stage_review) if latest_stage_review else None
+        root = self.database_path.parent.parent
+        legacy = dict(legacy_state) if legacy_state else {}
+        if legacy:
+            legacy["next_steps"] = json.loads(legacy.pop("next_steps_json"))
+            legacy["source_branch"] = state_branch
+        checkpoint = None
+        checkpoint_sources: dict = {}
+        if active:
+            checkpoint = connection.execute(
+                "SELECT * FROM task_checkpoints WHERE task_id=?", (active["task_id"],),
+            ).fetchone()
+        checkpoint_data = dict(checkpoint) if checkpoint else {}
+        if checkpoint_data:
+            checkpoint_data["next_actions"] = json.loads(checkpoint_data.pop("next_actions_json"))
+            checkpoint_sources = json.loads(checkpoint_data.pop("field_sources_json"))
+        active_attempt = next((item for item in attempts if item["state"] == "active" and item["branch"] == branch), None)
+        latest_archive = connection.execute(
+            "SELECT * FROM task_archive WHERE branch=? ORDER BY occurred_at DESC, event_id DESC LIMIT 1",
+            (branch,),
+        ).fetchone()
+        latest_payload = json.loads(latest_archive["payload_json"]) if latest_archive else {}
+        if not checkpoint_data and latest_archive:
+            recent_checkpoint = connection.execute(
+                "SELECT * FROM task_checkpoints WHERE task_id=?", (latest_archive["task_id"],),
+            ).fetchone()
+            if recent_checkpoint:
+                checkpoint_data = dict(recent_checkpoint)
+                checkpoint_data["next_actions"] = json.loads(checkpoint_data.pop("next_actions_json"))
+                checkpoint_sources = json.loads(checkpoint_data.pop("field_sources_json"))
+
+        def event_source(event_type: str, *, task_id: str | None = None, stage_id: str | None = None) -> dict:
+            clauses, params = ["event_type=?"], [event_type]
+            if task_id:
+                clauses.append("task_id=?")
+                params.append(task_id)
+            if stage_id:
+                clauses.append("json_extract(payload_json, '$.stage_id')=?")
+                params.append(stage_id)
+            row = connection.execute(
+                "SELECT event_id, task_id FROM events WHERE " + " AND ".join(clauses)
+                + " ORDER BY occurred_at DESC, event_id DESC LIMIT 1", params,
+            ).fetchone()
+            return {
+                "event_type": event_type,
+                "event_id": row["event_id"] if row else None,
+                "task_id": row["task_id"] if row else task_id,
+                "stage_id": stage_id,
+            }
+
+        start_source = event_source("task.started", task_id=active["task_id"]) if active else None
+        attempt_task_id = (
+            active["task_id"] if active else
+            (latest_archive["task_id"] if latest_archive else None)
+        )
+        attempt_source = event_source("attempt.updated", task_id=attempt_task_id) if active_attempt else None
+        if active_attempt and (not attempt_source or not attempt_source.get("event_id")):
+            attempt_source = event_source("attempt.started", task_id=active_attempt.get("attempt_id"))
+        stage_source = event_source("stage.updated", stage_id=current_stage["stage_id"]) if current_stage else None
+        if current_stage and not stage_source.get("event_id"):
+            stage_source = event_source("stage.started", stage_id=current_stage["stage_id"])
+        profile_source = {
+            "event_type": "project.profile_updated", "event_id": profile["event_id"] if profile else None,
+            "task_id": profile["task_id"] if profile else None, "stage_id": None,
+        } if profile else None
+        recent_source = {
+            "event_type": "task.finished", "event_id": latest_archive["event_id"],
+            "task_id": latest_archive["task_id"], "stage_id": None,
+        } if latest_archive else None
+        legacy_source = None
+        if legacy:
+            legacy_event = connection.execute(
+                "SELECT event_type, event_id, task_id FROM events "
+                "WHERE branch=? AND event_type IN ('project_state.updated', 'legacy.project_state_imported') "
+                "ORDER BY occurred_at DESC, event_id DESC LIMIT 1",
+                (legacy.get("source_branch") or branch,),
+            ).fetchone()
+            legacy_source = {
+                "event_type": legacy_event["event_type"] if legacy_event else "project_state.updated",
+                "event_id": legacy_event["event_id"] if legacy_event else None,
+                "task_id": legacy_event["task_id"] if legacy_event else legacy.get("task_id"),
+                "stage_id": None,
+            }
+
+        projection: dict = {}
+        field_sources: dict = {}
+
+        def choose(field: str, candidates: list[tuple[object, dict | None]]) -> None:
+            for value, source in candidates:
+                if value not in (None, "", []):
+                    projection[field] = value
+                    field_sources[field] = source
+                    return
+
+        declaration = (active_record or {}).get("declaration", {})
+        choose("goal", [
+            (declaration.get("scope"), start_source),
+            ((active_attempt or {}).get("goal"), attempt_source),
+            ((current_stage or {}).get("goal"), stage_source),
+            ((profile or {}).get("big_goal") if profile else None, profile_source),
+            (latest_archive["summary"] if latest_archive else None, recent_source),
+            (legacy.get("goal"), legacy_source),
+        ])
+        choose("current_step", [
+            (checkpoint_data.get("current_step"), checkpoint_sources.get("current_step")),
+            ((active_attempt or {}).get("current_step"), attempt_source),
+            ((current_stage or {}).get("current_step"), stage_source),
+            (legacy.get("status"), legacy_source),
+        ])
+        choose("judgment", [
+            (checkpoint_data.get("judgment"), checkpoint_sources.get("judgment")),
+            ((active_attempt or {}).get("progress") or (active_attempt or {}).get("conclusion"), attempt_source),
+            ((current_stage or {}).get("summary"), stage_source),
+            (latest_payload.get("note"), recent_source),
+            (legacy.get("judgment"), legacy_source),
+        ])
+        choose("breakpoint", [
+            (checkpoint_data.get("breakpoint"), checkpoint_sources.get("breakpoint")),
+            ((active_attempt or {}).get("current_step"), attempt_source),
+            ((current_stage or {}).get("current_step"), stage_source),
+            (latest_payload.get("note"), recent_source),
+            (legacy.get("breakpoint"), legacy_source),
+        ])
+        choose("next_steps", [
+            (checkpoint_data.get("next_actions"), checkpoint_sources.get("next_actions")),
+            ([active_attempt.get("next_step")] if active_attempt and active_attempt.get("next_step") else None, attempt_source),
+            ([current_stage.get("next_step")] if current_stage and current_stage.get("next_step") else None, stage_source),
+            (legacy.get("next_steps"), legacy_source),
+        ])
+        choose("blocker", [
+            (checkpoint_data.get("blocker"), checkpoint_sources.get("blocker")),
+            ((current_stage or {}).get("blocker"), stage_source),
+            (legacy.get("blocker"), legacy_source),
+        ])
+        choose("main_goal_version", [
+            ((profile or {}).get("main_goal_version") if profile_main_goal_explicit else None, profile_source),
+            (legacy.get("main_goal_version"), legacy_source),
+            ((profile or {}).get("main_goal_version") if profile else None, profile_source),
+        ])
+        projection["status"] = projection.get("current_step") or "未设置"
+        field_sources["status"] = field_sources.get("current_step")
+        projection["task_id"] = (
+            active["task_id"] if active else
+            checkpoint_data.get("task_id") or
+            (latest_archive["task_id"] if latest_archive else legacy.get("task_id"))
+        )
+        projection["branch"] = branch
+        verification = None
+        if active and active_record:
+            verification = verify_receipts(
+                root, active["task_id"],
+                profile=declaration.get("verification_profile", "auto"),
+                changed_paths=active_data["changed_paths"],
+            )
+        required_actions = []
+        if verification:
+            required_actions.extend(item["command"] for item in verification["problems"])
+        linked_stage_id = (
+            (active_record or {}).get("stage", {}).get("stage_id")
+            or (active_attempt or {}).get("stage_id")
+        )
+        if active and linked_stage_id:
+            required_actions.append("end 时明确提供 --stage-review updated|reviewed-no-change")
+        try:
+            config = json.loads((root / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            config = {}
         return {
             "branch": branch,
-            "state": state_data,
+            "state": projection or None,
+            "overview_state": projection or None,
+            "field_sources": field_sources,
+            "contract": {
+                "application_version": __version__, "schema_version": SCHEMA_VERSION,
+                "core_read_order": config.get("core_read_order", ["maintenance/CORE.md"]),
+            },
+            "verification": verification,
+            "required_actions": list(dict.fromkeys(required_actions)),
             "git_state": self.git_state(),
             "recent_handoffs": handoffs,
             "active_task": active_data,
-            "project_profile": dict(profile) if profile else None,
+            "project_profile": profile,
             "current_stage": current_stage,
-            "stage_freshness_warning": stage_freshness_warning(current_stage, handoffs),
+            "stage_review_status": stage_review_data,
+            "stage_freshness_warning": (
+                None
+                if stage_review_data and handoffs and stage_review_data.get("task_id") == handoffs[0].get("task_id")
+                else stage_freshness_warning(current_stage, handoffs)
+            ),
             "stages": stages,
             "attempts": attempts,
             "active_attempts": [item for item in attempts if item["state"] == "active"],

@@ -11,7 +11,8 @@ from datetime import datetime
 from pathlib import Path
 
 
-ACTIVE_TASK_FORMAT = 1
+ACTIVE_TASK_FORMAT = 2
+SUPPORTED_ACTIVE_TASK_FORMATS = (1, 2)
 
 
 class ActiveTaskError(RuntimeError):
@@ -60,7 +61,7 @@ def save_active_state(
         "format": ACTIVE_TASK_FORMAT,
         "phase": phase,
         "record": record,
-        "state_updated": bool(state_updated),
+        "checkpoint_recorded": bool(state_updated),
         "decisions_added": int(decisions_added),
         "finish": finish,
     }
@@ -78,8 +79,11 @@ def load_active_state(state_dir: Path) -> dict | None:
     except (OSError, ValueError) as exc:
         raise ActiveTaskError(f"活动任务 sidecar 无法读取: {exc}") from exc
     checksum = envelope.pop("checksum", None)
-    if envelope.get("format") != ACTIVE_TASK_FORMAT or checksum != _checksum(envelope):
+    if envelope.get("format") not in SUPPORTED_ACTIVE_TASK_FORMATS or checksum != _checksum(envelope):
         raise ActiveTaskError("活动任务 sidecar 校验失败；请运行 task recover")
+    if envelope.get("format") == 1:
+        envelope["checkpoint_recorded"] = bool(envelope.get("state_updated"))
+    envelope["state_updated"] = bool(envelope.get("checkpoint_recorded"))
     envelope["checksum"] = checksum
     return envelope
 
@@ -102,7 +106,7 @@ def active_row_matches(database: Path, state_dir: Path) -> bool:
         connection.close()
     expected = (
         record["task_id"], record["started_at"], record["git"]["branch"],
-        _canonical(record), int(state["state_updated"]), int(state["decisions_added"]),
+        _canonical(record), int(state["checkpoint_recorded"]), int(state["decisions_added"]),
     )
     return len(rows) == 1 and tuple(rows[0]) == expected
 
@@ -136,7 +140,7 @@ def restore_active_row(database: Path, state_dir: Path, *, force: bool = False) 
                      decisions_added=excluded.decisions_added""",
                 (
                     record["task_id"], record["started_at"], record["git"]["branch"],
-                    _canonical(record), int(state["state_updated"]), int(state["decisions_added"]),
+                    _canonical(record), int(state["checkpoint_recorded"]), int(state["decisions_added"]),
                 ),
             )
     finally:

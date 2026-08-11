@@ -75,7 +75,7 @@ class DistributionTests(unittest.TestCase):
             "version": CURRENT_VERSION,
             "build_identity": {"build_id": build_id} if build_id else {},
             "launcher_min_version": "1.0.0",
-            "event_schema": {"minimum": 1, "maximum": 3},
+            "event_schema": {"minimum": 1, "maximum": 4},
             "windows_exe": {
                 "file": windows_exe.name,
                 "url": windows_exe.as_uri(),
@@ -92,6 +92,10 @@ class DistributionTests(unittest.TestCase):
         self.assertFalse((self.root / "project_hooks").exists())
         self.assertTrue((self.root / ".codex/project-maintenance-workflow.json").is_file())
         self.assertTrue((self.root / ".codex/project-maintenance-installation.json").is_file())
+        config = json.loads((self.root / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["core_read_order"], ["maintenance/CORE.md"])
+        for name in ("README.md", "CORE.md", "RESEARCH.md", "OPERATIONS.md"):
+            self.assertTrue((self.root / "maintenance" / name).is_file())
         self.assertIn("workflow.initialized", (self.root / "maintenance/events.jsonl").read_text(encoding="utf-8"))
         for name in ("source", "data", "theory", "analysis", "outputs", "others", "reports"):
             self.assertTrue((self.root / "resources" / name / ".gitkeep").is_file())
@@ -314,6 +318,38 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(installation["build_identity"]["build_id"])
         self.assertTrue((self.root / ".project_hooks/maintenance.sqlite3").is_file())
 
+    def test_project_update_promotes_legacy_main_goal_version_once(self) -> None:
+        self.init("1.6.1")
+        journal = self.root / "maintenance/events.jsonl"
+        profile = new_event(
+            "project.profile_updated", branch="main", task_id="legacy-profile",
+            payload={"description": "legacy project", "big_goal": "legacy goal"},
+            timezone="Asia/Shanghai",
+        )
+        profile["schema_version"] = 3
+        legacy = new_event(
+            "project_state.updated", branch="main", task_id="legacy-state",
+            payload={
+                "status": "completed", "main_goal_version": "v19", "goal": "legacy goal",
+                "judgment": "done", "breakpoint": "done", "next_steps": [], "blocker": "none",
+            },
+            timezone="Asia/Shanghai",
+        )
+        legacy["schema_version"] = 3
+        append_events(journal, self.root / ".project_hooks", [profile, legacy])
+        self.commit()
+        apply_project_update(self.root, CURRENT_VERSION)
+        events = load_events(journal)
+        promoted = [
+            event for event in events
+            if event["event_type"] == "project.profile_updated"
+            and event["payload"].get("migration_source_event_id") == legacy["event_id"]
+        ]
+        self.assertEqual(len(promoted), 1)
+        self.assertEqual(promoted[0]["payload"]["main_goal_version"], "v19")
+        self.assertEqual(promoted[0]["payload"]["description"], "legacy project")
+        self.assertEqual(promoted[0]["payload"]["big_goal"], "legacy goal")
+
     def test_project_update_appends_taxonomy_v2_migration_once(self) -> None:
         self.init("1.3.0")
         journal = self.root / "maintenance/events.jsonl"
@@ -378,6 +414,28 @@ class DistributionTests(unittest.TestCase):
         repeated = apply_project_update(self.root, CURRENT_VERSION)
         self.assertEqual(readme.read_bytes(), customized)
         self.assertIn("maintenance/README.md", repeated["conflicts"])
+
+    def test_update_migrates_default_and_preserves_custom_core_read_order(self) -> None:
+        self.init("1.6.1")
+        config_path = self.root / ".codex/project-maintenance-workflow.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["core_read_order"] = ["maintenance/README.md"]
+        config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.commit()
+        apply_project_update(self.root, CURRENT_VERSION)
+        migrated = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["core_read_order"], ["maintenance/CORE.md"])
+
+        self.commit("migrate default core order")
+        custom = json.loads(config_path.read_text(encoding="utf-8"))
+        custom["core_read_order"] = ["custom/RULES.md", "maintenance/README.md", "custom/RULES.md"]
+        (self.root / "custom").mkdir()
+        (self.root / "custom/RULES.md").write_text("# Rules\n", encoding="utf-8")
+        config_path.write_text(json.dumps(custom, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.commit("customize core order")
+        apply_project_update(self.root, CURRENT_VERSION)
+        preserved = json.loads(config_path.read_text(encoding="utf-8"))["core_read_order"]
+        self.assertEqual(preserved, ["maintenance/CORE.md", "custom/RULES.md", "maintenance/README.md"])
 
     def test_failed_migration_restores_managed_files(self) -> None:
         self.init()

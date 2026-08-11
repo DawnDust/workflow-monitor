@@ -30,7 +30,7 @@ from ..persistence.store import (
 from ..persistence.database import integrity_check, latest_active_task_id
 
 
-TEMPLATE_VERSION = 5
+TEMPLATE_VERSION = 6
 INSTALLATION_PATH = Path(".codex/project-maintenance-installation.json")
 CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
 AGENTS_BEGIN = "<!-- project-maintenance-hooks:begin -->"
@@ -59,7 +59,9 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - 用户只需用自然语言描述任务；AI 提取目标、验收和证据，任务 ID、时间、分支、状态令牌和安全默认值由工作流代码处理。
 - 稳定维护只在 `main` 使用 `--track stable`；研究和实验使用独立探索分支；无法可靠判断轨道时必须在对话中询问用户。
 - 一个探索分支只对应一条探索记录；同一分支的后续任务复用该记录，任务回执和 Git 提交仅作为探索内部的过程证据。
-- 使用 `state update`、`decision add` 和 `attempt update` 保存进展，最后必须运行 `end`。
+- 使用 `state update --current-step ...`、`decision add` 和 `attempt update` 保存进展，最后必须运行 `end`。
+- 代码写入后运行 fast；结束时按 Context 的测试回执门禁补齐 full 或 release。
+- 探索启动前必须有关联阶段或记录明确的无阶段理由；有关联阶段的任务结束时必须显式审阅阶段。
 - 项目资料和大阶段只通过 `project update` 与 `stage` 指令记录；探索进度使用 `attempt update` 的结构化步骤字段。
 - 科研资料文件只放在 `resources/` 的七个标准子目录，并通过 `catalog` 指令登记；`check` 必须保持通过。
 - 科研辅助内容通过 `workbench item/package` 建立项目内索引；既有外置软件提醒继续兼容 `workbench external`。工作台不保存凭据或绝对路径，不自动执行、安装、启动、联网检查或加入日常 context。
@@ -96,7 +98,52 @@ workbench/**/*.md text eol=lf
 workbench/**/manifest.json text eol=lf
 # project-maintenance-hooks:end"""
 
-MAINTENANCE_README = """# 项目维护规范
+MAINTENANCE_README = """# Workflow Monitor 项目维护索引
+
+动态事实只写入 `maintenance/events.jsonl`，SQLite、Context、Dashboard、交接和阶段视图均为可重建投影。
+
+- [CORE.md](CORE.md)：每次 AI 任务必读的生命周期、轨道、安全、测试和阶段契约。
+- [RESEARCH.md](RESEARCH.md)：阶段、探索、Catalog 与 Workbench。
+- [OPERATIONS.md](OPERATIONS.md)：安装、升级、恢复、诊断、交付与发布。
+- `ARCHITECTURE.md`：代码边界和读写模型架构。
+
+`maintenance/events.jsonl` 只追加且不得改写历史行；`.project_hooks/maintenance.sqlite3` 和测试回执均为本地生成物。
+"""
+
+MAINTENANCE_CORE = """# Workflow Monitor 核心契约
+
+1. 每次任务先运行 `.\\workflow-monitor.exe context --format markdown`，再读取本文件；首次写入前运行 `start`。
+2. 稳定维护只在 `main` 使用 `--track stable`；不确定改动使用 `research|experiment|sandbox`。无法判断时询问用户。
+3. 动态事实只记录一次：任务目标和验收来自 `task.started`，项目资料来自 `project.profile_updated`，任务进度来自 `task.checkpointed`，结束结果来自 `task.finished`。
+4. 使用 `state update --current-step ...` 保存 checkpoint；路线变化使用 `decision add`；探索证据使用 `attempt update`。
+5. 代码写入后运行 `python scripts/run_tests.py fast`。结束门禁按实际改动要求同一指纹的 fast/full；release profile 要求 fast/release。纯文档和治理改动由 `end` 内置检查验证。
+6. 有关联阶段的任务必须在 `end --stage-review updated|reviewed-no-change` 明确审阅。`updated` 必须有本任务产生的阶段事件。
+7. 最后必须运行 `end`。禁止改写既有事件、直接编辑 SQLite、删除活动 sidecar、在 main 试改、自动合并。
+8. 推送、PR、合并、数据库重建、软件升级和正式发布必须取得用户授权。
+"""
+
+MAINTENANCE_RESEARCH = """# 科研与阶段规范
+
+全项目最多一个 active 阶段。使用 `stage start/update` 管理阶段事实；探索只引用阶段和任务 ID，不复制目标状态。
+
+探索轨道启动前若没有 active 阶段，工作流返回阶段草案并阻止启动。用户确认后先用短 stable 生命周期创建阶段；用户明确不需要阶段时，用 `--without-stage-reason` 记录理由。
+
+科研资料只放在 `resources/source|data|theory|analysis|outputs|others|reports/` 并通过 `catalog` 登记。工作台内容通过 `workbench item/package` 建立索引；不保存凭据或绝对路径，不自动执行、安装、启动或联网检查。Markdown 公式使用 Markdown/LaTeX 语法。
+
+只有证据完整且状态为 `validated` 的探索可准备 Squash PR；合并等待用户明确确认。
+"""
+
+MAINTENANCE_OPERATIONS = """# 安装、恢复与交付
+
+- 新 clone/worktree：放置根目录 EXE，运行 `.\\workflow-monitor.exe install`。
+- 升级：在无活动任务、干净且同步的 main 上运行 `.\\workflow-monitor.exe update`。首次写入 Schema v4 后不可降级到仅支持 v1-v3 的版本。
+- 恢复：异常中断运行 `task recover`；明确放弃运行 `task abandon --reason <原因>`。
+- 诊断：使用 `diagnostics status/export`；诊断不自动上传。
+- 验证：代码写入后 fast，任务结束前按 Context 的 required_actions 补齐 full/release，再运行 `check` 与 `db verify`。
+- 交付：Dashboard 只读。提交、推送、PR、合并、正式 EXE 构建和发布分别等待用户确认。
+"""
+
+LEGACY_MAINTENANCE_README = """# 项目维护规范
 
 本项目使用 Workflow Monitor 保存项目资料、阶段、任务生命周期、研究尝试、决策、交接和科研资料索引。
 `maintenance/events.jsonl` 是追加式永久事件源；`.project_hooks/maintenance.sqlite3`
@@ -182,7 +229,7 @@ def default_config() -> dict:
         "timezone": "Asia/Shanghai",
         "state_dir": ".project_hooks",
         "backend": "project_hooks",
-        "core_read_order": ["maintenance/README.md"],
+        "core_read_order": ["maintenance/CORE.md"],
         "context_command": ".\\workflow-monitor.exe context --format markdown",
         "maintenance_store": {
             "engine": "sqlite",
@@ -205,6 +252,9 @@ def template_files() -> dict[str, str]:
     files = {
         ".githooks/pre-commit": HOOK_TEMPLATE,
         "maintenance/README.md": MAINTENANCE_README,
+        "maintenance/CORE.md": MAINTENANCE_CORE,
+        "maintenance/RESEARCH.md": MAINTENANCE_RESEARCH,
+        "maintenance/OPERATIONS.md": MAINTENANCE_OPERATIONS,
     }
     files.update({f"{item.relative_path}/.gitkeep": "\n" for item in RESOURCE_DIRECTORIES})
     files.update({f"{relative.as_posix()}/.gitkeep": "\n" for relative in (WORKBENCH_LOCAL, WORKBENCH_IMPORTED)})
@@ -392,7 +442,13 @@ def migrate_config(root: Path) -> None:
     current.setdefault("timezone", defaults["timezone"])
     current.setdefault("state_dir", defaults["state_dir"])
     current.setdefault("backend", defaults["backend"])
-    current.setdefault("core_read_order", defaults["core_read_order"])
+    old_order = current.get("core_read_order")
+    if old_order in (None, ["maintenance/README.md"]):
+        current["core_read_order"] = defaults["core_read_order"]
+    else:
+        current["core_read_order"] = list(dict.fromkeys([
+            "maintenance/CORE.md", *old_order,
+        ]))
     current.setdefault("context_command", defaults["context_command"])
     current.setdefault("maintenance_store", defaults["maintenance_store"])
     current["maintenance_store"]["schema_version"] = SCHEMA_VERSION
@@ -411,6 +467,9 @@ def validate_project(root: Path) -> None:
         INSTALLATION_PATH,
         Path(".githooks/pre-commit"),
         Path("maintenance/README.md"),
+        Path("maintenance/CORE.md"),
+        Path("maintenance/RESEARCH.md"),
+        Path("maintenance/OPERATIONS.md"),
         Path("maintenance/events.jsonl"),
     ):
         if not (root / relative).is_file():
@@ -444,6 +503,35 @@ def _preserving_append(journal: Path, event: dict) -> None:
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def profile_authority_migration(events: list[dict], timezone: str) -> dict | None:
+    profiles = [
+        event for event in events
+        if event["event_type"] == "project.profile_updated" and event["branch"] == "main"
+    ]
+    latest_profile = profiles[-1] if profiles else None
+    if latest_profile and "main_goal_version" in latest_profile["payload"]:
+        return None
+    legacy_states = [
+        event for event in events
+        if event["event_type"] in {"project_state.updated", "legacy.project_state_imported"}
+        and event["branch"] == "main" and event["payload"].get("main_goal_version")
+    ]
+    if not legacy_states:
+        return None
+    legacy = legacy_states[-1]
+    profile = latest_profile["payload"] if latest_profile else {}
+    return new_event(
+        "project.profile_updated", branch="main", task_id=None,
+        payload={
+            "description": profile.get("description", ""),
+            "big_goal": profile.get("big_goal", legacy["payload"].get("goal", "")),
+            "main_goal_version": legacy["payload"]["main_goal_version"],
+            "migration_source_event_id": legacy["event_id"],
+        },
+        timezone=timezone,
+    )
 
 
 def apply_project_update(root: Path, target_version: str) -> dict:
@@ -512,7 +600,13 @@ def apply_project_update(root: Path, target_version: str) -> dict:
         ensure_resource_directories(root)
         journal = root / "maintenance/events.jsonl"
         timezone = json.loads((root / CONFIG_PATH).read_text(encoding="utf-8")).get("timezone", "Asia/Shanghai")
-        migration_items = taxonomy_migration_items(load_events(journal))
+        existing_events = load_events(journal)
+        profile_migration = profile_authority_migration(existing_events, timezone)
+        if profile_migration:
+            _preserving_append(journal, profile_migration)
+            changed.append("maintenance/events.jsonl:project-profile-authority-v4")
+            existing_events.append(profile_migration)
+        migration_items = taxonomy_migration_items(existing_events)
         if migration_items:
             migration_event = new_event(
                 "workbench.taxonomy_migrated", branch="main", task_id=None,

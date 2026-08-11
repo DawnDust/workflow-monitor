@@ -30,6 +30,9 @@ from project_hooks.infrastructure.persistence.read_model import (
     stage_freshness_warning,
 )
 from project_hooks.infrastructure.persistence.store import append_events, ensure_database, load_events, record_events, rebuild
+from project_hooks.infrastructure.system.verification import (
+    iso_now, verification_fingerprint, verify_receipts, write_test_receipt,
+)
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[3]
@@ -91,21 +94,29 @@ class ProjectHooksSqliteTests(unittest.TestCase):
                               text=True, encoding="utf-8", capture_output=True, check=check)
 
     def start(self, task_id: str, *extra: str, commit: str = "never", check: bool = True) -> subprocess.CompletedProcess[str]:
+        extra_args = list(extra)
+        if "--track" in extra_args:
+            track = extra_args[extra_args.index("--track") + 1]
+            if track != "stable" and "--without-stage-reason" not in extra_args:
+                extra_args += ["--without-stage-reason", "legacy exploration fixture"]
         return self.hooks("start", task_id, "--kind", "analysis", "--scope", "test database workflow",
                           "--acceptance", "workflow behaves deterministically", "--git-commit", commit,
                           "--task-size", "large" if commit == "always" else "small",
-                          *extra, check=check)
+                          *extra_args, check=check)
 
     def update_state(self, breakpoint: str = "test completed") -> None:
         self.hooks("state", "update", "--judgment", "test judgment", "--breakpoint", breakpoint,
                    "--next", "continue testing", "--blocker", "none")
 
-    def end(self, task_id: str, *, state: str | None = None, route: str = "unchanged", check: bool = True) -> subprocess.CompletedProcess[str]:
+    def end(self, task_id: str, *, state: str | None = None, route: str = "unchanged",
+            stage_review: str | None = "reviewed-no-change", check: bool = True) -> subprocess.CompletedProcess[str]:
         args = ["end", task_id, "--result", "completed", "--route", route,
                 "--methods-action", "updated", "--main-goal", "unchanged", "--note", "test completed",
                 "--evidence", "unit test"]
         if state:
             args += ["--attempt-state", state]
+        if stage_review:
+            args += ["--stage-review", stage_review]
         return self.hooks(*args, check=check)
 
     def commit_all(self, message: str) -> None:
@@ -140,6 +151,111 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         context = json.loads(self.hooks("context", "--format", "json").stdout)
         self.assertEqual(context["git_state"]["relation"], "unavailable")
         self.assertEqual(self.git("config", "--local", "--get", "core.hooksPath").stdout.strip(), ".githooks")
+
+    def test_v4_checkpoint_is_single_source_and_exposes_field_sources(self) -> None:
+        task_id = "20260811_checkpoint_v4_001"
+        self.start(task_id)
+        self.hooks(
+            "state", "update", "--current-step", "implement projection",
+            "--judgment", "checkpoint wins", "--breakpoint", "read model",
+            "--next", "run tests", "--blocker", "none",
+        )
+        context = json.loads(self.hooks("context", "--format", "json").stdout)
+        self.assertEqual(context["state"]["goal"], "test database workflow")
+        self.assertEqual(context["state"]["current_step"], "implement projection")
+        self.assertEqual(context["field_sources"]["goal"]["event_type"], "task.started")
+        self.assertEqual(context["field_sources"]["current_step"]["event_type"], "task.checkpointed")
+        event_types = [item["event_type"] for item in load_events(self.root / "maintenance/events.jsonl")]
+        self.assertIn("task.checkpointed", event_types)
+        self.assertNotIn("project_state.updated", event_types)
+
+    def test_state_compatibility_aliases_route_without_goal_duplication(self) -> None:
+        task_id = "20260811_state_alias_v4_001"
+        self.start(task_id)
+        accepted = json.loads(self.hooks(
+            "state", "update", "--status", "working", "--goal", "test database workflow",
+        ).stdout)
+        self.assertEqual(accepted["current_step"], "working")
+        self.assertTrue(accepted["warnings"])
+        rejected = self.hooks("state", "update", "--goal", "different goal", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("stage update / project update", rejected.stderr)
+        version = self.hooks("state", "update", "--main-goal-version", "v2", check=False)
+        self.assertNotEqual(version.returncode, 0)
+        self.assertIn("project update --main-goal-version", version.stderr)
+
+    def test_exploration_without_stage_is_blocked_before_branch_or_event(self) -> None:
+        before = (self.root / "maintenance/events.jsonl").read_bytes()
+        blocked = self.hooks(
+            "start", "20260811_stage_draft_v4_001", "--kind", "analysis",
+            "--scope", "test database workflow", "--acceptance", "workflow behaves deterministically",
+            "--git-commit", "never", "--task-size", "small",
+            "--track", "experiment", "--topic", "stage-draft", check=False,
+        )
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("PH-S120", blocked.stderr)
+        self.assertEqual(self.git("branch", "--show-current").stdout.strip(), "main")
+        self.assertEqual((self.root / "maintenance/events.jsonl").read_bytes(), before)
+        allowed = self.start(
+            "20260811_stage_bypass_v4_001", "--track", "experiment", "--topic", "stage-bypass",
+            "--without-stage-reason", "isolated spike",
+        )
+        self.assertEqual(json.loads(allowed.stdout)["branch"], "experiment/stage-bypass")
+        attempt = next(
+            item for item in load_events(self.root / "maintenance/events.jsonl")
+            if item["event_type"] == "attempt.started"
+        )
+        self.assertEqual(attempt["payload"]["without_stage_reason"], "isolated spike")
+        self.assertNotIn("goal", attempt["payload"])
+
+    def test_receipts_become_stale_when_software_inputs_change(self) -> None:
+        task_id = "20260811_receipt_stale_v4_001"
+        self.start(task_id)
+        runner = self.root / "scripts/run_tests.py"
+        runner.parent.mkdir()
+        runner.write_text("# fixture runner\n", encoding="utf-8")
+        now = iso_now()
+        write_test_receipt(
+            self.root, suite="fast", result="passed", tests=10, failures=0,
+            coverage=None, started_at=now, finished_at=now,
+        )
+        passed = verify_receipts(
+            self.root, task_id, profile="auto", changed_paths=["project_hooks/core/events.py"],
+        )
+        self.assertEqual(passed["problems"][0]["suite"], "full")
+        target = self.root / "project_hooks/core/events.py"
+        target.write_text(target.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        stale = verify_receipts(
+            self.root, task_id, profile="auto", changed_paths=["project_hooks/core/events.py"],
+        )
+        self.assertEqual({item["reason"] for item in stale["problems"]}, {"stale", "missing"})
+
+    def test_stage_review_is_explicit_and_cannot_claim_false_update(self) -> None:
+        setup_id = "20260811_stage_setup_v4_001"
+        self.start(setup_id)
+        self.update_state()
+        self.hooks(
+            "stage", "start", "schema-v4", "--title", "Schema v4", "--goal", "converge state",
+            "--acceptance", "projection is single source",
+        )
+        self.end(setup_id)
+        task_id = "20260811_stage_review_v4_001"
+        self.start(task_id)
+        self.update_state()
+        missing = self.end(task_id, stage_review=None, check=False)
+        self.assertIn("--stage-review", missing.stderr)
+        false_update = self.hooks(
+            "end", task_id, "--result", "completed", "--route", "unchanged",
+            "--methods-action", "reviewed-no-change", "--main-goal", "unchanged",
+            "--note", "reviewed", "--stage-review", "updated", check=False,
+        )
+        self.assertIn("找不到本任务产生的阶段事件", false_update.stderr)
+        finished = self.hooks(
+            "end", task_id, "--result", "completed", "--route", "unchanged",
+            "--methods-action", "reviewed-no-change", "--main-goal", "unchanged",
+            "--note", "reviewed", "--stage-review", "reviewed-no-change",
+        )
+        self.assertEqual(json.loads(finished.stdout)["stage_review"]["result"], "reviewed-no-change")
 
     def test_ensure_database_recreates_v3_numbered_legacy_schema_and_preserves_active_task(self) -> None:
         database = self.root / ".project_hooks/legacy.sqlite3"
@@ -507,8 +623,12 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         ]
         self.assertEqual(
             sorted(item["event_type"] for item in events),
-            ["project_state.updated", "task.finished", "task.started"],
+            ["task.checkpointed", "task.finished", "task.started"],
         )
+        finish = next(item for item in load_events(self.root / "maintenance/events.jsonl")
+                      if item["task_id"] == task_id and item["event_type"] == "task.finished")
+        self.assertNotIn("started_at", finish["payload"])
+        self.assertNotIn("attempt_state", finish["payload"])
 
     def test_finish_uses_one_event_and_recent_handoffs_deduplicate_legacy(self) -> None:
         task_id = "20260723_single_finish_001"
@@ -693,7 +813,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertTrue(any(item["event_type"] == "workbench.external_upserted" for item in events))
         connection = sqlite3.connect(self.root / ".project_hooks/maintenance.sqlite3")
         try:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
         finally:
             connection.close()
         self.update_state("external tools recorded")
@@ -836,6 +956,14 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertFalse(history.exists())
         context = json.loads(self.hooks("context", "--format", "json").stdout)
         self.assertEqual(context["state"]["goal"], "Goal")
+        migrated_events = load_events(maintenance / "events.jsonl")
+        self.assertTrue(any(item["event_type"] == "legacy.project_state_imported" for item in migrated_events))
+        self.assertTrue(any(item["event_type"] == "project.profile_updated" for item in migrated_events))
+        self.assertFalse(any(
+            item["event_type"] == "project_state.updated" and item.get("schema_version") == 4
+            for item in migrated_events
+        ))
+        self.assertEqual(context["field_sources"]["main_goal_version"]["event_type"], "project.profile_updated")
         self.assertEqual(len(json.loads(self.hooks("decisions", "--format", "json").stdout)), 1)
         self.assertGreaterEqual(len(json.loads(self.hooks("history", "--format", "json").stdout)), 2)
 
@@ -1342,7 +1470,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(context["state"]["goal"], "legacy")
         connection = sqlite3.connect(database)
         try:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
         finally:
             connection.close()
 
@@ -1637,7 +1765,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_end_warns_when_active_stage_was_not_updated_by_task(self) -> None:
+    def test_end_requires_and_records_explicit_stage_review(self) -> None:
         setup_task = "20260801_stage_setup_001"
         self.start(setup_task)
         self.hooks(
@@ -1652,5 +1780,5 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.start(task_id)
         self.update_state()
         result = json.loads(self.end(task_id).stdout)
-        self.assertEqual(result["warnings"][0]["code"], "stage-not-updated")
-        self.assertEqual(result["warnings"][0]["stage_id"], "validation")
+        self.assertEqual(result["stage_review"]["result"], "reviewed-no-change")
+        self.assertEqual(result["stage_review"]["stage_id"], "validation")

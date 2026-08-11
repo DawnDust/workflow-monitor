@@ -126,7 +126,23 @@ CREATE TABLE IF NOT EXISTS project_state (
 );
 CREATE TABLE IF NOT EXISTS project_profile (
   branch TEXT PRIMARY KEY, description TEXT NOT NULL, big_goal TEXT NOT NULL,
-  updated_at TEXT NOT NULL, task_id TEXT, event_id TEXT NOT NULL UNIQUE
+  main_goal_version TEXT NOT NULL DEFAULT 'v1', updated_at TEXT NOT NULL,
+  task_id TEXT, event_id TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS task_checkpoints (
+  task_id TEXT PRIMARY KEY, branch TEXT NOT NULL, current_step TEXT NOT NULL,
+  judgment TEXT NOT NULL, breakpoint TEXT NOT NULL, next_actions_json TEXT NOT NULL,
+  blocker TEXT NOT NULL, updated_at TEXT NOT NULL, field_sources_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS test_receipts (
+  task_id TEXT NOT NULL, suite TEXT NOT NULL, fingerprint TEXT NOT NULL,
+  tests INTEGER NOT NULL, failures INTEGER NOT NULL, coverage REAL,
+  finished_at TEXT NOT NULL, receipt_json TEXT NOT NULL,
+  PRIMARY KEY(task_id, suite)
+);
+CREATE TABLE IF NOT EXISTS stage_reviews (
+  task_id TEXT PRIMARY KEY, stage_id TEXT, result TEXT NOT NULL,
+  occurred_at TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE
 );
 CREATE TABLE IF NOT EXISTS stages (
   stage_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL UNIQUE, title TEXT NOT NULL,
@@ -189,12 +205,16 @@ CREATE INDEX IF NOT EXISTS catalog_relations_target ON catalog_relations(target_
 PROJECTION_TABLES = (
     "events", "project_state", "project_profile", "stages", "handoffs", "task_archive", "decisions",
     "attempts", "attempt_evidence", "explorations", "catalog_relations", "catalog_items",
+    "task_checkpoints", "test_receipts", "stage_reviews",
 )
 
 REQUIRED_SCHEMA_COLUMNS = {
     "meta": {"key", "value"},
     "events": {"event_id", "schema_version", "event_type", "payload_json"},
-    "project_profile": {"branch", "description", "big_goal", "event_id"},
+    "project_profile": {"branch", "description", "big_goal", "main_goal_version", "event_id"},
+    "task_checkpoints": {"task_id", "current_step", "judgment", "breakpoint", "next_actions_json", "field_sources_json"},
+    "test_receipts": {"task_id", "suite", "fingerprint", "receipt_json"},
+    "stage_reviews": {"task_id", "stage_id", "result", "event_id"},
     "stages": {
         "stage_id", "sequence", "title", "goal", "acceptance_json", "status",
         "summary", "current_step", "next_step", "blocker", "evidence_json",
@@ -256,7 +276,7 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
          event["branch"], event["task_id"], canonical_json(payload)),
     )
     kind = event["event_type"]
-    if kind == "project_state.updated":
+    if kind in {"project_state.updated", "legacy.project_state_imported"}:
         connection.execute(
             """INSERT INTO project_state VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(branch) DO UPDATE SET status=excluded.status,
@@ -270,12 +290,49 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
         )
     elif kind == "project.profile_updated":
         connection.execute(
-            """INSERT INTO project_profile VALUES (?, ?, ?, ?, ?, ?)
+            """INSERT INTO project_profile VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(branch) DO UPDATE SET description=excluded.description,
-               big_goal=excluded.big_goal, updated_at=excluded.updated_at,
+               big_goal=excluded.big_goal, main_goal_version=excluded.main_goal_version,
+               updated_at=excluded.updated_at,
                task_id=excluded.task_id, event_id=excluded.event_id""",
             (event["branch"], payload.get("description", ""), payload.get("big_goal", ""),
-             event["occurred_at"], event["task_id"], event["event_id"]),
+             payload.get("main_goal_version", "v1"), event["occurred_at"], event["task_id"], event["event_id"]),
+        )
+    elif kind == "task.checkpointed":
+        task_id = event["task_id"]
+        if not task_id:
+            raise StoreError("task.checkpointed 必须包含 task_id")
+        row = connection.execute(
+            "SELECT * FROM task_checkpoints WHERE task_id=?", (task_id,),
+        ).fetchone()
+        current = dict(row) if row else {
+            "current_step": "", "judgment": "", "breakpoint": "",
+            "next_actions_json": "[]", "blocker": "", "field_sources_json": "{}",
+        }
+        sources = json.loads(current["field_sources_json"])
+        values = {
+            "current_step": current["current_step"],
+            "judgment": current["judgment"],
+            "breakpoint": current["breakpoint"],
+            "next_actions": json.loads(current["next_actions_json"]),
+            "blocker": current["blocker"],
+        }
+        for field in ("current_step", "judgment", "breakpoint", "next_actions", "blocker"):
+            if field in payload:
+                values[field] = payload[field]
+                sources[field] = {
+                    "event_type": kind, "event_id": event["event_id"],
+                    "task_id": task_id, "stage_id": payload.get("stage_id"),
+                }
+        connection.execute(
+            """INSERT INTO task_checkpoints VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(task_id) DO UPDATE SET current_step=excluded.current_step,
+               judgment=excluded.judgment, breakpoint=excluded.breakpoint,
+               next_actions_json=excluded.next_actions_json, blocker=excluded.blocker,
+               updated_at=excluded.updated_at, field_sources_json=excluded.field_sources_json""",
+            (task_id, event["branch"], values["current_step"], values["judgment"],
+             values["breakpoint"], canonical_json(values["next_actions"]), values["blocker"],
+             event["occurred_at"], canonical_json(sources)),
         )
     elif kind == "stage.started":
         connection.execute(
@@ -324,11 +381,32 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
              payload["task"], payload["result"], payload["main_goal_change"]),
         )
     elif kind in {"task.finished", "task.receipt_imported"}:
+        start_row = connection.execute(
+            "SELECT payload_json FROM events WHERE task_id=? AND event_type='task.started' ORDER BY occurred_at, event_id LIMIT 1",
+            (event["task_id"],),
+        ).fetchone()
+        start_payload = json.loads(start_row[0]) if start_row else {}
+        summary = payload.get("summary") or start_payload.get("scope") or ""
         connection.execute(
             "INSERT INTO task_archive VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (event["event_id"], event["branch"], event["task_id"], event["occurred_at"],
-             payload["summary"], payload.get("evidence", ""), payload["result"], canonical_json(payload)),
+             summary, payload.get("evidence", ""), payload["result"], canonical_json(payload)),
         )
+        for receipt in payload.get("verification", []):
+            connection.execute(
+                "INSERT OR REPLACE INTO test_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (event["task_id"], receipt["suite"], receipt["fingerprint"],
+                 int(receipt.get("tests", 0)), int(receipt.get("failures", 0)),
+                 receipt.get("coverage"), receipt.get("finished_at", event["occurred_at"]),
+                 canonical_json(receipt)),
+            )
+        review = payload.get("stage_review")
+        if isinstance(review, dict):
+            connection.execute(
+                "INSERT OR REPLACE INTO stage_reviews VALUES (?, ?, ?, ?, ?)",
+                (event["task_id"], review.get("stage_id"), review["result"],
+                 event["occurred_at"], event["event_id"]),
+            )
     elif kind == "decision.recorded":
         connection.execute(
             "INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -336,6 +414,14 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
              payload["decision"], payload["alternatives"], payload["basis"], payload["reopen_condition"], event["task_id"]),
         )
     elif kind == "attempt.started":
+        source_task_id = payload.get("source_task_id") or event["task_id"]
+        started = connection.execute(
+            "SELECT payload_json FROM events WHERE task_id=? AND event_type='task.started' ORDER BY occurred_at, event_id LIMIT 1",
+            (source_task_id,),
+        ).fetchone()
+        declaration = json.loads(started[0]) if started else {}
+        goal = payload.get("goal") or declaration.get("scope") or ""
+        acceptance = payload.get("acceptance") or declaration.get("acceptance") or []
         connection.execute(
             """INSERT INTO attempts (
                attempt_id, branch, track, topic, base_commit, goal, acceptance_json,
@@ -344,13 +430,13 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL,
                          'active', NULL, NULL, ?, ?)""",
             (payload["attempt_id"], event["branch"], payload["track"], payload["topic"], payload["base_commit"],
-             payload["goal"], canonical_json(payload["acceptance"]), payload.get("stage_id"),
+             goal, canonical_json(acceptance), payload.get("stage_id"),
              event["occurred_at"], event["occurred_at"]),
         )
         connection.execute(
             "INSERT INTO explorations VALUES (?, ?, ?, ?, 'active', '', ?)",
             (event["event_id"], event["branch"], event["occurred_at"],
-             payload["goal"], event["branch"]),
+             goal, event["branch"]),
         )
     elif kind == "attempt.updated":
         attempt_id = payload["attempt_id"]
@@ -416,10 +502,24 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
                  attempt["goal"], attempt["state"], evidence, payload["archive_branch"]),
             )
     elif kind == "exploration.recorded":
+        attempt = None
+        if payload.get("attempt_id"):
+            attempt = connection.execute(
+                "SELECT goal FROM attempts WHERE attempt_id=?", (payload["attempt_id"],),
+            ).fetchone()
+        evidence = payload.get("evidence")
+        if evidence is None and payload.get("attempt_id"):
+            evidence = "; ".join(
+                row[0] for row in connection.execute(
+                    "SELECT evidence FROM attempt_evidence WHERE attempt_id=? ORDER BY occurred_at, event_id",
+                    (payload["attempt_id"],),
+                ).fetchall()
+            )
         connection.execute(
             "INSERT INTO explorations VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (event["event_id"], payload["branch"], event["occurred_at"], payload["goal"],
-             payload["result"], payload["evidence"], payload["disposition_ref"]),
+            (event["event_id"], payload["branch"], event["occurred_at"],
+             payload.get("goal") or (attempt["goal"] if attempt else ""),
+             payload["result"], evidence or "", payload["disposition_ref"]),
         )
     elif kind == "catalog.item_upserted":
         existing = connection.execute(
