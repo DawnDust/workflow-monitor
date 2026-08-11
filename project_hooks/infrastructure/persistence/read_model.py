@@ -11,13 +11,11 @@ from typing import Callable
 
 from ... import __version__
 from ...core.catalog import decode_item
-from ...core.lifecycle import finish_preflight
 from ..git import client as git_client
+from ..system.finish_preflight import assemble_finish_preflight
 from ..system.resource_layout import resource_directory_snapshot
 from .store import SCHEMA_VERSION, ensure_database, journal_hash, rows
-from ..system.verification import (
-    changed_paths_from_baseline, verify_receipts, work_content_fingerprint,
-)
+from ..system.verification import changed_paths_from_baseline
 
 
 class ReadModelError(RuntimeError):
@@ -692,49 +690,32 @@ class MaintenanceReadModel:
             (latest_archive["task_id"] if latest_archive else legacy.get("task_id"))
         )
         projection["branch"] = branch
-        verification = None
-        if active and active_record:
-            verification = verify_receipts(
-                root, active["task_id"],
-                profile=declaration.get("verification_profile", "auto"),
-                changed_paths=active_data["changed_paths"],
-            )
         linked_stage_id = (
             (active_record or {}).get("stage", {}).get("stage_id")
             or (active_attempt or {}).get("stage_id")
         )
+        preflight = None
+        verification = None
         checkpoint_status = "missing"
-        if checkpoint_data and active:
-            recorded_fingerprint = checkpoint_data.get("workspace_fingerprint")
-            if not recorded_fingerprint:
-                checkpoint_status = "legacy-unknown"
-            elif recorded_fingerprint == work_content_fingerprint(root):
-                checkpoint_status = "fresh"
-            else:
-                checkpoint_status = "stale"
-        stage_changed = False
-        project_updated = False
-        if active:
-            if linked_stage_id:
-                stage_changed = bool(connection.execute(
-                    """SELECT 1 FROM events WHERE task_id=?
-                       AND event_type IN ('stage.started','stage.updated','stage.state_changed')
-                       AND json_extract(payload_json, '$.stage_id')=? LIMIT 1""",
-                    (active["task_id"], linked_stage_id),
-                ).fetchone())
-            project_updated = bool(connection.execute(
-                "SELECT 1 FROM events WHERE task_id=? AND event_type='project.profile_updated' LIMIT 1",
+        if active and active_record:
+            task_events = []
+            for event in connection.execute(
+                """SELECT event_id, occurred_at, event_type, branch, task_id, payload_json
+                   FROM events WHERE task_id=? ORDER BY occurred_at, rowid""",
                 (active["task_id"],),
-            ).fetchone())
-        preflight = finish_preflight({
-            "checkpoint_status": checkpoint_status,
-            "verification": verification,
-            "linked_stage_id": linked_stage_id,
-            "stage_changed": stage_changed,
-            "stage_review": None,
-            "decisions_added": (active_data or {}).get("decisions_added", 0),
-            "project_updated": project_updated,
-        }) if active else None
+            ).fetchall():
+                item = dict(event)
+                item["payload"] = json.loads(item.pop("payload_json"))
+                task_events.append(item)
+            preflight = assemble_finish_preflight(
+                root,
+                active_record,
+                task_events,
+                linked_stage_id=linked_stage_id,
+                changed_paths=active_data["changed_paths"],
+            )
+            verification = preflight["verification"]
+            checkpoint_status = preflight["checkpoint_status"]
         if active_data:
             active_data["checkpoint_status"] = checkpoint_status
         try:

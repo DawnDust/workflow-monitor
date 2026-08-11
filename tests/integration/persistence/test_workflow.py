@@ -230,6 +230,59 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(attempt["payload"]["without_stage_reason"], "isolated spike")
         self.assertNotIn("goal", attempt["payload"])
 
+    def test_same_timestamp_rebuild_preserves_declaration_before_attempt(self) -> None:
+        database = self.root / ".project_hooks/same-time.sqlite3"
+        journal = self.root / "maintenance/same-time-events.jsonl"
+        occurred_at = "2026-08-11 00:00:00"
+        append_events(journal, self.root / ".project_hooks", [
+            {
+                "event_id": "z-task-start", "schema_version": 4,
+                "event_type": "task.started", "occurred_at": occurred_at,
+                "branch": "experiment/same-time", "task_id": "same-time-task",
+                "payload": {"scope": "projected task scope", "acceptance": ["projected"]},
+            },
+            {
+                "event_id": "a-attempt-start", "schema_version": 4,
+                "event_type": "attempt.started", "occurred_at": occurred_at,
+                "branch": "experiment/same-time", "task_id": "same-time-task",
+                "payload": {
+                    "attempt_id": "same-time-task", "track": "experiment",
+                    "topic": "same-time", "base_commit": "abc",
+                    "source_task_id": "same-time-task",
+                },
+            },
+        ])
+        connection = rebuild(database, journal, preserve_active=False)
+        attempt = connection.execute(
+            "SELECT goal, acceptance_json FROM attempts WHERE attempt_id='same-time-task'"
+        ).fetchone()
+        connection.close()
+        self.assertEqual(attempt[0], "projected task scope")
+        self.assertEqual(json.loads(attempt[1]), ["projected"])
+
+    def test_prepare_pr_summary_falls_back_to_source_scope_then_topic(self) -> None:
+        attempt = {
+            "attempt_id": "attempt-1", "branch": "experiment/summary",
+            "goal": "", "topic": "summary-topic",
+        }
+        events = [
+            {
+                "event_type": "task.started", "task_id": "source-task",
+                "payload": {"scope": "source task scope"},
+            },
+            {
+                "event_type": "attempt.started", "task_id": "source-task",
+                "branch": "experiment/summary",
+                "payload": {"attempt_id": "attempt-1", "source_task_id": "source-task"},
+            },
+        ]
+        self.assertEqual(cli_module.attempt_pr_summary(attempt, events), "source task scope")
+        self.assertEqual(cli_module.attempt_pr_summary(attempt, []), "summary-topic")
+        self.assertEqual(
+            cli_module.attempt_pr_summary(dict(attempt, goal="explicit goal"), events),
+            "explicit goal",
+        )
+
     def test_receipts_become_stale_when_software_inputs_change(self) -> None:
         task_id = "20260811_receipt_stale_v4_001"
         self.start(task_id)

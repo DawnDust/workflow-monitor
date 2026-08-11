@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - "rehearsal/**"
 
 permissions:
   contents: write
@@ -22,6 +24,15 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: python -m pip install -r requirements-dev.txt
+      - name: Resolve release version
+        shell: pwsh
+        run: |
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $version = '${{ github.ref_name }}'.Substring(1)
+          } else {
+            $version = python -c "from project_hooks import __version__; print(__version__)"
+          }
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Full test, build and frozen smoke
         run: python scripts/run_tests.py release
       - name: Apply optional Authenticode signature
@@ -39,9 +50,7 @@ jobs:
           upload-artifact: false
       - name: Finalize release manifest
         shell: pwsh
-        run: |
-          $version = '${{ github.ref_name }}'.Substring(1)
-          python scripts/build_release.py --version $version --sbom dist/workflow-monitor.spdx.json --authenticode-json dist/authenticode.json
+        run: python scripts/build_release.py --version $env:RELEASE_VERSION --sbom dist/workflow-monitor.spdx.json --authenticode-json dist/authenticode.json
       - name: Attest build provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
@@ -51,7 +60,20 @@ jobs:
         with:
           subject-path: dist/workflow-monitor.exe
           sbom-path: dist/workflow-monitor.spdx.json
+      - name: Upload rehearsal artifact
+        if: startsWith(github.ref, 'refs/heads/rehearsal/')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: workflow-monitor-rehearsal-${{ github.run_id }}
+          path: |
+            dist/workflow-monitor.exe
+            dist/release-manifest.json
+            dist/workflow-monitor.spdx.json
+            dist/authenticode.json
+          if-no-files-found: error
+          retention-days: 7
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        if: startsWith(github.ref, 'refs/tags/v')
         with:
           files: |
             dist/workflow-monitor.exe

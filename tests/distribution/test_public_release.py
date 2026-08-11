@@ -103,6 +103,11 @@ class PublicReleaseSurfaceTests(unittest.TestCase):
         self.assertIn("id-token: write", workflow)
         self.assertIn("workflow-monitor.spdx.json", workflow)
         self.assertIn("actions/attest@1e69f48", workflow)
+        self.assertIn('"rehearsal/**"', workflow)
+        self.assertIn("startsWith(github.ref, 'refs/tags/v')", workflow)
+        self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", workflow)
+        self.assertIn("retention-days: 7", workflow)
+        self.assertIn("dist/authenticode.json", workflow)
         for line in workflow.splitlines():
             if "uses:" in line:
                 self.assertRegex(line, r"@[0-9a-f]{40}(?:\s+#|$)")

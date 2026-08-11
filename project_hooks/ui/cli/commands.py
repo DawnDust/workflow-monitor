@@ -42,6 +42,7 @@ from ...infrastructure.system.diagnostics import (
 )
 from ...infrastructure.git import client as git_ops
 from ...infrastructure.system.health import active_task_errors
+from ...infrastructure.system.finish_preflight import assemble_finish_preflight
 from ...infrastructure.persistence.read_model import (
     MaintenanceReadModel,
     ReadModelError,
@@ -85,7 +86,6 @@ from ...infrastructure.system.verification import (
     clear_test_receipts,
     load_test_receipts,
     receipt_summary,
-    verify_receipts,
     work_content_fingerprint,
 )
 from ...infrastructure.git.build_identity import build_identity
@@ -116,7 +116,6 @@ from ...infrastructure.system.workbench_packages import (
     workbench_package_consistency_errors,
 )
 from ...core.branches import classify_branch as classify_branch_with_policy
-from ...core.lifecycle import finish_preflight as evaluate_finish_preflight
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -1022,46 +1021,22 @@ def task_finish_preflight(
     branch = record["git"]["branch"]
     task_id = record["task_id"]
     task_events = [event for event in load_events(journal_path()) if event.get("task_id") == task_id]
-    checkpoints = [event for event in task_events if event["event_type"] == "task.checkpointed"]
-    checkpoint_status = checkpoint_override or "missing"
-    if checkpoint_override is None and checkpoints:
-        recorded = checkpoints[-1].get("payload", {}).get("workspace_fingerprint")
-        if not recorded:
-            checkpoint_status = "legacy-unknown"
-        elif recorded == work_content_fingerprint(ROOT):
-            checkpoint_status = "fresh"
-        else:
-            checkpoint_status = "stale"
     linked_stage_id = (record.get("stage") or {}).get("stage_id")
     if not linked_stage_id and record.get("git", {}).get("track") != "stable":
         attempt = get_attempt(branch)
         linked_stage_id = attempt.get("stage_id") if attempt else None
-    stage_changed = any(
-        event["event_type"] in {"stage.started", "stage.updated", "stage.state_changed"}
-        and event.get("payload", {}).get("stage_id") == linked_stage_id
-        for event in task_events
-    )
     current = current_snapshot or snapshot()
     paths = changed(record["baseline"], current)
-    verification = verify_receipts(
-        ROOT, task_id,
-        profile=record["declaration"].get("verification_profile", "auto"),
+    return assemble_finish_preflight(
+        ROOT,
+        record,
+        task_events,
+        linked_stage_id=linked_stage_id,
         changed_paths=paths,
+        health_errors=health_errors,
+        stage_review_result=stage_review_result,
+        checkpoint_override=checkpoint_override,
     )
-    state = {
-        "checkpoint_status": checkpoint_status,
-        "verification": verification,
-        "health_errors": health_errors or [],
-        "linked_stage_id": linked_stage_id,
-        "stage_changed": stage_changed,
-        "stage_review": stage_review_result,
-        "decisions_added": sum(event["event_type"] == "decision.recorded" for event in task_events),
-        "project_updated": any(event["event_type"] == "project.profile_updated" for event in task_events),
-    }
-    result = evaluate_finish_preflight(state)
-    result["verification"] = verification
-    result["facts"] = state
-    return result
 
 
 def state_arguments_requested(args: argparse.Namespace) -> bool:
@@ -1401,6 +1376,34 @@ def has_finished_receipt(branch: str, attempt_state: str) -> bool:
     return found
 
 
+def attempt_pr_summary(attempt: dict, events: list[dict] | None = None) -> str:
+    goal = str(attempt.get("goal") or "").strip()
+    if goal:
+        return goal
+    events = events if events is not None else load_events(journal_path())
+    starts = [
+        event for event in events
+        if event["event_type"] == "attempt.started"
+        and (
+            event.get("payload", {}).get("attempt_id") == attempt.get("attempt_id")
+            or event.get("branch") == attempt.get("branch")
+        )
+    ]
+    if starts:
+        source_task_id = starts[-1].get("payload", {}).get("source_task_id") or starts[-1].get("task_id")
+        source = next(
+            (
+                event for event in events
+                if event["event_type"] == "task.started" and event.get("task_id") == source_task_id
+            ),
+            None,
+        )
+        scope = str((source or {}).get("payload", {}).get("scope") or "").strip()
+        if scope:
+            return scope
+    return str(attempt.get("topic") or attempt.get("branch") or "exploration").strip()
+
+
 def prepare_pr() -> dict:
     assert_no_active_task()
     check_repository(raise_on_error=True)
@@ -1417,7 +1420,8 @@ def prepare_pr() -> dict:
     default = branch_policy()["default_branch"]
     if run_git(["merge-base", "--is-ancestor", default, "HEAD"], check=False).returncode != 0:
         raise WorkflowError(f"探索分支未基于最新 {default}")
-    body = (f"## Summary\n\n{attempt['goal']}\n\n## Evidence\n\n" + "\n".join(f"- {item}" for item in attempt["evidence"]) +
+    summary = attempt_pr_summary(attempt)
+    body = (f"## Summary\n\n{summary}\n\n## Evidence\n\n" + "\n".join(f"- {item}" for item in attempt["evidence"]) +
             "\n\n## Integration\n\n- [ ] User explicitly confirmed merge\n- Merge method: Squash\n")
     return {"ready": True, "branch": branch, "base": default, "merge_method": "squash_pr",
             "requires_user_confirmation": True, "pr": {"title": f"[{attempt['track']}] {attempt['topic']}", "body": body},

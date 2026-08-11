@@ -245,7 +245,9 @@ def validate_projection(events: Iterable[dict]) -> None:
     connection.row_factory = sqlite3.Row
     try:
         connection.executescript(SCHEMA)
-        for event in sorted(events, key=lambda item: (item["occurred_at"], item["event_id"])):
+        for _, event in sorted(
+            enumerate(events), key=lambda item: (item[1]["occurred_at"], item[0]),
+        ):
             apply_event(connection, event)
     except sqlite3.DatabaseError as exc:
         raise StoreError(f"事件无法形成一致的数据库投影: {exc}") from exc
@@ -628,7 +630,10 @@ def rebuild(database: Path, journal: Path, *, preserve_active: bool = True) -> s
             connection.execute(f"DELETE FROM {table}")
         if not preserve_active:
             connection.execute("DELETE FROM active_tasks")
-        for event in sorted(events, key=lambda item: (item["occurred_at"], item["event_id"])):
+        # JSONL order is authoritative when events share a timestamp.  Sorting
+        # only by time is stable, so declarations remain ahead of events that
+        # reference them instead of being reordered by unrelated UUID values.
+        for event in sorted(events, key=lambda item: item["occurred_at"]):
             apply_event(connection, event)
         connection.execute(
             "INSERT INTO meta(key, value) VALUES ('journal_hash', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",

@@ -401,6 +401,7 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn("draftQuery", script)
         self.assertIn("committedQuery", script)
         self.assertIn('["status","处置状态","Disposition"]', script)
+        self.assertIn('["occurred_at","记录时间","Recorded at"]', script)
         self.assertNotIn('["explain","?"', script)
         self.assertNotIn('["advanced","⋯"', script)
         self.assertIn('settingsSection:"language"', script)
@@ -440,6 +441,8 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         advanced_source = script.split("function advanced(s)", 1)[1].split("function fillDisclosure", 1)[0]
         self.assertNotIn('l("验收门禁","Verification gate")', overview_source)
         self.assertNotIn('l("字段来源","Field sources")', overview_source)
+        self.assertIn('l("项目描述","Project description")', overview_source)
+        self.assertIn('l("长期方向","Long-term direction")', overview_source)
         self.assertIn('disclosure("verification",l("验收门禁","Verification gate")', advanced_source)
         self.assertIn('disclosure("field-sources",l("字段来源","Field sources")', advanced_source)
         self.assertIn('verification:new Set(["context"])', script)
