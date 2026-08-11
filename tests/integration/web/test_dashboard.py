@@ -238,7 +238,7 @@ class WebDashboardBridgeTests(unittest.TestCase):
         bridge = WebDashboardBridge(FakeProvider(self.root), refresh_seconds=2.5)
         ready = bridge.ready()["data"]
         self.assertEqual(ready["refresh_seconds"], 2.5)
-        self.assertEqual(ready["version"], "1.6.1")
+        self.assertEqual(ready["version"], "1.7.0")
         self.assertIn("source_commit", ready["build_identity"])
         first = bridge.bootstrap()
         self.assertTrue(first["ok"])
@@ -434,6 +434,15 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertNotIn("function comparison", script)
         self.assertIn("advancedOpen", script)
         self.assertIn("updateAdvanced", script)
+        overview_source = script.split("function overview(s)", 1)[1].split("function workflow(s)", 1)[0]
+        advanced_source = script.split("function advanced(s)", 1)[1].split("function fillDisclosure", 1)[0]
+        self.assertNotIn('l("验收门禁","Verification gate")', overview_source)
+        self.assertNotIn('l("字段来源","Field sources")', overview_source)
+        self.assertIn('disclosure("verification",l("验收门禁","Verification gate")', advanced_source)
+        self.assertIn('disclosure("field-sources",l("字段来源","Field sources")', advanced_source)
+        self.assertIn('verification:new Set(["context"])', script)
+        self.assertIn('"field-sources":new Set(["context"])', script)
+        self.assertIn('settings:new Set(["status_glossary","context"', script)
         self.assertIn("selectedResourceKind", script)
         self.assertIn("data-open-resource", script)
         self.assertIn("x.work_summary", script)

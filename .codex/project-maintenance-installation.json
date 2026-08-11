@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "application_version": "1.6.1",
+  "application_version": "1.7.0",
   "build_identity": {
     "build_id": "a97868de398c5b9a",
     "source_commit": "f9632a2f4ee4b472da072e26eef369051946744f",
@@ -9,7 +9,7 @@
     "dirty": true,
     "mode": "frozen"
   },
-  "template_version": 3,
+  "template_version": 6,
   "managed_files": {
     ".githooks/pre-commit": {
       "hash": "2d9776d503e44c6251de0b0d218f521ab85c5d21eb0a3cc2581a7f8d2c45989b",

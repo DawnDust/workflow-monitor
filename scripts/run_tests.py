@@ -18,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from project_hooks.infrastructure.system.verification import iso_now, write_test_receipt
 MODULES = (
     "tests.integration.system.test_diagnostics",
     "tests.unit.application.test_action_service",
@@ -119,7 +120,7 @@ def clean_coverage_data() -> None:
             path.unlink()
 
 
-def run_parallel(test_ids: list[str], *, jobs: int, coverage: bool) -> int:
+def run_parallel(test_ids: list[str], *, jobs: int, coverage: bool) -> tuple[int, int, float | None]:
     if coverage:
         clean_coverage_data()
     started = time.perf_counter()
@@ -141,18 +142,31 @@ def run_parallel(test_ids: list[str], *, jobs: int, coverage: bool) -> int:
         "slowest_worker_seconds": round(max(timings, default=0), 3), "failures": len(failures),
     }, ensure_ascii=False))
     if failures:
-        return 1
+        return 1, len(failures), None
     if coverage:
         combine = subprocess.run([sys.executable, "-m", "coverage", "combine"], cwd=ROOT, check=False)
         if combine.returncode:
-            return combine.returncode
+            return combine.returncode, 1, None
         report = subprocess.run(
             [sys.executable, "-m", "coverage", "report", "--show-missing", f"--fail-under={COVERAGE_FLOOR}"],
             cwd=ROOT, check=False,
         )
         if report.returncode:
-            return report.returncode
-    return 0
+            return report.returncode, 1, None
+        coverage_json = ROOT / ".project_hooks/test-coverage.json"
+        coverage_json.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [sys.executable, "-m", "coverage", "json", "-o", str(coverage_json)],
+            cwd=ROOT, check=False, stdout=subprocess.DEVNULL,
+        )
+        try:
+            percent = float(json.loads(coverage_json.read_text(encoding="utf-8"))["totals"]["percent_covered"])
+        except (OSError, ValueError, KeyError, TypeError):
+            percent = None
+        coverage_json.unlink(missing_ok=True)
+    else:
+        percent = None
+    return 0, 0, percent
 
 
 def validate_release_tag(application_version: str, tag: str | None = None) -> None:
@@ -361,10 +375,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n{len(all_ids)} scenarios")
         return 0
     selected = fast_ids() if args.suite == "fast" else all_ids
-    code = run_parallel(selected, jobs=max(1, args.jobs), coverage=args.suite in {"full", "release"})
-    if code or args.suite != "release":
-        return code
-    return release_smoke()
+    started_at = iso_now()
+    code, failures, coverage = run_parallel(
+        selected, jobs=max(1, args.jobs), coverage=args.suite in {"full", "release"},
+    )
+    if not code and args.suite == "release":
+        try:
+            code = release_smoke()
+        except Exception as exc:
+            print(f"release smoke failed: {exc}", file=sys.stderr)
+            code = 1
+        failures = int(bool(code))
+    write_test_receipt(
+        ROOT, suite=args.suite, result="passed" if code == 0 else "failed",
+        tests=len(selected), failures=failures, coverage=coverage,
+        started_at=started_at, finished_at=iso_now(),
+    )
+    return code
 
 
 if __name__ == "__main__":

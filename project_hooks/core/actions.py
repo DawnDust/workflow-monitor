@@ -153,13 +153,16 @@ ACTION_SPECS: dict[str, ActionSpec] = {
             _f("git_commit", "自动提交", "choice", choices=("auto", "always", "never"), default="auto"),
             _f("track", "工作轨道", "choice", choices=("stable", "research", "experiment", "sandbox"), default="stable"),
             _f("topic", "探索主题", "text", maximum=100),
+            _f("verification_profile", "验证档位", "choice", choices=("auto", "release"), default="auto"),
+            _f("without_stage_reason", "无需阶段理由", "multiline", natural=True),
         ), requires_idle=True,
         description="建立活动任务、保存基线，并在需要时安全创建探索分支。",
     ),
     "state.update": ActionSpec(
         "state.update", "更新当前进度", "生命周期",
         (
-            _f("status", "当前状态", natural=True, maximum=500),
+            _f("current_step", "当前步骤", natural=True, maximum=500),
+            _f("status", "当前步骤（弃用别名）", natural=True, maximum=500),
             _f("goal", "当前目标", "multiline", natural=True),
             _f("judgment", "当前判断", "multiline", natural=True),
             _f("breakpoint", "工作断点", "multiline", natural=True),
@@ -204,6 +207,9 @@ ACTION_SPECS: dict[str, ActionSpec] = {
             _f("evidence", "完成证据（每行一项）", "list", natural=True, maximum=1000),
             _f("attempt_state", "探索结论状态", "choice",
                choices=("", "active", "validated", "negative", "inconclusive", "paused"), default=""),
+            _f("stage_review", "阶段审阅", "choice",
+               choices=("", "updated", "reviewed-no-change"), default=""),
+            _f("current_step", "最终当前步骤", natural=True, maximum=500),
             _f("status", "最终状态", natural=True, maximum=500),
             _f("goal", "最终目标", "multiline", natural=True),
             _f("judgment", "最终判断", "multiline", natural=True),
@@ -238,6 +244,7 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         (
             _f("description", "项目描述", "multiline", natural=True, maximum=500),
             _f("big_goal", "长期目标", "multiline", natural=True, maximum=1000),
+            _f("main_goal_version", "主目标版本", maximum=100),
         ), requires_active=True, requires_stable=True,
     ),
     "stage.start": ActionSpec(

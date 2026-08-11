@@ -27,7 +27,7 @@ infrastructure
 
 - `workflow-monitor.exe` 文件名、CLI 命令和输出保持兼容。
 - `maintenance/events.jsonl` 是追加式永久事件源；Schema v1、v2、v3 均可读取。
-- SQLite Schema v3 是可重建投影，不是唯一事实来源。
+- SQLite Schema v4 是可重建投影，不是唯一事实来源；v1-v3 事件保持只读兼容。
 - Web 桥接只保留白名单方法，Dashboard 不执行生命周期写入。
 - 根入口允许兼容导入；其他旧的扁平模块路径不是公共 API。
 

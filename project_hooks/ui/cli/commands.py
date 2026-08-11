@@ -81,6 +81,12 @@ from ...infrastructure.system.resource_layout import catalog_consistency_errors,
 from ...infrastructure.system.updater import UpdateError, check_latest_update, run_update, version_report
 from ...infrastructure.persistence.transaction import MutationLockError, mutation_lock, read_writer_lock
 from ...infrastructure.system.runtime import is_frozen
+from ...infrastructure.system.verification import (
+    clear_test_receipts,
+    load_test_receipts,
+    receipt_summary,
+    verify_receipts,
+)
 from ...infrastructure.git.build_identity import build_identity
 from ...application.action_service import ActionProgress, WorkflowActionService, action_spec
 from ...composition import build_action_service
@@ -121,7 +127,7 @@ STAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 MANAGED_HOOK_MARKER = "# project-maintenance-hooks managed"
 TRACKED_HOOKS_DIR = ".githooks"
 STATIC_READ_ORDER = [
-    "maintenance/README.md",
+    "maintenance/CORE.md",
 ]
 DEFAULT_BRANCH_POLICY = {
     "default_branch": "main",
@@ -137,7 +143,7 @@ DEFAULT_STORE = {
     "schema_version": SCHEMA_VERSION,
 }
 STATE_ARGUMENTS = (
-    "goal", "judgment", "breakpoint", "blocker", "status", "main_goal_version",
+    "goal", "current_step", "judgment", "breakpoint", "blocker", "status", "main_goal_version",
 )
 DAILY_HELP = """\
 usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,end,diagnostics} ...
@@ -578,8 +584,18 @@ def project_command(args: argparse.Namespace) -> dict | str:
         row = connection.project_profile(branch_policy()["default_branch"])
         current = row if row else {
             "branch": branch_policy()["default_branch"], "description": "", "big_goal": "",
-            "updated_at": None, "task_id": None, "event_id": None,
+            "main_goal_version": "v1", "updated_at": None, "task_id": None, "event_id": None,
         }
+        if row and row.get("event_id"):
+            profile_event = next(
+                (event for event in reversed(load_events(journal_path()))
+                 if event["event_id"] == row["event_id"]),
+                None,
+            )
+            if profile_event and "main_goal_version" not in profile_event["payload"]:
+                legacy = connection.project_state(branch_policy()["default_branch"], fallback_to_main=True)
+                if legacy and legacy.get("main_goal_version"):
+                    current["main_goal_version"] = legacy["main_goal_version"]
     finally:
         connection.close()
     if args.project_command == "show":
@@ -589,16 +605,19 @@ def project_command(args: argparse.Namespace) -> dict | str:
             "# 项目资料\n\n"
             f"- 项目描述：{current.get('description') or '未设置'}\n"
             f"- 大目标：{current.get('big_goal') or '未设置'}\n"
+            f"- 主目标版本：{current.get('main_goal_version') or 'v1'}\n"
             f"- 更新时间：{current.get('updated_at') or '未设置'}\n"
         )
     record, branch = stable_write_context()
     description = clean_text(args.description, "项目描述", 500)
     big_goal = clean_text(args.big_goal, "大目标", 500)
-    if description is None and big_goal is None:
-        raise WorkflowError("project update 至少提供 --description 或 --big-goal")
+    main_goal_version = clean_text(args.main_goal_version, "主目标版本", 100)
+    if description is None and big_goal is None and main_goal_version is None:
+        raise WorkflowError("project update 至少提供 --description、--big-goal 或 --main-goal-version")
     payload = {
         "description": description if description is not None else current.get("description", ""),
         "big_goal": big_goal if big_goal is not None else current.get("big_goal", ""),
+        "main_goal_version": main_goal_version if main_goal_version is not None else current.get("main_goal_version", "v1"),
     }
     persist([emit("project.profile_updated", branch=branch, task_id=record["task_id"], payload=payload)])
     return payload
@@ -725,6 +744,28 @@ def start_task(args: argparse.Namespace) -> dict:
     original_branch = current_branch()
     classification = classify_branch(original_branch)
     requested_track, requested_topic = args.track, args.topic
+    connection = database()
+    try:
+        linked_stage = active_stage(connection)
+    finally:
+        connection.close()
+    planned_exploration = (
+        requested_track in {"research", "experiment", "sandbox"}
+        or classification["kind"] == "exploration"
+    )
+    if planned_exploration and not linked_stage and not args.without_stage_reason:
+        topic = requested_topic or classification.get("topic") or "research-stage"
+        draft = {
+            "stage_id": topic,
+            "title": topic.replace("-", " "),
+            "goal": args.scope,
+            "acceptance": args.acceptance,
+        }
+        raise WorkflowError(
+            "PH-S120 needs_input：探索任务需要 active 阶段；尚未创建分支或事件。\n"
+            f"阶段草案：{json.dumps(draft, ensure_ascii=False)}\n"
+            "确认后先用短 stable 生命周期执行 stage start；若明确不需要阶段，使用 --without-stage-reason <理由>。"
+        )
     # A stable repair task must be able to start while legacy or unindexed resources exist;
     # the normal check and task end still require the inconsistency to be repaired.
     repairing_on_main = (
@@ -771,23 +812,24 @@ def start_task(args: argparse.Namespace) -> dict:
         "task_id": args.task_id,
         "started_at": timestamp(),
         "declaration": {"kind": args.kind, "scope": args.scope, "out_of_scope": args.out_of_scope,
-                        "acceptance": args.acceptance, "task_size": args.task_size, "git_commit": args.git_commit},
+                        "acceptance": args.acceptance, "task_size": args.task_size, "git_commit": args.git_commit,
+                        "verification_profile": args.verification_profile},
         "baseline": snapshot(),
         "git": {"is_repo": True, "dirty_paths": git_dirty_paths(), "head": base_head,
                 "branch": branch, "base_branch": branch_policy()["default_branch"], "base_head": base_head,
                 "track": classification["track"], "topic": classification["topic"]},
+        "stage": {
+            "stage_id": linked_stage["stage_id"] if linked_stage else None,
+            "baseline_updated_at": linked_stage.get("updated_at") if linked_stage else None,
+        },
     }
     events = [emit("task.started", branch=branch, task_id=args.task_id, payload=record["declaration"])]
     if classification["kind"] == "exploration" and created_branch:
-        connection = database()
-        try:
-            linked_stage = active_stage(connection)
-        finally:
-            connection.close()
         events.append(emit("attempt.started", branch=branch, task_id=args.task_id, payload={
             "attempt_id": args.task_id, "track": classification["track"], "topic": classification["topic"],
-            "base_commit": base_head, "goal": args.scope, "acceptance": args.acceptance,
+            "base_commit": base_head, "source_task_id": args.task_id,
             "stage_id": linked_stage["stage_id"] if linked_stage else None,
+            "without_stage_reason": args.without_stage_reason,
         }))
     elif classification["kind"] == "exploration":
         attempt = get_attempt(branch)
@@ -821,8 +863,9 @@ def task_status() -> dict:
         "active": True, "task_id": record["task_id"], "started_at": record["started_at"],
         "branch": branch, "track": record["git"]["track"],
         "changed_paths": changed(record["baseline"], snapshot()),
-        "state_updated": record["state_updated"], "decisions_added": record["decisions_added"],
-        "missing_updates": [] if record["state_updated"] else ["project state update"],
+        "checkpoint_recorded": record["state_updated"], "state_updated": record["state_updated"],
+        "decisions_added": record["decisions_added"],
+        "missing_updates": [] if record["state_updated"] else ["task checkpoint"],
         "checks": check_repository(),
     }
 
@@ -907,24 +950,25 @@ def task_recover(args: argparse.Namespace) -> dict:
 def task_abandon(args: argparse.Namespace) -> dict:
     record = read_active()
     branch = assert_active_branch(record)
+    receipts = [receipt_summary(item) for item in load_test_receipts(ROOT, record["task_id"])]
     event = emit(
         "task.finished", branch=branch, task_id=record["task_id"],
         event_id=hashlib.sha256(
             f"{record['task_id']}:abandoned".encode("utf-8")
         ).hexdigest()[:32],
         payload={
-            "summary": record["declaration"]["scope"],
             "evidence": "",
             "result": "abandoned",
             "route": "unchanged",
             "methods_action": "reviewed-no-change",
             "main_goal": "unchanged",
             "note": args.reason,
-            "attempt_state": None,
-            "started_at": record["started_at"],
+            "verification": receipts,
+            "stage_review": {"stage_id": record.get("stage", {}).get("stage_id"), "result": "abandoned"},
         },
     )
     persist([event])
+    clear_test_receipts(ROOT, record["task_id"])
     delete_active(record["task_id"])
     return {
         "status": "abandoned",
@@ -935,24 +979,30 @@ def task_abandon(args: argparse.Namespace) -> dict:
     }
 
 
-def project_state_payload(record: dict, args: argparse.Namespace, branch: str) -> dict:
-    connection = database()
-    current = connection.project_state(branch, fallback_to_main=True)
-    base = current or {}
-    connection.close()
-    next_steps = args.next if args.next is not None else json.loads(base.get("next_steps_json", "[]"))
+def checkpoint_payload(record: dict, args: argparse.Namespace) -> tuple[dict, list[str]]:
+    warnings: list[str] = []
+    if args.main_goal_version is not None:
+        raise WorkflowError("--main-goal-version 不再属于 state；请使用 project update --main-goal-version")
+    if args.goal is not None:
+        if args.goal != record["declaration"]["scope"]:
+            raise WorkflowError("--goal 与当前任务 scope 不同；请新建任务，或使用 stage update / project update")
+        warnings.append("--goal 与 task.started.scope 相同，已忽略；目标只记录一次")
+    if args.current_step and args.status and args.current_step != args.status:
+        raise WorkflowError("--status 是 --current-step 的弃用别名，两者值不能冲突")
+    current_step = args.current_step or args.status
+    if args.status is not None:
+        warnings.append("--status 已弃用，已映射到 --current-step")
+    next_steps = args.next or []
     if len(next_steps) > 3:
         raise WorkflowError("state update 最多允许三个 --next")
-    payload = {
-        "status": args.status or base.get("status") or "进行中",
-        "main_goal_version": args.main_goal_version or base.get("main_goal_version") or "v1",
-        "goal": args.goal or base.get("goal") or record["declaration"]["scope"],
-        "judgment": args.judgment or base.get("judgment") or args.breakpoint or record["declaration"]["scope"],
-        "breakpoint": args.breakpoint or base.get("breakpoint") or record["declaration"]["scope"],
-        "next_steps": next_steps,
-        "blocker": args.blocker if args.blocker is not None else base.get("blocker", "无。"),
+    values = {
+        "current_step": current_step,
+        "judgment": args.judgment,
+        "breakpoint": args.breakpoint,
+        "next_actions": next_steps if args.next is not None else None,
+        "blocker": args.blocker,
     }
-    return payload
+    return {key: value for key, value in values.items() if value is not None}, warnings
 
 
 def state_arguments_requested(args: argparse.Namespace) -> bool:
@@ -962,10 +1012,14 @@ def state_arguments_requested(args: argparse.Namespace) -> bool:
 def state_update(args: argparse.Namespace) -> dict:
     record = read_active()
     branch = assert_active_branch(record)
-    payload = project_state_payload(record, args, branch)
-    persist([emit("project_state.updated", branch=branch, task_id=record["task_id"], payload=payload)])
+    payload, warnings = checkpoint_payload(record, args)
+    if not payload:
+        if warnings:
+            return {"checkpoint": None, "warnings": warnings}
+        raise WorkflowError("state update 至少提供一个 checkpoint 字段")
+    persist([emit("task.checkpointed", branch=branch, task_id=record["task_id"], payload=payload)])
     update_active_flags(state_updated=True)
-    return payload
+    return {**payload, **({"warnings": warnings} if warnings else {})}
 
 
 def decision_add(args: argparse.Namespace) -> dict:
@@ -1008,7 +1062,7 @@ def pre_commit_check() -> None:
         record = read_active()
         assert_active_branch(record)
         if not record["state_updated"]:
-            raise WorkflowError("活动任务尚未更新结构化项目状态")
+            raise WorkflowError("活动任务尚未记录 task checkpoint")
 
 
 def install_git_hook(force: bool = False) -> str:
@@ -1097,6 +1151,7 @@ def _finish_signature(args: argparse.Namespace) -> str:
         for name in (
             "task_id", "result", "route", "methods_action", "main_goal", "note",
             "evidence", "commit_message", "attempt_state", *STATE_ARGUMENTS, "next",
+            "stage_review",
         )
     }
     return hashlib.sha256(canonical_json(values).encode("utf-8")).hexdigest()
@@ -1108,21 +1163,26 @@ def _fixed_finish_event_ids(task_id: str, events: list[dict]) -> None:
         event["event_id"] = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
 
-def stage_update_reminder(record: dict) -> dict | None:
-    connection = database()
-    try:
-        stage = active_stage(connection)
-    finally:
-        connection.close()
-    if not stage or stage.get("task_id") == record.get("task_id"):
-        return None
-    return {
-        "code": "stage-not-updated",
-        "message": "本任务没有更新当前阶段；请确认阶段进展、当前步骤和下一步是否仍然准确",
-        "stage_id": stage["stage_id"],
-        "stage_updated_at": stage.get("updated_at"),
-        "next_safe_command": f".\\workflow-monitor.exe stage update {stage['stage_id']} ...",
-    }
+def stage_review(record: dict, requested: str | None) -> dict:
+    stage_id = (record.get("stage") or {}).get("stage_id")
+    if not stage_id and record.get("git", {}).get("track") != "stable":
+        attempt = get_attempt(record["git"]["branch"])
+        stage_id = attempt.get("stage_id") if attempt else None
+    if not stage_id:
+        return {"stage_id": None, "result": "not-applicable"}
+    stage_events = [
+        event for event in load_events(journal_path())
+        if event.get("task_id") == record["task_id"]
+        and event["event_type"] in {"stage.started", "stage.updated", "stage.state_changed"}
+        and event.get("payload", {}).get("stage_id") == stage_id
+    ]
+    if requested is None:
+        raise WorkflowError("有关联阶段时必须使用 --stage-review updated|reviewed-no-change")
+    if requested == "updated" and not stage_events:
+        raise WorkflowError("--stage-review updated 无效：找不到本任务产生的阶段事件")
+    if requested == "reviewed-no-change" and stage_events:
+        raise WorkflowError("本任务已经更新阶段，--stage-review 必须选择 updated")
+    return {"stage_id": stage_id, "result": requested}
 
 
 def finish_task(args: argparse.Namespace) -> dict:
@@ -1150,26 +1210,32 @@ def finish_task(args: argparse.Namespace) -> dict:
             "changed_paths": paths,
         }
         report["git"] = auto_commit(record, paths, finish_values["result"], args.commit_message)
-        reminder = stage_update_reminder(record)
-        if reminder:
-            report["warnings"] = [reminder]
+        clear_test_receipts(ROOT, args.task_id)
         delete_active(args.task_id)
         return report
     check_repository(raise_on_error=True)
     final_state_requested = state_arguments_requested(args)
     if not record["state_updated"] and not final_state_requested:
-        raise WorkflowError("结束前必须执行 state update")
+        raise WorkflowError("结束前必须执行 state update 记录 task checkpoint")
     if args.route == "changed" and record["decisions_added"] < 1:
         raise WorkflowError("路线发生变化时必须在本任务执行 decision add")
     attempt = get_attempt(branch) if record["git"]["track"] != "stable" else None
     events: list[dict] = []
     if final_state_requested:
-        events.append(emit(
-            "project_state.updated",
-            branch=branch,
-            task_id=args.task_id,
-            payload=project_state_payload(record, args, branch),
-        ))
+        checkpoint, _warnings = checkpoint_payload(record, args)
+        if checkpoint:
+            events.append(emit("task.checkpointed", branch=branch, task_id=args.task_id, payload=checkpoint))
+    paths = changed(record["baseline"], snapshot())
+    verification = verify_receipts(
+        ROOT, args.task_id,
+        profile=record["declaration"].get("verification_profile", "auto"),
+        changed_paths=paths,
+    )
+    if verification["problems"]:
+        remedies = "; ".join(item["command"] for item in verification["problems"])
+        details = ", ".join(f"{item['suite']}:{item['reason']}" for item in verification["problems"])
+        raise WorkflowError(f"测试回执门禁未通过（{details}）；请运行：{remedies}")
+    review = stage_review(record, args.stage_review)
     if attempt:
         if not args.attempt_state:
             raise WorkflowError("探索任务结束时必须显式使用 --attempt-state")
@@ -1181,17 +1247,17 @@ def finish_task(args: argparse.Namespace) -> dict:
         }))
         if args.attempt_state == "validated":
             events.append(emit("exploration.recorded", branch=branch, task_id=args.task_id, payload={
-                "exploration_id": branch,
-                "branch": branch, "goal": attempt["goal"], "result": "validated",
-                "evidence": "; ".join(attempt["evidence"]), "disposition_ref": "pending PR",
+                "exploration_id": branch, "attempt_id": attempt["attempt_id"],
+                "branch": branch, "result": "validated", "disposition_ref": "pending PR",
             }))
     elif args.attempt_state:
         raise WorkflowError("stable 任务不能使用 --attempt-state")
     evidence = "; ".join(args.evidence or [])
     events.append(emit("task.finished", branch=branch, task_id=args.task_id, payload={
-        "summary": record["declaration"]["scope"], "evidence": evidence, "result": args.result,
+        "evidence": evidence, "result": args.result,
         "route": args.route, "methods_action": args.methods_action, "main_goal": args.main_goal,
-        "note": args.note, "attempt_state": args.attempt_state, "started_at": record["started_at"],
+        "note": args.note,
+        "verification": verification["accepted"], "stage_review": review,
     }))
     _fixed_finish_event_ids(args.task_id, events)
     finished_at = timestamp()
@@ -1202,6 +1268,7 @@ def finish_task(args: argparse.Namespace) -> dict:
         "main_goal": args.main_goal,
         "note": args.note,
         "attempt_state": args.attempt_state,
+        "verification": verification["accepted"], "stage_review": review,
     }
     finish_state = {
         "signature": signature,
@@ -1224,9 +1291,7 @@ def finish_task(args: argparse.Namespace) -> dict:
               **finish_values,
               "changed_paths": paths}
     report["git"] = auto_commit(record, paths, args.result, args.commit_message)
-    reminder = stage_update_reminder(record)
-    if reminder:
-        report["warnings"] = [reminder]
+    clear_test_receipts(ROOT, args.task_id)
     delete_active(args.task_id)
     return report
 
@@ -1307,7 +1372,7 @@ def archive_attempt() -> dict:
 def context_data(branch: str | None = None) -> dict:
     try:
         result = read_model().context(branch)
-        result["recent_decisions"] = read_model().records("decisions", 5)
+        result["recent_decisions"] = read_model().records("decisions", 3)
         return result
     except ReadModelError as exc:
         raise WorkflowError(str(exc)) from exc
@@ -1317,8 +1382,27 @@ def markdown_context(data: dict) -> str:
     state = data.get("overview_state") or data.get("state") or {}
     profile = data.get("project_profile") or {}
     stage = data.get("current_stage") or {}
-    lines = ["# 动态维护上下文", "", f"- 当前分支：`{data['branch']}`",
+    active = data.get("active_task") or {}
+    contract = data.get("contract") or {}
+    verification = data.get("verification") or {}
+    lines = ["# 动态维护上下文", "",
+             f"- 应用版本：{contract.get('application_version', __version__)}",
+             f"- Event Schema：v{contract.get('schema_version', SCHEMA_VERSION)}",
+             f"- 当前分支：`{data['branch']}`",
+             f"- core_read_order：{', '.join(contract.get('core_read_order') or STATIC_READ_ORDER)}",
              f"- 当前状态：{state.get('status', '未设置')}", f"- 主目标版本：{state.get('main_goal_version', '未设置')}",
+             "", "## 活动任务", "",
+             f"- 任务：{active.get('task_id') or '无'}",
+             f"- 目标：{active.get('scope') or '未设置'}",
+             f"- 验收：{'；'.join(active.get('acceptance') or []) or '未设置'}",
+             f"- 轨道：{active.get('track') or '未设置'}",
+             f"- 生命周期阶段：{active.get('lifecycle_phase') or 'idle'}",
+             f"- 改动摘要：{', '.join(active.get('changed_paths') or []) or '无'}",
+             "", "## 测试回执与门禁", "",
+             f"- 验证档位：{verification.get('profile') or '无活动任务'}",
+             f"- 当前指纹：{verification.get('fingerprint') or '无'}",
+             f"- 要求套件：{', '.join(verification.get('required_suites') or []) or '仅内置 check_repository'}",
+             f"- 状态：{verification.get('status') or 'not-applicable'}",
              "", "## 项目资料", "", f"- 项目描述：{profile.get('description') or '未设置'}",
              f"- 大目标：{profile.get('big_goal') or '未设置'}",
              "", "## 当前大阶段", "", f"- 阶段：{stage.get('title') or '未设置'}",
@@ -1327,6 +1411,20 @@ def markdown_context(data: dict) -> str:
              f"- 当前步骤：{stage.get('current_step') or '未设置'}",
              f"- 下一步：{stage.get('next_step') or '未设置'}",
              f"- 阶段阻塞：{stage.get('blocker') or '无。'}",
+             "", "## 阶段建议与待审阅动作", ""]
+    for item in data.get("required_actions") or []:
+        lines.append(f"- {item}")
+    if not data.get("required_actions"):
+        lines.append("- 无。")
+    lines += ["", "## 带来源的投影状态", ""]
+    for field in ("goal", "current_step", "judgment", "breakpoint", "next_steps", "blocker", "main_goal_version"):
+        source = (data.get("field_sources") or {}).get(field) or {}
+        lines.append(
+            f"- {field}：{state.get(field) or '未设置'}｜"
+            f"{source.get('event_type') or '无来源'} / {source.get('event_id') or '-'} / "
+            f"task={source.get('task_id') or '-'} / stage={source.get('stage_id') or '-'}"
+        )
+    lines += [
              "", "## 当前工作目标", "", state.get("goal") or "未设置", "", "## 当前判决", "",
              state.get("judgment") or "未设置", "", "## 工作断点", "", state.get("breakpoint") or "未设置",
              "", "## 真实断点", "", git_state_summary(data.get("git_state") or {}),
@@ -1343,8 +1441,13 @@ def markdown_context(data: dict) -> str:
         )
     if not data.get("active_attempts"):
         lines.append("无。")
+    lines += ["", "## 最近决策", ""]
+    for item in (data.get("recent_decisions") or [])[:3]:
+        lines.append(f"- {item.get('occurred_at')}｜{item.get('decision')}｜{item.get('basis')}")
+    if not data.get("recent_decisions"):
+        lines.append("无。")
     lines += ["", "## 最近交接", ""]
-    for item in data["recent_handoffs"]:
+    for item in data["recent_handoffs"][:3]:
         lines.append(f"- {item['occurred_at']}｜{item['task']}｜{item['result']}｜主目标：{item['main_goal_change']}")
     if not data["recent_handoffs"]:
         lines.append("无。")
@@ -1406,6 +1509,8 @@ def catalog_auto_start(filename: str) -> dict:
         git_commit="never",
         track="stable",
         topic=None,
+        verification_profile="auto",
+        without_stage_reason=None,
     ))
 
 
@@ -1422,12 +1527,14 @@ def catalog_auto_finish(success: bool, note: str, evidence: list[str]) -> dict:
         commit_message=None,
         attempt_state=None,
         goal=None,
+        current_step=None,
         judgment=None,
         breakpoint=note,
         blocker=None,
         status=None,
         main_goal_version=None,
         next=None,
+        stage_review=None,
     ))
 
 
@@ -1465,10 +1572,19 @@ def exploration_import(args: argparse.Namespace) -> dict:
     if not starts or not states or not archives:
         raise WorkflowError("归档分支缺少完整的尝试开始、判决或归档事件")
     start, state = starts[-1], states[-1]
+    source_task_id = start["payload"].get("source_task_id") or start.get("task_id")
+    source_start = next(
+        (event for event in branch_events
+         if event["event_type"] == "task.started" and event.get("task_id") == source_task_id),
+        None,
+    )
+    goal = start["payload"].get("goal") or (
+        source_start["payload"].get("scope") if source_start else ""
+    )
     updates = [event for event in branch_events if event["event_type"] == "attempt.updated" and event["payload"].get("attempt_id") == start["payload"]["attempt_id"]]
     evidence = [item for event in updates for item in event["payload"].get("evidence", [])]
     payload = {"exploration_id": start["branch"], "branch": args.archive_branch,
-               "goal": start["payload"]["goal"], "result": state["payload"]["state"],
+               "goal": goal, "result": state["payload"]["state"],
                "evidence": "; ".join(evidence), "disposition_ref": args.archive_branch}
     persist([emit("exploration.recorded", branch="main", task_id=record["task_id"], payload=payload)])
     return payload
@@ -1528,8 +1644,14 @@ def migrate_legacy(delete_legacy: bool) -> dict:
         payload = {"status": status.group(1).strip() if status else "未知", "main_goal_version": version.group(1).strip() if version else "v1",
                    "goal": section(text, "当前主目标"), "judgment": section(text, "当前判决"),
                    "breakpoint": section(text, "真实断点"), "next_steps": next_steps, "blocker": section(text, "当前阻塞")}
-        events.append(emit("project_state.updated", branch="main", task_id=None, occurred_at=occurred,
+        events.append(emit("legacy.project_state_imported", branch="main", task_id=None, occurred_at=occurred,
                            event_id=legacy_event_id("state", canonical_json(payload)), payload=payload))
+        events.append(emit("project.profile_updated", branch="main", task_id=None, occurred_at=occurred,
+                           event_id=legacy_event_id("profile", canonical_json(payload)), payload={
+                               "description": "", "big_goal": payload["goal"],
+                               "main_goal_version": payload["main_goal_version"],
+                               "legacy_source": "current_task.md",
+                           }))
         for row in legacy_rows(current_file):
             if len(row) >= 4:
                 events.append(emit("handoff.recorded", branch="main", task_id=None, occurred_at=row[0],
@@ -2043,11 +2165,12 @@ def dashboard_execute_action(
             values,
             task_id=requested_task_id or _next_dashboard_task_id(), out_of_scope=None, topic=None,
             task_size="small", git_commit="auto", track="stable",
+            verification_profile="auto", without_stage_reason=None,
         ))
     if action_id == "state.update":
         return state_update(_action_namespace(
             fields, goal=None, judgment=None, breakpoint=None, blocker=None,
-            status=None, main_goal_version=None, next=None,
+            current_step=None, status=None, main_goal_version=None, next=None,
         ))
     if action_id == "decision.add":
         return decision_add(_action_namespace(fields, id=None))
@@ -2065,7 +2188,8 @@ def dashboard_execute_action(
             values,
             task_id=requested_task_id or record["task_id"], evidence=None, commit_message=None,
             attempt_state=None, goal=None, judgment=None, breakpoint=None,
-            blocker=None, status=None, main_goal_version=None, next=None,
+            blocker=None, current_step=None, status=None, main_goal_version=None, next=None,
+            stage_review=None,
         ))
     if action_id == "task.recover":
         return task_recover(_action_namespace({}, skip_auto_commit=False, reason=None))
@@ -2074,7 +2198,10 @@ def dashboard_execute_action(
     if action_id == "task.abandon":
         return task_abandon(_action_namespace(fields))
     if action_id == "project.update":
-        return project_command(_action_namespace(fields, project_command="update", description=None, big_goal=None))
+        return project_command(_action_namespace(
+            fields, project_command="update", description=None, big_goal=None,
+            main_goal_version=None,
+        ))
     if action_id == "stage.start":
         return stage_command(_action_namespace(fields, stage_command="start"))
     if action_id == "stage.update":

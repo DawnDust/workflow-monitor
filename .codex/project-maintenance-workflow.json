@@ -5,14 +5,14 @@
   "state_dir": ".project_hooks",
   "backend": "project_hooks",
   "core_read_order": [
-    "maintenance/README.md"
+    "maintenance/CORE.md"
   ],
   "context_command": ".\\workflow-monitor.exe context --format markdown",
   "maintenance_store": {
     "engine": "sqlite",
     "database": ".project_hooks/maintenance.sqlite3",
     "journal": "maintenance/events.jsonl",
-    "schema_version": 3
+    "schema_version": 4
   },
   "branch_policy": {
     "default_branch": "main",

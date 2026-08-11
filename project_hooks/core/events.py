@@ -10,8 +10,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .errors import StoreError
 
 
-SCHEMA_VERSION = 3
-SUPPORTED_EVENT_SCHEMA_VERSIONS = (1, 2, 3)
+SCHEMA_VERSION = 4
+SUPPORTED_EVENT_SCHEMA_VERSIONS = (1, 2, 3, 4)
 
 
 def resolve_timezone(name: str):
