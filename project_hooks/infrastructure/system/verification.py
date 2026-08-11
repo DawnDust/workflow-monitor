@@ -26,8 +26,9 @@ SOFTWARE_INPUT_FILES = {
 }
 EXCLUDED_PARTS = {
     ".git", ".project_hooks", "__pycache__", ".pytest_cache", ".venv",
-    "build", "dist", "htmlcov", "node_modules",
+    "build", "dist", "site", "htmlcov", "node_modules",
 }
+WORK_CONTENT_EXCLUDED = {"maintenance/events.jsonl"}
 
 
 def is_software_input(relative: str) -> bool:
@@ -51,6 +52,35 @@ def verification_fingerprint(root: Path) -> str:
     for path in software_input_files(root):
         relative = path.relative_to(root).as_posix()
         digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def work_content_files(root: Path) -> list[Path]:
+    """Return tracked and non-ignored untracked project content."""
+    completed = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        cwd=root, capture_output=True, check=False,
+    )
+    if completed.returncode != 0:
+        return []
+    result: list[Path] = []
+    for raw in completed.stdout.split(b"\0"):
+        if not raw:
+            continue
+        relative = raw.decode("utf-8", errors="surrogateescape").replace("\\", "/")
+        path = root / relative
+        if relative in WORK_CONTENT_EXCLUDED or not path.is_file():
+            continue
+        result.append(path)
+    return sorted(result, key=lambda item: item.relative_to(root).as_posix())
+
+
+def work_content_fingerprint(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in work_content_files(root):
+        relative = path.relative_to(root).as_posix()
+        digest.update(relative.encode("utf-8", errors="surrogateescape") + b"\0")
         digest.update(hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()
 

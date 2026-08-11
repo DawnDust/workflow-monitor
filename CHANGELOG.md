@@ -2,10 +2,15 @@
 
 ## Unreleased
 
+## 1.7.0 - 2026-08-11
+
 - Event Schema v4：任务 checkpoint、测试回执和阶段审阅成为权威事实，历史 v1-v3 事件原样兼容。
 - Context、Dashboard、交接和阶段视图统一使用带字段来源的读模型投影。
 - 增加按软件输入指纹判定的 fast/full/release 回执门禁，以及探索阶段建议和显式阶段审阅。
 - 将静态规范拆分为 CORE、RESEARCH、OPERATIONS 与索引 README。
+- 统一生命周期完成预检与 checkpoint 新鲜度，使 CLI、Context 和 Dashboard 使用同一门禁事实。
+- 区分构建提交、构建输入指纹和具体构建，并为正式发行增加 SPDX SBOM、GitHub artifact attestation 与可选 Authenticode 元数据。
+- 修复公共发布面测试未进入统一 fast/full/release 测试入口的问题。
 
 ## 1.6.1
 

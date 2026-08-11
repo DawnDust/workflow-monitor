@@ -370,10 +370,15 @@ def run_update(
 def version_report(root: Path | None) -> dict:
     identity = build_identity()
     project_build_id = None
+    project_build_input_fingerprint = None
     if root:
         try:
             installation = json.loads((root / INSTALLATION_PATH).read_text(encoding="utf-8"))
-            project_build_id = (installation.get("build_identity") or {}).get("build_id")
+            project_identity = installation.get("build_identity") or {}
+            project_build_id = project_identity.get("build_id")
+            project_build_input_fingerprint = (
+                project_identity.get("build_input_fingerprint") or project_identity.get("source_tree")
+            )
         except (OSError, ValueError):
             pass
     return {
@@ -382,6 +387,6 @@ def version_report(root: Path | None) -> dict:
         "schema_version": SCHEMA_VERSION,
         "build_identity": identity,
         "project_build_id": project_build_id,
-        "build_warning": build_warning(project_build_id),
+        "build_warning": build_warning(project_build_id, project_build_input_fingerprint),
         "exe_repository_match": exe_matches_repository(root, identity) if root else None,
     }

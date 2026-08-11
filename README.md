@@ -45,7 +45,7 @@ Prerequisites: Windows 10/11 x64, [Git for Windows](https://git-scm.com/download
 3. Double-click it. A new folder is initialized as a Git repository and the local workbench opens.
 4. In your AI coding agent, describe the task in plain language. The repository guidance handles lifecycle commands and safety checks.
 
-Windows SmartScreen may warn about the unsigned executable. Verify that it came from the official GitHub Release and compare its SHA-256 value with `release-manifest.json` before continuing.
+Windows SmartScreen may warn about an unsigned executable. Verify that it came from the official GitHub Release, compare its SHA-256 value with `release-manifest.json`, inspect `workflow-monitor.spdx.json`, and run `gh attestation verify workflow-monitor.exe --repo DawnDust/workflow-monitor`. The manifest states whether Authenticode signing was applied.
 
 ## Documentation and community
 

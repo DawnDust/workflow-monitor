@@ -44,3 +44,15 @@
 - `workbench/` 保存已索引的可复用 Markdown 辅助内容。
 
 不要手工改写历史事件行或编辑 SQLite。
+
+## 验证发行产物
+
+每个发行版都会发布 `workflow-monitor.exe`、`release-manifest.json` 和 SPDX JSON SBOM。安装前请验证下载的可执行文件：
+
+```powershell
+(Get-FileHash .\workflow-monitor.exe -Algorithm SHA256).Hash
+gh attestation verify .\workflow-monitor.exe --repo DawnDust/workflow-monitor
+gh attestation verify .\workflow-monitor.spdx.json --repo DawnDust/workflow-monitor
+```
+
+将 SHA-256 与 `release-manifest.json` 对照。Manifest 也会明确说明 EXE 是否经过 Authenticode 签名；未签名构建仍受支持，但会被清楚标记。

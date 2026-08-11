@@ -109,10 +109,13 @@ class ProjectHooksSqliteTests(unittest.TestCase):
                    "--next", "continue testing", "--blocker", "none")
 
     def end(self, task_id: str, *, state: str | None = None, route: str = "unchanged",
-            stage_review: str | None = "reviewed-no-change", check: bool = True) -> subprocess.CompletedProcess[str]:
+            stage_review: str | None = "reviewed-no-change", main_goal: str | None = None,
+            check: bool = True) -> subprocess.CompletedProcess[str]:
         args = ["end", task_id, "--result", "completed", "--route", route,
-                "--methods-action", "updated", "--main-goal", "unchanged", "--note", "test completed",
+                "--methods-action", "updated", "--note", "test completed",
                 "--evidence", "unit test"]
+        if main_goal:
+            args += ["--main-goal", main_goal]
         if state:
             args += ["--attempt-state", state]
         if stage_review:
@@ -165,6 +168,25 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(context["state"]["current_step"], "implement projection")
         self.assertEqual(context["field_sources"]["goal"]["event_type"], "task.started")
         self.assertEqual(context["field_sources"]["current_step"]["event_type"], "task.checkpointed")
+
+    def test_context_and_dashboard_share_finish_preflight(self) -> None:
+        task_id = "20260811_preflight_consistency_001"
+        self.start(task_id)
+        self.update_state()
+        (self.root / "project_hooks" / "preflight_probe.py").write_text("changed = True\n", encoding="utf-8")
+        model = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: self.git("branch", "--show-current").stdout.strip(),
+        )
+        context = model.context()
+        dashboard_context = model.dashboard_snapshot()["context"]
+        self.assertEqual(context["checkpoint_status"], "stale")
+        self.assertEqual(
+            [item["code"] for item in context["finish_preflight"]["blockers"]],
+            [item["code"] for item in dashboard_context["finish_preflight"]["blockers"]],
+        )
+        self.assertEqual(context["required_actions"], dashboard_context["required_actions"])
         event_types = [item["event_type"] for item in load_events(self.root / "maintenance/events.jsonl")]
         self.assertIn("task.checkpointed", event_types)
         self.assertNotIn("project_state.updated", event_types)
@@ -207,6 +229,59 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         )
         self.assertEqual(attempt["payload"]["without_stage_reason"], "isolated spike")
         self.assertNotIn("goal", attempt["payload"])
+
+    def test_same_timestamp_rebuild_preserves_declaration_before_attempt(self) -> None:
+        database = self.root / ".project_hooks/same-time.sqlite3"
+        journal = self.root / "maintenance/same-time-events.jsonl"
+        occurred_at = "2026-08-11 00:00:00"
+        append_events(journal, self.root / ".project_hooks", [
+            {
+                "event_id": "z-task-start", "schema_version": 4,
+                "event_type": "task.started", "occurred_at": occurred_at,
+                "branch": "experiment/same-time", "task_id": "same-time-task",
+                "payload": {"scope": "projected task scope", "acceptance": ["projected"]},
+            },
+            {
+                "event_id": "a-attempt-start", "schema_version": 4,
+                "event_type": "attempt.started", "occurred_at": occurred_at,
+                "branch": "experiment/same-time", "task_id": "same-time-task",
+                "payload": {
+                    "attempt_id": "same-time-task", "track": "experiment",
+                    "topic": "same-time", "base_commit": "abc",
+                    "source_task_id": "same-time-task",
+                },
+            },
+        ])
+        connection = rebuild(database, journal, preserve_active=False)
+        attempt = connection.execute(
+            "SELECT goal, acceptance_json FROM attempts WHERE attempt_id='same-time-task'"
+        ).fetchone()
+        connection.close()
+        self.assertEqual(attempt[0], "projected task scope")
+        self.assertEqual(json.loads(attempt[1]), ["projected"])
+
+    def test_prepare_pr_summary_falls_back_to_source_scope_then_topic(self) -> None:
+        attempt = {
+            "attempt_id": "attempt-1", "branch": "experiment/summary",
+            "goal": "", "topic": "summary-topic",
+        }
+        events = [
+            {
+                "event_type": "task.started", "task_id": "source-task",
+                "payload": {"scope": "source task scope"},
+            },
+            {
+                "event_type": "attempt.started", "task_id": "source-task",
+                "branch": "experiment/summary",
+                "payload": {"attempt_id": "attempt-1", "source_task_id": "source-task"},
+            },
+        ]
+        self.assertEqual(cli_module.attempt_pr_summary(attempt, events), "source task scope")
+        self.assertEqual(cli_module.attempt_pr_summary(attempt, []), "summary-topic")
+        self.assertEqual(
+            cli_module.attempt_pr_summary(dict(attempt, goal="explicit goal"), events),
+            "explicit goal",
+        )
 
     def test_receipts_become_stale_when_software_inputs_change(self) -> None:
         task_id = "20260811_receipt_stale_v4_001"
@@ -978,6 +1053,30 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertIn("state update", rejected.stderr)
         self.update_state()
         self.end(task_id)
+
+    def test_checkpoint_freshness_and_inferred_finish_fields(self) -> None:
+        task_id = "20260811_checkpoint_freshness_001"
+        self.start(task_id)
+        self.update_state("initial checkpoint")
+        (self.root / "notes.txt").write_text("changed after checkpoint\n", encoding="utf-8")
+
+        stale = self.hooks(
+            "end", task_id, "--result", "completed", "--note", "done", check=False,
+        )
+        self.assertIn("CHECKPOINT_STALE", stale.stderr)
+
+        self.update_state("fresh checkpoint")
+        finished = json.loads(self.hooks(
+            "end", task_id, "--result", "completed", "--note", "done",
+        ).stdout)
+        self.assertEqual(finished["route"], "unchanged")
+        self.assertEqual(finished["main_goal"], "unchanged")
+        events = [
+            event for event in load_events(self.root / "maintenance/events.jsonl")
+            if event.get("task_id") == task_id and event["event_type"] == "task.finished"
+        ]
+        self.assertNotIn("methods_action", events[0]["payload"])
+        self.assertNotIn("main_goal", events[0]["payload"])
         history = json.loads(self.hooks("history", "--format", "json").stdout)
         self.assertEqual(history[0]["task_id"], task_id)
 
@@ -1742,6 +1841,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.start(task_id, commit="always")
         self.update_state()
         (self.root / "result.txt").write_text("result\n", encoding="utf-8")
+        self.update_state("result ready")
         self.git("config", "user.name", "")
         self.git("config", "user.email", "")
         first = self.end(task_id, check=False)

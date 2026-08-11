@@ -12,6 +12,15 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class PublicReleaseSurfaceTests(unittest.TestCase):
+    def test_every_test_module_is_registered_by_the_project_runner(self) -> None:
+        from scripts.run_tests import MODULES
+
+        discovered = {
+            path.relative_to(ROOT).with_suffix("").as_posix().replace("/", ".")
+            for path in (ROOT / "tests").rglob("test*.py")
+        }
+        self.assertEqual(discovered, set(MODULES))
+
     def test_public_governance_files_and_readmes_exist(self) -> None:
         for name in (
             "README.md",
@@ -85,7 +94,25 @@ class PublicReleaseSurfaceTests(unittest.TestCase):
         self.assertNotIn("project-maintenance-template", combined)
         headings = re.findall(r"^## (.+)$", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), re.M)
         self.assertEqual(headings.count("Unreleased"), 1)
+        self.assertTrue(any(item.startswith("1.7.0") for item in headings))
         self.assertIn("1.6.1", headings)
+
+    def test_release_workflow_uses_pinned_attestations_and_sbom(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("attestations: write", workflow)
+        self.assertIn("id-token: write", workflow)
+        self.assertIn("workflow-monitor.spdx.json", workflow)
+        self.assertIn("actions/attest@1e69f48", workflow)
+        self.assertIn("path: dist", workflow)
+        self.assertIn("upload-release-assets: false", workflow)
+        self.assertIn('"rehearsal/**"', workflow)
+        self.assertIn("startsWith(github.ref, 'refs/tags/v')", workflow)
+        self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", workflow)
+        self.assertIn("retention-days: 7", workflow)
+        self.assertIn("dist/authenticode.json", workflow)
+        for line in workflow.splitlines():
+            if "uses:" in line:
+                self.assertRegex(line, r"@[0-9a-f]{40}(?:\s+#|$)")
 
 
 if __name__ == "__main__":

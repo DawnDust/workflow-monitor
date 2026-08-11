@@ -20,12 +20,13 @@ from project_hooks.infrastructure.git.build_identity import repository_source_id
 
 def write_build_info(root: Path) -> Path:
     repository = repository_source_identity(root)
-    tree = repository["source_tree"]
+    tree = repository["build_input_fingerprint"]
     built_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     build_id = hashlib.sha256(f"{tree}\n{built_at}".encode("utf-8")).hexdigest()[:16]
     value = {
         "build_id": build_id,
         "source_commit": repository["source_commit"],
+        "build_input_fingerprint": repository["build_input_fingerprint"],
         "source_tree": tree,
         "source_tree_algorithm": repository["source_tree_algorithm"],
         "built_at": built_at,
