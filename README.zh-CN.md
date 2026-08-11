@@ -1,6 +1,6 @@
 # Workflow Monitor
 
-<p align="center"><img src="docs/assets/workflow-monitor-wordmark.svg" alt="Workflow Monitor" width="430"></p>
+<p align="center"><img src="docs/assets/workflow-monitor-social-preview.png" alt="Workflow Monitor——本地、可审计、为科研而构建" width="960"></p>
 
 [English](README.md) · [用户手册](https://dawndust.github.io/workflow-monitor/zh/) · [下载](https://github.com/DawnDust/workflow-monitor/releases/latest)
 
@@ -11,7 +11,21 @@
 
 Workflow Monitor 是面向 Windows 科研 Git 项目的本地单文件工作流工具。它让 AI 协作中的任务、探索、决策、交接、资料和发布状态保持清晰，同时不启动服务器，也不上传项目数据。
 
+## 更多输出，不等于更可控
+
+今天的 AI 已经可以比人更快地产生代码、笔记、计划、实验和报告。但输出越来越多，并不自然等于科研质量越来越高，反而可能让真正重要的问题更难回答：当前目标是什么？哪个结果经过了验证？这次改动属于稳定工作还是探索？结论来自哪里？哪些外部行动真正得到研究者授权？
+
+许多自动化科研方案仍在追求生成更多内容、调用更多智能体和执行更长流程。Workflow Monitor 选择了一条更克制的路线。它不是“自主科学家”，也不是替人做决定的智能体编排器，而是一套**半自动科研工作流与可视化监控工具**：AI 执行用户要求的工作，工作流记录权威事实并设置检查点，研究者始终保留科学判断、路线变更、合并和发布的控制权。
+
+它追求的不是自动化程度最大化，而是让 AI 参与的科研过程保持**可见、有边界、可验证、可恢复**——让能力增加，而不是让控制减少。
+
 ![Workflow Monitor 项目概览](docs/assets/workflow-monitor-overview.png)
+
+## 工作流程
+
+自然语言请求会进入一套结构化但轻量的生命周期：只读问题保持只读；需要修改时明确区分稳定任务与探索任务；完成前必须通过验证和阶段审阅；提交、推送、合并与发布等外部交付动作仍然需要用户授权。
+
+<p align="center"><img src="docs/assets/workflow-monitor-lifecycle.svg" alt="Workflow Monitor 从自然语言请求、任务执行、验证到授权交付的完整生命周期" width="760"></p>
 
 ## 为什么使用 Workflow Monitor
 

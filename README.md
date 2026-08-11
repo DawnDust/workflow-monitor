@@ -1,6 +1,6 @@
 # Workflow Monitor
 
-<p align="center"><img src="docs/assets/workflow-monitor-wordmark.svg" alt="Workflow Monitor" width="430"></p>
+<p align="center"><img src="docs/assets/workflow-monitor-social-preview.png" alt="Workflow Monitor — local, auditable, built for research" width="960"></p>
 
 [简体中文](README.zh-CN.md) · [User manual](https://dawndust.github.io/workflow-monitor/) · [Download](https://github.com/DawnDust/workflow-monitor/releases/latest)
 
@@ -11,7 +11,21 @@
 
 Workflow Monitor is a local, single-file workflow companion for AI-assisted scientific Git projects on Windows. It keeps tasks, research attempts, decisions, handoffs, resources, and release readiness visible without running a server or uploading project data.
 
+## More output is not more control
+
+AI can now produce code, notes, plans, experiments, and reports faster than people can reliably review them. Yet a larger stream of output does not automatically create better research. It can make the important questions harder to answer: What is the current goal? Which result was actually verified? Is this stable work or an experiment? Where did a conclusion come from, and what action did the researcher authorize?
+
+Many approaches to automated research optimize for producing still more work. Workflow Monitor takes a deliberately more restrained path. It is not an autonomous scientist or an agent orchestrator. It is a **semi-automated research workflow with visual monitoring**: AI performs the requested work, the workflow records authoritative facts and enforces checkpoints, and the researcher keeps control of scientific judgment, direction changes, merging, and publication.
+
+The goal is not maximum automation. The goal is to make AI-assisted work **visible, bounded, verifiable, and recoverable**—so more capability does not mean less control.
+
 ![Workflow Monitor project overview](docs/assets/workflow-monitor-overview.png)
+
+## How it works
+
+Natural-language requests enter a structured but lightweight lifecycle. Read-only questions remain read-only; changes become explicit stable or exploratory tasks; verification and stage review must pass before completion; and external delivery actions still require user authorization.
+
+<p align="center"><img src="docs/assets/workflow-monitor-lifecycle.svg" alt="Workflow Monitor lifecycle from natural-language request through verification and authorized delivery" width="760"></p>
 
 ## Why Workflow Monitor
 
