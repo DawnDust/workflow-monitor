@@ -30,6 +30,7 @@ def non_negative_float(value: str) -> float:
 def add_state_arguments(parser: argparse.ArgumentParser) -> None:
     for name in ("goal", "judgment", "breakpoint", "blocker", "status", "main-goal-version"):
         parser.add_argument(f"--{name}")
+    parser.add_argument("--current-step")
     parser.add_argument("--next", action="append")
 
 
@@ -58,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--git-commit", choices=("auto", "always", "never"), default="auto")
     start.add_argument("--track", choices=("stable", "research", "experiment", "sandbox"))
     start.add_argument("--topic")
+    start.add_argument("--verification-profile", choices=("auto", "release"), default="auto")
+    start.add_argument("--without-stage-reason")
     sub.add_parser("status")
     task = sub.add_parser("task")
     task_sub = task.add_subparsers(dest="task_command", required=True)
@@ -92,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     project_update = project_sub.add_parser("update")
     project_update.add_argument("--description")
     project_update.add_argument("--big-goal")
+    project_update.add_argument("--main-goal-version")
     stage = sub.add_parser("stage")
     stage_sub = stage.add_subparsers(dest="stage_command", required=True)
     stage_list = stage_sub.add_parser("list")
@@ -241,5 +245,6 @@ def build_parser() -> argparse.ArgumentParser:
     end.add_argument("--evidence", action="append")
     end.add_argument("--commit-message")
     end.add_argument("--attempt-state", choices=ATTEMPT_STATES)
+    end.add_argument("--stage-review", choices=("updated", "reviewed-no-change"))
     add_state_arguments(end)
     return parser

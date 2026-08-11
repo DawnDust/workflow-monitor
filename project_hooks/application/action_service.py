@@ -28,8 +28,8 @@ class WorkflowActionService:
         failure_recorder: FailureRecorder,
         failure_formatter: Callable[[dict[str, Any]], str],
         execution_mode_provider: Callable[[], str],
-        application_version: str = "1.6.1",
-        schema_version: int = 3,
+        application_version: str = "1.7.0",
+        schema_version: int = 4,
     ):
         self.project_root = project_root.resolve()
         self.state_provider = state_provider

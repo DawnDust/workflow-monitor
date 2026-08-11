@@ -161,9 +161,9 @@ class ProjectDatabase:
 
     def has_finished_receipt(self, branch: str, attempt_state: str) -> bool:
         return self._connection.execute(
-            "SELECT 1 FROM task_archive WHERE branch=? "
-            "AND json_extract(payload_json, '$.attempt_state')=? LIMIT 1",
-            (branch, attempt_state),
+            "SELECT 1 FROM attempts WHERE (branch=? OR archive_branch=?) AND state=? "
+            "AND EXISTS (SELECT 1 FROM task_archive WHERE task_archive.branch=attempts.branch) LIMIT 1",
+            (branch, branch, attempt_state),
         ).fetchone() is not None
 
     def task_ids_like(self, prefix: str) -> set[str]:

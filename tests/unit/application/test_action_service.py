@@ -385,7 +385,7 @@ class WorkflowActionIntegrationTests(unittest.TestCase):
                 ]
                 types = [event["event_type"] for event in events]
                 self.assertIn("task.started", types)
-                self.assertIn("project_state.updated", types)
+                self.assertIn("task.checkpointed", types)
                 self.assertIn("task.finished", types)
                 self.assertFalse(service.snapshot(force=True)["active_task"])
                 self.assertEqual(service.snapshot()["lifecycle_step"]["key"], "completed")
