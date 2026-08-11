@@ -44,10 +44,11 @@ jobs:
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          path: dist/workflow-monitor.exe
+          path: dist
           format: spdx-json
           output-file: dist/workflow-monitor.spdx.json
           upload-artifact: false
+          upload-release-assets: false
       - name: Finalize release manifest
         shell: pwsh
         run: python scripts/build_release.py --version $env:RELEASE_VERSION --sbom dist/workflow-monitor.spdx.json --authenticode-json dist/authenticode.json

@@ -103,6 +103,8 @@ class PublicReleaseSurfaceTests(unittest.TestCase):
         self.assertIn("id-token: write", workflow)
         self.assertIn("workflow-monitor.spdx.json", workflow)
         self.assertIn("actions/attest@1e69f48", workflow)
+        self.assertIn("path: dist", workflow)
+        self.assertIn("upload-release-assets: false", workflow)
         self.assertIn('"rehearsal/**"', workflow)
         self.assertIn("startsWith(github.ref, 'refs/tags/v')", workflow)
         self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", workflow)
