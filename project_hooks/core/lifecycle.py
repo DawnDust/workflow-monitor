@@ -97,11 +97,23 @@ def lifecycle_step(state: dict) -> dict:
     preflight = state.get("finish_preflight") or finish_preflight(state)
     checkpoint = preflight.get("checkpoint_status")
     if checkpoint == "missing":
-        return {"key": "checkpoint-required", "label": "待记录进展", "index": 2, "needs_recovery": False}
+        if state.get("changed_paths"):
+            return {"key": "working", "label": "工作中", "index": 2, "needs_recovery": False}
+        return {"key": "active", "label": "周期已建立", "index": 1, "needs_recovery": False}
     if checkpoint == "stale":
-        return {"key": "checkpoint-stale", "label": "Checkpoint 已过期", "index": 3, "needs_recovery": False}
+        return {
+            "key": "working",
+            "label": "工作中",
+            "index": 2,
+            "needs_recovery": False,
+            "warning": {
+                "code": "CHECKPOINT_STALE",
+                "message": "Checkpoint 已过期，请重新记录进展",
+                "next_action": "state update",
+            },
+        }
+    if not state.get("worktree_quiet", True):
+        return {"key": "progress-recorded", "label": "进展已记录", "index": 3, "needs_recovery": False}
     if preflight.get("status") != "ready":
         return {"key": "verification-required", "label": "待验证或审阅", "index": 4, "needs_recovery": False}
-    if not state.get("worktree_quiet", True):
-        return {"key": "settling", "label": "等待工作树稳定", "index": 4, "needs_recovery": False}
     return {"key": "ready", "label": "门禁已通过", "index": 5, "needs_recovery": False}
