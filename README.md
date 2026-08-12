@@ -19,7 +19,11 @@ Many approaches to automated research optimize for producing still more work. Wo
 
 The goal is not maximum automation. The goal is to make AI-assisted work **visible, bounded, verifiable, and recoverable**—so more capability does not mean less control.
 
-![Workflow Monitor project overview](docs/assets/workflow-monitor-overview.png)
+<p align="center"><img src="docs/assets/workflow-monitor-triad-architecture-poster-branded.png" alt="Workflow Monitor collaboration architecture: researcher direction, AI execution, and auditable workflow monitoring" width="960"></p>
+
+Workflow Monitor coordinates three distinct responsibilities without replacing human judgment. The researcher sets the direction, evaluates scientific meaning, and retains final authorization; the AI agent plans, executes, and verifies the requested work; and Workflow Monitor manages the task lifecycle, separates stable maintenance from exploration, records append-only evidence and checkpoints, and preserves a recoverable path through the project. Together, these roles keep AI-assisted research visible, bounded, verifiable, and accountable.
+
+![Complete English Workflow Monitor overview](docs/assets/workflow-monitor-overview.png)
 
 ## How it works
 

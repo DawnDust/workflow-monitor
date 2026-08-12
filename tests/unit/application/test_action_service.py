@@ -123,8 +123,22 @@ class WorkflowActionTests(unittest.TestCase):
         self.assertEqual(lifecycle_step({"sidecar": {"phase": "starting"}})["key"], "starting")
         self.assertEqual(lifecycle_step({"sidecar": {"phase": "finishing"}})["key"], "finishing")
         active = {"task_id": "task", "state_updated": False}
-        self.assertEqual(lifecycle_step({"active_task": active, "changed_paths": ["a"]})["key"], "checkpoint-required")
+        self.assertEqual(lifecycle_step({"active_task": active, "changed_paths": []})["key"], "active")
+        self.assertEqual(lifecycle_step({"active_task": active, "changed_paths": ["a"]})["key"], "working")
+        stale = lifecycle_step({"active_task": active, "checkpoint_status": "stale"})
+        self.assertEqual(stale["key"], "working")
+        self.assertEqual(stale["warning"]["code"], "CHECKPOINT_STALE")
         active["state_updated"] = True
+        self.assertEqual(lifecycle_step({
+            "active_task": active, "checkpoint_status": "fresh",
+            "finish_preflight": {"status": "blocked", "checkpoint_status": "fresh"},
+            "worktree_quiet": False,
+        })["key"], "progress-recorded")
+        self.assertEqual(lifecycle_step({
+            "active_task": active, "checkpoint_status": "fresh",
+            "finish_preflight": {"status": "blocked", "checkpoint_status": "fresh"},
+            "worktree_quiet": True,
+        })["key"], "verification-required")
         self.assertEqual(lifecycle_step({
             "active_task": active, "checkpoint_status": "fresh",
             "finish_preflight": {"status": "ready", "checkpoint_status": "fresh"},
