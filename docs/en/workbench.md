@@ -25,6 +25,10 @@ The theme and refresh controls remain in the top bar. They are not part of Setti
 
 Resources live under the standard `resources/` directories and can be registered in the catalog. `resources/sparks/` is a low-constraint Markdown idea pool: unregistered Sparks are valid, while optionally registered Sparks appear in resources and cross-record search.
 
+## Research attention
+
+The Overview shows at most three deterministic research-attention signals derived from existing structured facts, such as missing registered resources, explicit contradictory evidence, a blocked chapter, or an active exploration without continuity steps. The same sourced signals enter the AI Context and link only to existing read-only pages. They are not scientific conclusions and never trigger automatic repairs. Unregistered Sparks remain free-form and are not historically tracked.
+
 ## Diagnostics
 
 Internal failures can create local, rotating, redacted diagnostic records. Export produces a ZIP on the local machine. Review every file before attaching it to an Issue; nothing is uploaded automatically.

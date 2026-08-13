@@ -1149,7 +1149,18 @@ def auto_commit(record: dict, paths: list[str], result: str, message: str | None
         if mode == "always":
             raise WorkflowError(detail)
         return {"status": "skipped", "reason": detail}
-    commit_paths = [path for path in paths if not path.startswith(".project_hooks/")]
+    commit_paths = []
+    for path in paths:
+        if path.startswith(".project_hooks/"):
+            continue
+        # Baseline snapshots can retain a short-lived ignored test artifact after
+        # its producer has already cleaned it.  A temporary index starts at HEAD,
+        # so an absent, never-tracked path cannot be staged and must be ignored.
+        # Paths tracked by HEAD stay eligible so real file deletions are committed.
+        exists = (ROOT / path).exists()
+        tracked = run_git(["cat-file", "-e", f"HEAD:{path}"], check=False).returncode == 0
+        if exists or tracked:
+            commit_paths.append(path)
     if not commit_paths:
         return {"status": "skipped", "reason": "没有任务归属文件"}
     git_dir = Path(run_git(["rev-parse", "--git-dir"]).stdout.strip())
@@ -1506,6 +1517,13 @@ def markdown_context(data: dict) -> str:
     )
     if not stage.get("revisions"):
         lines.append("- 尚无显式判断修订。")
+    lines += ["", "## 研究注意事项", ""]
+    for item in data.get("research_attention") or []:
+        summary = (item.get("summary") or {}).get("zh-CN") or item.get("code")
+        sources = "、".join(item.get("source_ids") or []) or "无"
+        lines.append(f"- [{item.get('code')}] {summary}｜来源：{item.get('source_type')} / {sources}")
+    if not data.get("research_attention"):
+        lines.append("- 无。")
     lines += ["", "## 研究篇章建议与待审阅动作", ""]
     for item in data.get("required_actions") or []:
         lines.append(f"- {item}")

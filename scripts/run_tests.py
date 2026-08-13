@@ -27,6 +27,7 @@ MODULES = (
     "tests.distribution.test_public_release",
     "tests.integration.web.test_dashboard",
     "tests.unit.test_architecture",
+    "tests.unit.test_research_attention",
 )
 FAST_CLASSES = (
     "tests.integration.system.test_diagnostics.DiagnosticsTests",

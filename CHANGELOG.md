@@ -10,6 +10,8 @@
 
 ## Unreleased
 
+- Added up to three deterministic, sourced Research Attention signals to AI Context and the read-only Dashboard Overview without adding persistence or model calls.
+
 ## 1.7.0 - 2026-08-11
 
 - Event Schema v4：任务 checkpoint、测试回执和阶段审阅成为权威事实，历史 v1-v3 事件原样兼容。

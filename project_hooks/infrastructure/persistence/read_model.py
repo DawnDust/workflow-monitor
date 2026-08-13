@@ -11,6 +11,7 @@ from typing import Callable
 
 from ... import __version__
 from ...core.catalog import decode_item
+from ...core.research_attention import research_attention
 from ..git import client as git_client
 from ..system.finish_preflight import assemble_finish_preflight
 from ..system.resource_layout import resource_directory_snapshot
@@ -786,7 +787,15 @@ class MaintenanceReadModel:
                 task_details = self._task_details(connection, publication)
             except (OSError, ReadModelError, subprocess.SubprocessError):
                 task_details = {}
-            return self._apply_overview_state(context, task_details)
+            context = self._apply_overview_state(context, task_details)
+            catalog_items = [decode_item(item) for item in rows(
+                connection, "SELECT * FROM catalog_items ORDER BY updated_at DESC, item_id",
+            )]
+            catalog_relations = rows(
+                connection, "SELECT * FROM catalog_relations ORDER BY updated_at DESC, relation_id",
+            )
+            context["research_attention"] = research_attention(context, catalog_items, catalog_relations)
+            return context
         finally:
             connection.close()
 
@@ -1133,6 +1142,7 @@ class MaintenanceReadModel:
                 connection,
                 "SELECT * FROM catalog_relations ORDER BY updated_at DESC, relation_id",
             )
+            context["research_attention"] = research_attention(context, catalog_items, catalog_relations)
             return {
                 "branch": branch,
                 "health": {

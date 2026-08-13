@@ -144,10 +144,13 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertIn("Git 同步：", overview)
         output = self.hooks("context", "--format", "markdown").stdout
         self.assertIn("# 动态维护上下文", output)
+        self.assertIn("## 研究注意事项", output)
+        self.assertIn("- 无。", output)
         self.assertIn("## 工作断点", output)
         self.assertIn("## 真实断点", output)
         context = json.loads(self.hooks("context", "--format", "json").stdout)
         self.assertEqual(context["git_state"]["relation"], "unavailable")
+        self.assertEqual(context["research_attention"], [])
         self.assertEqual(self.git("config", "--local", "--get", "core.hooksPath").stdout.strip(), ".githooks")
 
     def test_v4_checkpoint_is_single_source_and_exposes_field_sources(self) -> None:
@@ -1371,6 +1374,21 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         ).stdout)["item"]
         self.assertEqual(missing_item["status"], "missing")
 
+        contradiction = json.loads(self.hooks(
+            "catalog", "link", paper_item["item_id"], "contradicts", theory_id,
+            "--note", "conflicting evidence",
+        ).stdout)
+        attention_context = json.loads(self.hooks("context", "--format", "json").stdout)
+        self.assertEqual(
+            [item["code"] for item in attention_context["research_attention"][:2]],
+            ["REGISTERED_RESOURCE_MISSING", "EXPLICIT_EVIDENCE_CONTRADICTION"],
+        )
+        self.assertIn(paper_item["item_id"], attention_context["research_attention"][0]["source_ids"])
+        self.assertEqual(attention_context["research_attention"][1]["source_ids"], [contradiction["relation_id"]])
+        attention_markdown = self.hooks("context", "--format", "markdown").stdout
+        self.assertIn("[REGISTERED_RESOURCE_MISSING]", attention_markdown)
+        self.assertIn("[EXPLICIT_EVIDENCE_CONTRADICTION]", attention_markdown)
+
         outside = Path(self.temp.name) / "outside.pdf"
         outside.write_bytes(b"outside")
         rejected = self.hooks(
@@ -1822,6 +1840,24 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         result = json.loads(self.end(task_id).stdout)
         self.assertEqual(result["git"]["status"], "committed")
         self.assertEqual(self.git("status", "--porcelain=v1").stdout.splitlines(), ["M  user_note.txt"])
+
+    def test_auto_commit_ignores_cleaned_untracked_artifact_but_commits_tracked_deletion(self) -> None:
+        tracked = self.root / "tracked.txt"
+        tracked.write_text("tracked\n", encoding="utf-8")
+        self.git("add", "tracked.txt")
+        self.git("commit", "-m", "add tracked fixture")
+        task_id = "20260813_autocommit_transient_001"
+        self.start(task_id, commit="always")
+        transient = self.root / ".coverage"
+        transient.write_bytes(b"temporary coverage data")
+        tracked.unlink()
+        self.update_state()
+        transient.unlink()
+        result = json.loads(self.end(task_id).stdout)
+        self.assertEqual(result["git"]["status"], "committed")
+        self.assertIn("tracked.txt", result["git"]["paths"])
+        self.assertNotIn(".coverage", result["git"]["paths"])
+        self.assertFalse(self.git("cat-file", "-e", "HEAD:tracked.txt", check=False).returncode == 0)
 
     def test_dashboard_cli_is_removed(self) -> None:
         result = self.hooks("dashboard", check=False)

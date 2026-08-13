@@ -114,6 +114,14 @@ class WebProjectionTests(unittest.TestCase):
         self.assertEqual(projection["items"][0]["work_summary"], "Implement cards")
         self.assertEqual(projection["items"][1]["work_summary"], "Foundation completed")
 
+    def test_dashboard_assets_include_read_only_research_attention_card(self) -> None:
+        script = (Path(__file__).parents[3] / "project_hooks" / "ui" / "web" / "assets" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('function attentionCard(c)', script)
+        self.assertIn('data-attention-target', script)
+        self.assertIn('研究注意事项', script)
+        self.assertIn('Research attention', script)
+        self.assertIn('MAX 3 · READ ONLY', script)
+
     def test_research_stages_preserve_revision_and_pause_projection(self) -> None:
         source = sample_snapshot()
         source["context"]["stages"][0]["revisions"] = [{
