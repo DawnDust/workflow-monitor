@@ -41,7 +41,7 @@ The updater reads the official manifest, verifies SHA-256, stores versioned runt
 - `.project_hooks/maintenance.sqlite3` is a local rebuildable query projection.
 - `.project_hooks/active-task.json` is recoverable active-task state.
 - `resources/` stores registered project evidence and outputs.
-- `workbench/` stores indexed reusable Markdown aids.
+- `resources/sparks/` stores free-form Markdown ideas; catalog registration is optional.
 
 Do not manually rewrite historical event lines or edit SQLite.
 

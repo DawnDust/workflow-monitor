@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)
 
-Workflow Monitor is a local, single-file workflow companion for AI-assisted scientific Git projects on Windows. It keeps tasks, research attempts, decisions, handoffs, resources, and release readiness visible without running a server or uploading project data.
+Workflow Monitor is a local, single-file workflow companion for AI-assisted scientific Git projects on Windows. It keeps tasks, Research Chapters, attempts, handoffs, resources, and release readiness visible without running a server or uploading project data.
 
 ## More output is not more control
 
@@ -36,8 +36,9 @@ Natural-language requests enter a structured but lightweight lifecycle. Read-onl
 - **One executable:** users only download `workflow-monitor.exe`; Python is not required.
 - **Natural-language operation:** describe work to your AI coding agent and let the project rules drive the structured lifecycle.
 - **Stable work and experiments stay distinct:** maintenance remains on `main`, while uncertain research uses explicit tracks and branches.
+- **Nonlinear Research Chapters:** iterate across multiple experiments, pause one chapter to pursue another, resume temporary closures, and preserve evidence-driven judgment revisions without turning research into a rigid pipeline.
 - **Local and auditable:** permanent records are append-only project files; the SQLite database is a rebuildable local projection.
-- **Read-only workbench:** inspect stages, actions, resources, diagnostics, and release state without exposing a network port.
+- **Read-only Dashboard:** inspect Research Chapters, actions, resources, diagnostics, and release state without exposing a network port.
 - **Bilingual interface:** switch between Simplified Chinese and English locally. User-authored content and recorded data are never translated.
 
 ## Quick start
@@ -46,7 +47,7 @@ Prerequisites: Windows 10/11 x64, [Git for Windows](https://git-scm.com/download
 
 1. Download `workflow-monitor.exe` from the [latest release](https://github.com/DawnDust/workflow-monitor/releases/latest).
 2. Put it in a new or existing project folder. Keep the filename unchanged.
-3. Double-click it. A new folder is initialized as a Git repository and the local workbench opens.
+3. Double-click it. A new folder is initialized as a Git repository and the local Dashboard opens.
 4. In your AI coding agent, describe the task in plain language. The repository guidance handles lifecycle commands and safety checks.
 
 Windows SmartScreen may warn about an unsigned executable. Verify that it came from the official GitHub Release, compare its SHA-256 value with `release-manifest.json`, inspect `workflow-monitor.spdx.json`, and run `gh attestation verify workflow-monitor.exe --repo DawnDust/workflow-monitor`. The manifest states whether Authenticode signing was applied.

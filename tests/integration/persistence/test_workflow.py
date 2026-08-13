@@ -29,7 +29,7 @@ from project_hooks.infrastructure.persistence.read_model import (
     is_publication_step,
     stage_freshness_warning,
 )
-from project_hooks.infrastructure.persistence.store import append_events, ensure_database, load_events, record_events, rebuild
+from project_hooks.infrastructure.persistence.store import append_events, ensure_database, load_events, new_event, record_events, rebuild
 from project_hooks.infrastructure.system.verification import (
     iso_now, verification_fingerprint, verify_receipts, write_test_receipt,
 )
@@ -46,15 +46,10 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         cls.seed_root.mkdir()
         for name in (".codex", ".githooks", "maintenance", "project_hooks"):
             shutil.copytree(SOURCE_ROOT / name, cls.seed_root / name, ignore=shutil.ignore_patterns("__pycache__"))
-        for name in ("source", "data", "theory", "analysis", "outputs", "others", "reports"):
+        for name in ("source", "data", "theory", "analysis", "outputs", "others", "reports", "sparks"):
             directory = cls.seed_root / "resources" / name
             directory.mkdir(parents=True)
             (directory / ".gitkeep").write_text("\n", encoding="utf-8")
-        for name in ("local", "imported", "exports"):
-            directory = cls.seed_root / "workbench" / name
-            directory.mkdir(parents=True)
-            if name != "exports":
-                (directory / ".gitkeep").write_text("\n", encoding="utf-8")
         for name in ("AGENTS.md", ".gitignore", ".gitattributes"):
             shutil.copy2(SOURCE_ROOT / name, cls.seed_root / name)
         (cls.seed_root / "maintenance/events.jsonl").write_text("", encoding="utf-8")
@@ -108,10 +103,10 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.hooks("state", "update", "--judgment", "test judgment", "--breakpoint", breakpoint,
                    "--next", "continue testing", "--blocker", "none")
 
-    def end(self, task_id: str, *, state: str | None = None, route: str = "unchanged",
+    def end(self, task_id: str, *, state: str | None = None,
             stage_review: str | None = "reviewed-no-change", main_goal: str | None = None,
             check: bool = True) -> subprocess.CompletedProcess[str]:
-        args = ["end", task_id, "--result", "completed", "--route", route,
+        args = ["end", task_id, "--result", "completed",
                 "--methods-action", "updated", "--note", "test completed",
                 "--evidence", "unit test"]
         if main_goal:
@@ -141,7 +136,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         overview = self.hooks().stdout
         self.assertIn("项目概览", overview)
         self.assertIn("项目描述：", overview)
-        self.assertIn("当前阶段", overview)
+        self.assertIn("当前研究篇章", overview)
         self.assertIn("状态：", overview)
         self.assertIn("活动任务：", overview)
         self.assertIn("当前阻塞：", overview)
@@ -320,13 +315,13 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         missing = self.end(task_id, stage_review=None, check=False)
         self.assertIn("--stage-review", missing.stderr)
         false_update = self.hooks(
-            "end", task_id, "--result", "completed", "--route", "unchanged",
+            "end", task_id, "--result", "completed",
             "--methods-action", "reviewed-no-change", "--main-goal", "unchanged",
             "--note", "reviewed", "--stage-review", "updated", check=False,
         )
-        self.assertIn("找不到本任务产生的阶段事件", false_update.stderr)
+        self.assertIn("找不到本任务产生的研究篇章事件", false_update.stderr)
         finished = self.hooks(
-            "end", task_id, "--result", "completed", "--route", "unchanged",
+            "end", task_id, "--result", "completed",
             "--methods-action", "reviewed-no-change", "--main-goal", "unchanged",
             "--note", "reviewed", "--stage-review", "reviewed-no-change",
         )
@@ -675,7 +670,6 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         result = json.loads(self.hooks(
             "end", task_id,
             "--result", "completed",
-            "--route", "unchanged",
             "--methods-action", "updated",
             "--main-goal", "unchanged",
             "--note", "one-step completion",
@@ -751,9 +745,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         task_id = "20260722_readmodel_001"
         self.start(task_id)
         self.update_state("read model breakpoint")
-        self.hooks("decision", "add", "--decision", "read model", "--alternatives", "duplicate queries",
-                   "--basis", "one projection", "--reopen-condition", "new backend")
-        self.end(task_id, route="changed")
+        self.end(task_id)
         model = MaintenanceReadModel(
             self.root / ".project_hooks/maintenance.sqlite3",
             self.root / "maintenance/events.jsonl",
@@ -762,22 +754,21 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         snapshot = model.dashboard_snapshot()
         self.assertEqual(snapshot["context"]["state"]["breakpoint"], "read model breakpoint")
         self.assertEqual(snapshot["history"][0]["task_id"], task_id)
-        self.assertEqual(snapshot["decisions"][0]["decision"], "read model")
-        self.assertGreaterEqual(len(snapshot["events"]), 4)
+        self.assertNotIn("decisions", snapshot)
+        self.assertGreaterEqual(len(snapshot["events"]), 3)
         self.assertEqual(snapshot["health"]["status"], "passed")
         self.assertNotIn("timeline", snapshot)
-        self.assertTrue({"task", "decision"}.issubset({item["kind"] for item in snapshot["search_index"]}))
+        self.assertIn("task", {item["kind"] for item in snapshot["search_index"]})
+        self.assertNotIn("decision", {item["kind"] for item in snapshot["search_index"]})
         self.assertNotIn("commit", {item["kind"] for item in snapshot["search_index"]})
 
-    def test_task_details_aggregate_decisions_explorations_and_events(self) -> None:
+    def test_task_details_aggregate_explorations_and_events(self) -> None:
         task_id = "20260723_task_detail_001"
         self.start(task_id, "--track", "research", "--topic", "task-detail")
         self.update_state("task details ready")
-        self.hooks("decision", "add", "--decision", "use a task detail center", "--alternatives", "separate pages",
-                   "--basis", "one navigation hub", "--reopen-condition", "new record type")
         self.hooks("attempt", "update", "--hypothesis", "task links are sufficient", "--evidence", "records share task id",
                    "--conclusion", "aggregation is deterministic")
-        self.end(task_id, state="validated", route="changed")
+        self.end(task_id, state="validated")
         self.commit_all("record task detail experiment")
 
         model = MaintenanceReadModel(
@@ -791,7 +782,8 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(detail["conclusion"], "aggregation is deterministic")
         self.assertIn("records share task id", detail["evidence"])
         kinds = {item["kind"] for item in detail["related"]}
-        self.assertTrue({"decision", "exploration", "event"}.issubset(kinds))
+        self.assertTrue({"exploration", "event"}.issubset(kinds))
+        self.assertNotIn("decision", kinds)
         self.assertNotIn("commit", kinds)
         self.assertTrue(all(item["task_id"] == task_id for item in detail["related"]))
 
@@ -816,7 +808,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             "stage", "start", "other", "--title", "Other", "--goal", "Other goal",
             "--acceptance", "Done", check=False,
         )
-        self.assertIn("已有 active 阶段", duplicate.stderr)
+        self.assertIn("已有 active 研究篇章", duplicate.stderr)
         self.update_state("stage profile ready")
         self.end(stable_id)
         self.commit_all("record project profile and stage")
@@ -848,6 +840,12 @@ class ProjectHooksSqliteTests(unittest.TestCase):
 
         blocker_id = "20260801_stage_block_001"
         self.start(blocker_id)
+        blocked_closure = self.hooks(
+            "stage", "update", "validation", "--status", "paused",
+            "--pause-kind", "temporary-closure", "--pause-note", "Enough evidence for now",
+            check=False,
+        )
+        self.assertIn("active 探索", blocked_closure.stderr)
         blocked = self.hooks(
             "stage", "update", "validation", "--status", "completed",
             "--summary", "Done", "--evidence", "tests", check=False,
@@ -856,6 +854,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.update_state("stage remains active")
         self.end(blocker_id)
 
+    @unittest.skip("retired Workbench surface is covered by CLI absence tests")
     def test_external_workbench_cli_is_event_backed_and_not_in_context(self) -> None:
         task_id = "20260802_external_tools_001"
         self.start(task_id, "--track", "stable")
@@ -894,6 +893,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.update_state("external tools recorded")
         self.end(task_id)
 
+    @unittest.skip("retired Workbench surface is covered by CLI absence tests")
     def test_workbench_items_and_packages_are_indexed_but_not_in_context(self) -> None:
         task_id = "20260809_workbench_package_001"
         self.start(task_id, "--track", "stable")
@@ -946,6 +946,76 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.update_state("workbench package round trip completed")
         self.end(task_id)
 
+    def test_research_chapter_revision_pause_switch_resume_and_seal(self) -> None:
+        task_id = "20260813_chapter_nonlinear_001"
+        self.start(task_id)
+        self.hooks("stage", "start", "chapter-a", "--title", "Chapter A",
+                   "--goal", "Iterate on a hypothesis", "--acceptance", "Evidence converges")
+        missing_summary = self.hooks(
+            "stage", "update", "chapter-a", "--revision", "New evidence changed the model",
+            "--evidence", "experiment-a", check=False)
+        self.assertIn("--summary", missing_summary.stderr)
+        missing_evidence = self.hooks(
+            "stage", "update", "chapter-a", "--revision", "New evidence changed the model",
+            "--summary", "Model B is now preferred", check=False)
+        self.assertIn("--evidence", missing_evidence.stderr)
+        revised = json.loads(self.hooks(
+            "stage", "update", "chapter-a", "--revision", "New evidence rejected model A",
+            "--summary", "Model B is now preferred", "--evidence", "experiment-a").stdout)
+        self.assertEqual(revised["revision"], "New evidence rejected model A")
+        missing_pause = self.hooks("stage", "update", "chapter-a", "--status", "paused", check=False)
+        self.assertIn("--pause-kind", missing_pause.stderr)
+        self.hooks("stage", "update", "chapter-a", "--status", "paused",
+                   "--pause-kind", "temporary-closure", "--pause-note", "Sufficient for now")
+        self.hooks("stage", "start", "chapter-b", "--title", "Chapter B",
+                   "--goal", "Investigate another question", "--acceptance", "Question reviewed")
+        blocked_resume = self.hooks("stage", "update", "chapter-a", "--status", "active", check=False)
+        self.assertIn("已有 active 研究篇章", blocked_resume.stderr)
+        self.hooks("stage", "update", "chapter-b", "--status", "paused",
+                   "--pause-kind", "interruption", "--pause-note", "Return to chapter A")
+        self.hooks("stage", "update", "chapter-a", "--status", "active")
+        shown = json.loads(self.hooks("stage", "show", "chapter-a", "--format", "json").stdout)
+        self.assertEqual(shown["summary"], "Model B is now preferred")
+        self.assertEqual(shown["revisions"][0]["evidence"], ["experiment-a"])
+        self.assertEqual(shown["pause"]["kind"], "temporary-closure")
+        self.hooks("stage", "update", "chapter-a", "--status", "completed",
+                   "--summary", "Evidence converged", "--evidence", "final-review")
+        sealed = self.hooks("stage", "update", "chapter-a", "--status", "active", check=False)
+        self.assertIn("completed 研究篇章不能再更新", sealed.stderr)
+        self.update_state("nonlinear chapter semantics verified")
+        self.end(task_id, stage_review="updated")
+
+    def test_legacy_pause_rebuilds_without_inventing_pause_semantics(self) -> None:
+        task_id = "20260813_chapter_legacy_pause_001"
+        self.start(task_id)
+        self.hooks("stage", "start", "legacy-pause", "--title", "Legacy pause",
+                   "--goal", "Keep old journals readable", "--acceptance", "Projection is compatible")
+        event = new_event(
+            "stage.state_changed", branch="main", task_id=task_id,
+            payload={"stage_id": "legacy-pause", "status": "paused"},
+            timezone="Asia/Shanghai", event_id="legacy-stage-pause",
+        )
+        event["schema_version"] = 4
+        append_events(
+            self.root / "maintenance/events.jsonl", self.root / ".project_hooks", [event],
+        )
+        rebuild(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+        ).close()
+        context = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).context()
+        self.assertIsNone(context["current_stage"])
+        self.assertEqual(context["latest_stage"]["pause"]["kind"], "legacy")
+        rendered = self.hooks("context", "--format", "markdown").stdout
+        self.assertIn("历史暂停", rendered)
+        self.assertIn("旧日志未记录", rendered)
+        self.update_state("legacy pause compatibility verified")
+        self.end(task_id, stage_review="updated")
+
     def test_stage_validation_and_legacy_projects_do_not_infer_profile(self) -> None:
         context = MaintenanceReadModel(
             self.root / ".project_hooks/maintenance.sqlite3",
@@ -979,17 +1049,15 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         task_id = "20260723_search_index_001"
         self.start(task_id, "--track", "research", "--topic", "search-index")
         self.update_state("search index complete")
-        self.hooks("decision", "add", "--decision", "index all records", "--alternatives", "separate search",
-                   "--basis", "one query", "--reopen-condition", "new record type")
         self.hooks("attempt", "update", "--hypothesis", "search is complete", "--evidence", "all kinds mapped",
                    "--conclusion", "shared index works")
-        self.end(task_id, state="validated", route="changed")
+        self.end(task_id, state="validated")
         snapshot = MaintenanceReadModel(
             self.root / ".project_hooks/maintenance.sqlite3",
             self.root / "maintenance/events.jsonl",
             lambda: "research/search-index",
         ).dashboard_snapshot()
-        self.assertEqual({"task", "decision", "exploration"}, {item["kind"] for item in snapshot["search_index"]})
+        self.assertEqual({"task", "exploration"}, {item["kind"] for item in snapshot["search_index"]})
         exploration = next(item for item in snapshot["search_index"] if item["kind"] == "exploration")
         self.assertEqual(exploration["status"], "待合并")
 
@@ -1039,7 +1107,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             for item in migrated_events
         ))
         self.assertEqual(context["field_sources"]["main_goal_version"]["event_type"], "project.profile_updated")
-        self.assertEqual(len(json.loads(self.hooks("decisions", "--format", "json").stdout)), 1)
+        self.assertFalse(any(item["event_type"] == "decision.recorded" for item in migrated_events))
         self.assertGreaterEqual(len(json.loads(self.hooks("history", "--format", "json").stdout)), 2)
 
     def test_end_requires_state_update(self) -> None:
@@ -1069,7 +1137,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         finished = json.loads(self.hooks(
             "end", task_id, "--result", "completed", "--note", "done",
         ).stdout)
-        self.assertEqual(finished["route"], "unchanged")
+        self.assertNotIn("route", finished)
         self.assertEqual(finished["main_goal"], "unchanged")
         events = [
             event for event in load_events(self.root / "maintenance/events.jsonl")
@@ -1080,6 +1148,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         history = json.loads(self.hooks("history", "--format", "json").stdout)
         self.assertEqual(history[0]["task_id"], task_id)
 
+    @unittest.skip("decision and route semantics were removed in 2.0")
     def test_route_change_requires_decision_in_same_task(self) -> None:
         task_id = "20260722_decision_001"
         self.start(task_id)
@@ -1318,7 +1387,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         )
         dashboard = model.dashboard_snapshot()
         self.assertEqual(len(dashboard["catalog_items"]), 3)
-        self.assertEqual(len(dashboard["resource_directories"]), 7)
+        self.assertEqual(len(dashboard["resource_directories"]), 8)
         data_directory = next(
             item for item in dashboard["resource_directories"] if item["name"] == "data"
         )
@@ -1338,14 +1407,22 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         report = self.root / "resources/reports/status.md"
         other.write_bytes(b"other")
         report.write_text("# Status\n", encoding="utf-8")
+        spark = self.root / "resources/sparks/free-idea.md"
+        spark.write_text("# Unconstrained idea\n", encoding="utf-8")
 
         failed = self.hooks("check", check=False)
         self.assertNotEqual(failed.returncode, 0)
         self.assertIn("未索引文件", failed.stderr)
+        self.assertNotIn("free-idea.md", failed.stderr)
         scanned = json.loads(self.hooks("catalog", "scan").stdout)
         self.assertEqual(scanned["scanned_files"], 2)
         items = json.loads(self.hooks("catalog", "list", "--format", "json").stdout)
         self.assertEqual({item["kind"] for item in items}, {"other", "report"})
+        registered_spark = json.loads(self.hooks(
+            "catalog", "add", "--kind", "spark", "--title", "Free idea",
+            "--path", "resources/sparks/free-idea.md",
+        ).stdout)
+        self.assertEqual(registered_spark["kind"], "spark")
         self.assertEqual(self.hooks("check", check=False).returncode, 0)
 
         loose = self.root / "loose.pdf"
@@ -1569,7 +1646,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(context["state"]["goal"], "legacy")
         connection = sqlite3.connect(database)
         try:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
         finally:
             connection.close()
 

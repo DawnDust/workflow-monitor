@@ -1,15 +1,14 @@
-# Using the workbench
+# Using the Dashboard
 
-The workbench is an observation and navigation surface. Lifecycle writes are performed by the structured service through the AI agent or advanced CLI.
+The Dashboard is an observation and navigation surface. Lifecycle writes are performed by the structured service through the AI agent or advanced CLI.
 
 ## Main views
 
-- **Workflow:** active and historical tasks, action availability, stages, research attempts, and decisions.
-- **Overview:** project description, current stage, judgment, breakpoint, blockers, next steps, delivery state, and resource summary.
-- **Search:** searches tasks, attempts, decisions, and registered resources without translating their content.
-- **Resources:** navigates the seven standard resource directories and lazily loads registered entries.
-- **Workbench:** indexes user-created or imported Markdown tools, instructions, methods, workflows, checklists, references, and templates.
-- **Research stages:** groups the main goal, completed work, related attempts, and resources by stage.
+- **Workflow:** active and historical tasks, action availability, Research Chapters, and research attempts.
+- **Overview:** project description, current Research Chapter, judgment, breakpoint, blockers, next steps, delivery state, and resource summary.
+- **Search:** searches tasks, attempts, and registered resources without translating their content.
+- **Resources:** navigates the standard resource directories and lazily loads registered entries.
+- **Research Chapters:** groups chapter goals, completed work, related attempts, and resources.
 - **Settings:** language, status explanations, advanced delivery or diagnostic views, and product information.
 
 ## Settings
@@ -22,9 +21,9 @@ External links open only after an explicit click. Project content and diagnostic
 
 The theme and refresh controls remain in the top bar. They are not part of Settings.
 
-## Resources and workbench items
+## Resources and Sparks
 
-Resources live under the standard `resources/` directories and are registered in the catalog. Workbench items are reusable Markdown aids stored under `workbench/`. They are never automatically executed, installed, checked online, or injected into daily context. Text is copied for the AI agent only after an explicit selection.
+Resources live under the standard `resources/` directories and can be registered in the catalog. `resources/sparks/` is a low-constraint Markdown idea pool: unregistered Sparks are valid, while optionally registered Sparks appear in resources and cross-record search.
 
 ## Diagnostics
 

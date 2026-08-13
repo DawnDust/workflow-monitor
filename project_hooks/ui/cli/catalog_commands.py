@@ -16,6 +16,7 @@ from ...infrastructure.persistence.database import ProjectDatabase
 
 from ...infrastructure.system.resource_layout import (
     LEGACY_BY_PATH,
+    OPTIONAL_CATALOG_KINDS,
     RESOURCE_BY_KIND,
     RESOURCE_DIRECTORIES,
     RESOURCE_KINDS,
@@ -44,6 +45,7 @@ CATALOG_KIND_PREFIXES = {
     "output": "out",
     "other": "other",
     "report": "report",
+    "spark": "spark",
 }
 CATALOG_DIRECTORIES = {item.relative_path: item.kind for item in RESOURCE_DIRECTORIES}
 CATALOG_STATUSES = ("active", "missing", "archived")
@@ -480,7 +482,11 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
             )
         roots.append((scan_root, resource.kind))
     else:
-        roots.extend((runtime.root / directory, kind) for directory, kind in CATALOG_DIRECTORIES.items())
+        roots.extend(
+            (runtime.root / directory, kind)
+            for directory, kind in CATALOG_DIRECTORIES.items()
+            if kind not in OPTIONAL_CATALOG_KINDS
+        )
     connection = runtime.database()
     try:
         existing = {

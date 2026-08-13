@@ -11,8 +11,8 @@ from datetime import datetime
 from pathlib import Path
 
 
-ACTIVE_TASK_FORMAT = 2
-SUPPORTED_ACTIVE_TASK_FORMATS = (1, 2)
+ACTIVE_TASK_FORMAT = 3
+SUPPORTED_ACTIVE_TASK_FORMATS = (1, 2, 3)
 
 
 class ActiveTaskError(RuntimeError):
@@ -53,7 +53,6 @@ def save_active_state(
     record: dict,
     *,
     state_updated: bool = False,
-    decisions_added: int = 0,
     phase: str = "active",
     finish: dict | None = None,
 ) -> dict:
@@ -62,7 +61,6 @@ def save_active_state(
         "phase": phase,
         "record": record,
         "checkpoint_recorded": bool(state_updated),
-        "decisions_added": int(decisions_added),
         "finish": finish,
     }
     envelope = {**body, "checksum": _checksum(body)}
@@ -83,6 +81,7 @@ def load_active_state(state_dir: Path) -> dict | None:
         raise ActiveTaskError("活动任务 sidecar 校验失败；请运行 task recover")
     if envelope.get("format") == 1:
         envelope["checkpoint_recorded"] = bool(envelope.get("state_updated"))
+    envelope.pop("decisions_added", None)
     envelope["state_updated"] = bool(envelope.get("checkpoint_recorded"))
     envelope["checksum"] = checksum
     return envelope
@@ -100,13 +99,13 @@ def active_row_matches(database: Path, state_dir: Path) -> bool:
     connection = sqlite3.connect(database)
     try:
         rows = connection.execute(
-            "SELECT task_id, started_at, branch, record_json, state_updated, decisions_added FROM active_tasks"
+            "SELECT task_id, started_at, branch, record_json, state_updated FROM active_tasks"
         ).fetchall()
     finally:
         connection.close()
     expected = (
         record["task_id"], record["started_at"], record["git"]["branch"],
-        _canonical(record), int(state["checkpoint_recorded"]), int(state["decisions_added"]),
+        _canonical(record), int(state["checkpoint_recorded"]),
     )
     return len(rows) == 1 and tuple(rows[0]) == expected
 
@@ -131,16 +130,15 @@ def restore_active_row(database: Path, state_dir: Path, *, force: bool = False) 
             if force:
                 connection.execute("DELETE FROM active_tasks")
             connection.execute(
-                """INSERT INTO active_tasks VALUES (?, ?, ?, ?, ?, ?)
+                """INSERT INTO active_tasks VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(task_id) DO UPDATE SET
                      started_at=excluded.started_at,
                      branch=excluded.branch,
                      record_json=excluded.record_json,
-                     state_updated=excluded.state_updated,
-                     decisions_added=excluded.decisions_added""",
+                     state_updated=excluded.state_updated""",
                 (
                     record["task_id"], record["started_at"], record["git"]["branch"],
-                    _canonical(record), int(state["checkpoint_recorded"]), int(state["decisions_added"]),
+                    _canonical(record), int(state["checkpoint_recorded"]),
                 ),
             )
     finally:

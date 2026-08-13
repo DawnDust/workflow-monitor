@@ -22,7 +22,6 @@ from project_hooks.infrastructure.system.verification import iso_now, write_test
 MODULES = (
     "tests.integration.system.test_diagnostics",
     "tests.unit.application.test_action_service",
-    "tests.unit.application.test_workbench_service",
     "tests.integration.persistence.test_workflow",
     "tests.distribution.test_distribution",
     "tests.distribution.test_public_release",
@@ -32,7 +31,6 @@ MODULES = (
 FAST_CLASSES = (
     "tests.integration.system.test_diagnostics.DiagnosticsTests",
     "tests.unit.application.test_action_service.WorkflowActionTests",
-    "tests.unit.application.test_workbench_service.ExternalWorkbenchTests",
     "tests.integration.web.test_dashboard.WebProjectionTests",
     "tests.integration.web.test_dashboard.WebDashboardBridgeTests",
     "tests.integration.web.test_dashboard.WebDashboardIntegrationTests",

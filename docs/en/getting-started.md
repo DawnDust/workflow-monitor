@@ -15,7 +15,7 @@ Python is not required for normal use.
 3. Keep the filename exactly `workflow-monitor.exe`.
 4. Double-click it.
 
-The first launch creates a `main` Git repository, installs the project workflow files, and opens the local workbench. Future launches reuse the same project.
+The first launch creates a `main` Git repository, installs the project workflow files, and opens the local Dashboard. Future launches reuse the same project.
 
 ## Add it to an existing Git project
 
@@ -38,4 +38,4 @@ You should not need to copy lifecycle commands into every prompt. You must still
 
 Open **Settings → Language** and choose Simplified Chinese or English. The change is immediate and stored only in the local WebView2 user profile. If storage is unavailable or invalid, the interface falls back to Simplified Chinese.
 
-Only system navigation, buttons, prompts, table headings, and known status labels are translated. Project descriptions, task text, resource titles, decisions, event records, and other user data stay exactly as written.
+Only system navigation, buttons, prompts, table headings, and known status labels are translated. Project descriptions, task text, resource titles, event records, and other user data stay exactly as written.
