@@ -116,6 +116,13 @@ class WebProjectionTests(unittest.TestCase):
 
     def test_dashboard_assets_include_read_only_research_attention_card(self) -> None:
         script = (Path(__file__).parents[3] / "project_hooks" / "ui" / "web" / "assets" / "app.js").read_text(encoding="utf-8")
+        styles = (Path(__file__).parents[3] / "project_hooks" / "ui" / "web" / "assets" / "dashboard-components.css").read_text(encoding="utf-8")
+        self.assertIn('function attentionStatus(c)', script)
+        self.assertIn('class="attention-status ${count?"needs-attention":"clear"}"', script)
+        self.assertIn('l("需关注","Needs attention")', script)
+        self.assertIn('l("无需关注","Clear")', script)
+        self.assertIn('这不表示研究已完成，也不排除未知风险', script)
+        self.assertIn('.attention-status.needs-attention>summary b', styles)
         self.assertIn('function attentionCard(c)', script)
         self.assertIn('data-attention-target', script)
         self.assertIn('研究注意事项', script)
