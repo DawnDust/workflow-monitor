@@ -28,8 +28,8 @@ class WorkflowActionService:
         failure_recorder: FailureRecorder,
         failure_formatter: Callable[[dict[str, Any]], str],
         execution_mode_provider: Callable[[], str],
-        application_version: str = "1.7.0",
-        schema_version: int = 4,
+        application_version: str = "2.0.0",
+        schema_version: int = 5,
     ):
         self.project_root = project_root.resolve()
         self.state_provider = state_provider
@@ -170,12 +170,6 @@ class WorkflowActionService:
                 blockers.append(_block(
                     "HEALTH_CHECK_FAILED", "项目检查尚未通过",
                     "；".join(str(item) for item in state.get("health_errors") or []), "health.check",
-                ))
-            if (preflight is None and fields and fields.get("route") == "changed"
-                    and int(active.get("decisions_added") or 0) < 1):
-                blockers.append(_block(
-                    "DECISION_REQUIRED", "路线变化时必须先记录决策",
-                    "当前任务没有决策记录", "decision.add",
                 ))
             if fields and not fields.get("writer_stopped"):
                 blockers.append(_block("WRITER_CONFIRMATION_REQUIRED", "请确认 AI 和其他编辑器已经停止写入"))

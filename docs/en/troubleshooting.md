@@ -14,7 +14,7 @@ Run `./workflow-monitor.exe context --format markdown`. If the prior process cra
 
 ## The interface shows stale data
 
-Use the refresh button. If a refresh fails, the workbench intentionally retains the last known good snapshot and shows the error. Export diagnostics if the failure persists.
+Use the refresh button. If a refresh fails, the Dashboard intentionally retains the last known good snapshot and shows the error. Export diagnostics if the failure persists.
 
 ## Language preference is not saved
 

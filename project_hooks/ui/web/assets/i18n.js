@@ -29,7 +29,7 @@ const STATUS_EN = {
   "recovery-required":"Recovery required", active:"Active", blocked:"Blocked", failed:"Failed",
   indeterminate:"Pending judgment", abandoned:"Abandoned", available:"Available", needs_input:"Waiting for AI text",
   running:"Running", paused:"Paused", cancelled:"Cancelled", validated:"Validated", negative:"Negative result",
-  inconclusive:"Inconclusive", decision:"Decision", alternatives:"Alternatives", basis:"Basis",
+  inconclusive:"Inconclusive",
   reopen_condition:"Reopen condition", immutable:"Immutable", missing:"Missing file", archived:"Archived", ok:"OK",
   attention:"Needs attention", "missing directory":"Missing directory", current:"Current issue",
   old_version:"Old-version issue", old_version_protected:"Protected old-version issue", resolved:"Resolved",
@@ -40,7 +40,7 @@ const STATUS_EN = {
 };
 
 const SECTION_EN = {
-  "工作流 Workflow":"Workflow", "任务 Task":"Task", "动作 Action":"Action", "阶段 Stage":"Stage",
+  "工作流 Workflow":"Workflow", "任务 Task":"Task", "动作 Action":"Action", "研究篇章 Research Chapter":"Research Chapter",
   "探索 Exploration":"Exploration", "决策 Decision":"Decision", "资料 Resource":"Resource",
   "诊断 Diagnostics":"Diagnostics", "外置工具 External tool":"External tool",
   "Git 与发布 Git / Release":"Git / Release",
@@ -50,12 +50,10 @@ const GUIDANCE_EN = {
   "工作流 Workflow":"Continue through the structured lifecycle. If a write was interrupted, use task recover instead of deleting state.",
   "任务 Task":"Review the task evidence and continue, resolve the blocker, or close it through the structured lifecycle.",
   "动作 Action":"Follow the availability reason and let AI invoke the corresponding structured action when it is safe.",
-  "阶段 Stage":"Keep the stage summary, current step, next step, and evidence aligned with the actual work.",
+  "研究篇章 Research Chapter":"Keep the chapter summary, current focus, next step, and evidence aligned with the actual work.",
   "探索 Exploration":"Preserve the branch and evidence, record the conclusion, and only prepare a Squash PR for validated work.",
-  "决策 Decision":"Preserve the append-only decision record and add a new decision when the route changes.",
   "资料 Resource":"Keep the catalog entry, expected type, and project-relative file location consistent.",
   "诊断 Diagnostics":"Review the incident and export a redacted diagnostics bundle before reporting a bug when needed.",
-  "外置工具 External tool":"Use the external tool only when explicitly selected; the workbench never runs it automatically.",
   "Git 与发布 Git / Release":"Verify worktree, commit, remote, and release state separately before treating work as published.",
 };
 

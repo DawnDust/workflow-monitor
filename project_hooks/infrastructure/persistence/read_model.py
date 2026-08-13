@@ -11,6 +11,7 @@ from typing import Callable
 
 from ... import __version__
 from ...core.catalog import decode_item
+from ...core.research_attention import research_attention
 from ..git import client as git_client
 from ..system.finish_preflight import assemble_finish_preflight
 from ..system.resource_layout import resource_directory_snapshot
@@ -83,11 +84,11 @@ def action_overview_text(context: dict) -> str:
         f"大目标：{big_goal}",
         separator,
         "",
-        "当前阶段",
+        "当前研究篇章",
         (
             f"{compact_text(stage.get('title'))}（{stage.get('status') or '未知'}，"
             f"更新于 {stage.get('updated_at') or '未知时间'}）"
-            if stage else "无 active 阶段"
+            if stage else "无 active 研究篇章"
         ),
         *([f"提醒：{stage_warning.get('message')}"] if stage_warning else []),
         separator,
@@ -144,7 +145,7 @@ def stage_freshness_warning(stage: dict | None, handoffs: list[dict] | None) -> 
     if not stage_updated or not latest_finished or latest_finished <= stage_updated:
         return None
     return {
-        "message": "最近完成的任务没有更新当前阶段，请确认阶段进展是否仍然准确",
+        "message": "最近完成的任务没有更新当前研究篇章，请确认篇章概况是否仍然准确",
         "stage_updated_at": stage_updated,
         "latest_task_id": latest.get("task_id"),
         "latest_finished_at": latest_finished,
@@ -486,7 +487,6 @@ class MaintenanceReadModel:
                 "branch": active["branch"],
                 "state_updated": bool(active["state_updated"]),
                 "checkpoint_recorded": bool(active["state_updated"]),
-                "decisions_added": active["decisions_added"],
                 "scope": active_record.get("declaration", {}).get("scope"),
                 "acceptance": active_record.get("declaration", {}).get("acceptance", []),
                 "track": active_record.get("git", {}).get("track"),
@@ -514,6 +514,29 @@ class MaintenanceReadModel:
             item = dict(row)
             item["acceptance"] = json.loads(item.pop("acceptance_json"))
             item["evidence"] = json.loads(item.pop("evidence_json"))
+            item["revisions"] = []
+            item["pause"] = None
+            history_rows = connection.execute(
+                "SELECT event_id, occurred_at, task_id, event_type, payload_json FROM events "
+                "WHERE event_type IN ('stage.revised', 'stage.state_changed') "
+                "AND json_extract(payload_json, '$.stage_id')=? ORDER BY occurred_at, event_id",
+                (item["stage_id"],),
+            ).fetchall()
+            for history_row in history_rows:
+                history = dict(history_row)
+                payload = json.loads(history.pop("payload_json"))
+                if history["event_type"] == "stage.revised":
+                    item["revisions"].append({
+                        "event_id": history["event_id"], "occurred_at": history["occurred_at"],
+                        "task_id": history["task_id"], "revision": payload.get("revision", ""),
+                        "summary": payload.get("summary", ""), "evidence": payload.get("evidence") or [],
+                    })
+                elif payload.get("status") == "paused":
+                    item["pause"] = {
+                        "kind": payload.get("pause_kind") or "legacy",
+                        "note": payload.get("pause_note") or "",
+                        "occurred_at": history["occurred_at"], "task_id": history["task_id"],
+                    }
             stages.append(item)
         attempts = []
         for row in connection.execute(
@@ -601,7 +624,9 @@ class MaintenanceReadModel:
         attempt_source = event_source("attempt.updated", task_id=attempt_task_id) if active_attempt else None
         if active_attempt and (not attempt_source or not attempt_source.get("event_id")):
             attempt_source = event_source("attempt.started", task_id=active_attempt.get("attempt_id"))
-        stage_source = event_source("stage.updated", stage_id=current_stage["stage_id"]) if current_stage else None
+        stage_source = event_source("stage.revised", stage_id=current_stage["stage_id"]) if current_stage else None
+        if current_stage and not stage_source.get("event_id"):
+            stage_source = event_source("stage.updated", stage_id=current_stage["stage_id"])
         if current_stage and not stage_source.get("event_id"):
             stage_source = event_source("stage.started", stage_id=current_stage["stage_id"])
         profile_source = {
@@ -740,6 +765,7 @@ class MaintenanceReadModel:
             "active_task": active_data,
             "project_profile": profile,
             "current_stage": current_stage,
+            "latest_stage": stages[0] if stages else None,
             "stage_review_status": stage_review_data,
             "stage_freshness_warning": (
                 None
@@ -761,7 +787,15 @@ class MaintenanceReadModel:
                 task_details = self._task_details(connection, publication)
             except (OSError, ReadModelError, subprocess.SubprocessError):
                 task_details = {}
-            return self._apply_overview_state(context, task_details)
+            context = self._apply_overview_state(context, task_details)
+            catalog_items = [decode_item(item) for item in rows(
+                connection, "SELECT * FROM catalog_items ORDER BY updated_at DESC, item_id",
+            )]
+            catalog_relations = rows(
+                connection, "SELECT * FROM catalog_relations ORDER BY updated_at DESC, relation_id",
+            )
+            context["research_attention"] = research_attention(context, catalog_items, catalog_relations)
+            return context
         finally:
             connection.close()
 
@@ -803,8 +837,6 @@ class MaintenanceReadModel:
         try:
             if kind == "history":
                 return rows(connection, "SELECT event_id, occurred_at, task_id, summary, evidence, result, branch, payload_json FROM task_archive ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
-            if kind == "decisions":
-                return rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch, task_id FROM decisions ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             if kind == "explorations":
                 return self._exploration_rows(connection, limit)
             if kind == "events":
@@ -854,13 +886,6 @@ class MaintenanceReadModel:
             add("task", "任务", "history", item["event_id"], item["occurred_at"], item["branch"],
                 item["summary"] or item["task_id"] or "未命名任务", item["result"] or "",
                 [item["task_id"], item["summary"], item["evidence"], item["result"], item["branch"]],
-                [item["task_id"]] if item["task_id"] else [])
-
-        decision_rows = rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch, task_id FROM decisions")
-        for item in decision_rows:
-            add("decision", "决策", "decisions", item["event_id"], item["occurred_at"], item["branch"],
-                item["decision"] or item["decision_id"], item["basis"] or "",
-                [item["decision_id"], item["decision"], item["alternatives"], item["basis"], item["reopen_condition"], item["branch"], item["task_id"]],
                 [item["task_id"]] if item["task_id"] else [])
 
         exploration_rows = MaintenanceReadModel._exploration_rows(connection)
@@ -930,6 +955,8 @@ class MaintenanceReadModel:
         )
         events_by_task: dict[str, list[dict]] = {}
         for event in event_rows:
+            if event["event_type"] == "decision.recorded" or event["event_type"].startswith("workbench."):
+                continue
             event["payload"] = json.loads(event.pop("payload_json"))
             events_by_task.setdefault(event["task_id"], []).append(event)
 
@@ -940,27 +967,19 @@ class MaintenanceReadModel:
                 "FROM task_archive WHERE task_id IS NOT NULL",
             )
         }
-        decisions = rows(
-            connection,
-            "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch, task_id "
-            "FROM decisions WHERE task_id IS NOT NULL",
-        )
         explorations = [
             item for item in MaintenanceReadModel._exploration_rows(connection)
             if item.get("task_id") is not None
         ]
-        decisions_by_task: dict[str, list[dict]] = {}
         explorations_by_task: dict[str, list[dict]] = {}
         commits_by_task: dict[str, list[dict]] = {}
-        for item in decisions:
-            decisions_by_task.setdefault(item["task_id"], []).append(item)
         for item in explorations:
             explorations_by_task.setdefault(item["task_id"], []).append(item)
         for commit in publication.get("commits", []):
             for task_id in commit.get("task_ids", []):
                 commits_by_task.setdefault(task_id, []).append(commit)
 
-        task_ids = set(events_by_task) | set(archives) | set(decisions_by_task) | set(explorations_by_task) | set(commits_by_task)
+        task_ids = set(events_by_task) | set(archives) | set(explorations_by_task) | set(commits_by_task)
         details: dict[str, dict] = {}
         for task_id in task_ids:
             task_events = events_by_task.get(task_id, [])
@@ -988,12 +1007,6 @@ class MaintenanceReadModel:
                     conclusion = payload["conclusion"]
 
             related: list[dict] = []
-            for item in decisions_by_task.get(task_id, []):
-                related.append({
-                    "kind": "decision", "kind_label": "决策", "occurred_at": item["occurred_at"],
-                    "title": item["decision"], "summary": item["basis"], "target": "decisions",
-                    "record_id": item["event_id"], "task_id": task_id,
-                })
             for item in explorations_by_task.get(task_id, []):
                 related.append({
                     "kind": "exploration", "kind_label": "探索", "occurred_at": item["occurred_at"],
@@ -1002,7 +1015,7 @@ class MaintenanceReadModel:
                 })
             for event in task_events:
                 payload = event["payload"]
-                summary = next((payload.get(key) for key in ("summary", "scope", "goal", "decision", "state", "task") if payload.get(key)), "")
+                summary = next((payload.get(key) for key in ("summary", "scope", "goal", "state", "task") if payload.get(key)), "")
                 related.append({
                     "kind": "event", "kind_label": "事件", "occurred_at": event["occurred_at"],
                     "title": event["event_type"], "summary": str(summary), "target": "events",
@@ -1043,7 +1056,6 @@ class MaintenanceReadModel:
                 "is_auxiliary": is_auxiliary_task_id(task_id),
                 "parent_task_id": None,
                 "auxiliary_tasks": [],
-                "route": finish_payload.get("route") or "",
                 "conclusion": conclusion,
                 "evidence": evidence,
                 "related": related,
@@ -1107,9 +1119,11 @@ class MaintenanceReadModel:
             integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
             context = self._context(connection, branch)
             history = rows(connection, "SELECT event_id, occurred_at, task_id, summary, evidence, result, branch, payload_json FROM task_archive ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
-            decisions = rows(connection, "SELECT event_id, decision_id, occurred_at, decision, alternatives, basis, reopen_condition, branch, task_id FROM decisions ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
             explorations = self._exploration_rows(connection, limit)
             events = rows(connection, "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
+            events = [event for event in events if not (
+                event["event_type"] == "decision.recorded" or event["event_type"].startswith("workbench.")
+            )]
             for event in events:
                 event["payload"] = json.loads(event.pop("payload_json"))
             try:
@@ -1128,6 +1142,7 @@ class MaintenanceReadModel:
                 connection,
                 "SELECT * FROM catalog_relations ORDER BY updated_at DESC, relation_id",
             )
+            context["research_attention"] = research_attention(context, catalog_items, catalog_relations)
             return {
                 "branch": branch,
                 "health": {
@@ -1139,7 +1154,6 @@ class MaintenanceReadModel:
                 },
                 "context": context,
                 "history": history,
-                "decisions": decisions,
                 "explorations": explorations,
                 "attempt": self._attempt(connection, branch),
                 "attempts": self._attempts(connection),

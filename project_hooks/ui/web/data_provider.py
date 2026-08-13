@@ -1,4 +1,4 @@
-"""Presentation-neutral data provider for the local Web workbench."""
+"""Presentation-neutral data provider for the local Dashboard."""
 
 from __future__ import annotations
 

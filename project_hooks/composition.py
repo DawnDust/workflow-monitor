@@ -11,7 +11,6 @@ from typing import Callable
 
 from .application.action_service import WorkflowActionService
 from .application.query_service import WorkbenchQueryService
-from .application.workbench_service import external_tools_from_events, workbench_items_from_events
 from . import __version__
 from .infrastructure.persistence.store import SCHEMA_VERSION
 from .infrastructure.persistence.transaction import mutation_lock
@@ -21,7 +20,6 @@ from .infrastructure.system.diagnostics import (
     format_failure,
     record_failure,
 )
-from .infrastructure.persistence.store import load_events
 from .infrastructure.system.updater import (
     check_latest_update,
     refresh_software_delivery,
@@ -56,9 +54,6 @@ def build_web_data_provider(model, classifier, *, branch=None, action_service=No
     queries = WorkbenchQueryService(
         snapshot_loader=model.dashboard_snapshot,
         classifier=classifier,
-        event_loader=lambda: load_events(model.journal_path),
-        external_tools_projector=external_tools_from_events,
-        workbench_items_projector=workbench_items_from_events,
         diagnostics_loader=lambda: diagnostics_overview(
             project_root, application_version=__version__,
         ),

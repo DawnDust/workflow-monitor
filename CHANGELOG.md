@@ -1,6 +1,16 @@
 # Changelog
 
+## 2.0.0 - 2026-08-13
+
+- Removed the retired Workbench registry, decision log, and route semantics.
+- Added the low-friction `resources/sparks/` inspiration pool with optional catalog registration.
+- Renamed research stages to Research Chapters throughout the product UI and documentation.
+- Added evidence-backed chapter revisions, resumable interruption and temporary-closure pauses, and judgment-evolution timelines without changing the internal `stage` protocol.
+- Upgraded the rebuildable maintenance projection to Event Schema v5.
+
 ## Unreleased
+
+- Added up to three deterministic, sourced Research Attention signals to AI Context and the read-only Dashboard Overview without adding persistence or model calls.
 
 ## 1.7.0 - 2026-08-11
 

@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)
 
-Workflow Monitor 是面向 Windows 科研 Git 项目的本地单文件工作流工具。它让 AI 协作中的任务、探索、决策、交接、资料和发布状态保持清晰，同时不启动服务器，也不上传项目数据。
+Workflow Monitor 是面向 Windows 科研 Git 项目的本地单文件工作流工具。它让 AI 协作中的任务、研究篇章、探索、交接、资料和发布状态保持清晰，同时不启动服务器，也不上传项目数据。
 
 ## 更多输出，不等于更可控
 
@@ -23,7 +23,7 @@ Workflow Monitor 是面向 Windows 科研 Git 项目的本地单文件工作流�
 
 ## 工作流程
 
-自然语言请求会进入一套结构化但轻量的生命周期：只读问题保持只读；需要修改时明确区分稳定任务与探索任务；完成前必须通过验证和阶段审阅；提交、推送、合并与发布等外部交付动作仍然需要用户授权。
+自然语言请求会进入一套结构化但轻量的生命周期：只读问题保持只读；需要修改时明确区分稳定任务与探索任务；完成前必须通过验证和篇章审阅；提交、推送、合并与发布等外部交付动作仍然需要用户授权。
 
 <p align="center"><img src="docs/assets/workflow-monitor-lifecycle.svg" alt="Workflow Monitor 从自然语言请求、任务执行、验证到授权交付的完整生命周期" width="760"></p>
 
@@ -32,8 +32,9 @@ Workflow Monitor 是面向 Windows 科研 Git 项目的本地单文件工作流�
 - **单文件交付：**普通用户只需下载 `workflow-monitor.exe`，不需要安装 Python。
 - **自然语言操作：**在 AI 编码工具中描述目标，仓库规则会驱动结构化生命周期与安全检查。
 - **稳定维护与探索分离：**稳定工作留在 `main`，不确定研究使用明确的轨道和分支。
+- **非线性研究篇章：**允许多轮实验、反复推进、暂停后插入其他研究、恢复暂时收束的篇章，并追加保存由新证据驱动的判断修订。
 - **本地且可审计：**永久记录使用追加式项目文件，SQLite 只是可重建的本地查询投影。
-- **只读工作台：**集中查看阶段、动作、资料、诊断和发布状态，不开放网络端口。
+- **只读仪表盘：**集中查看研究篇章、动作、资料、诊断和发布状态，不开放网络端口。
 - **双语界面：**简体中文和 English 仅改变本机系统界面；用户填写的内容和数据记载始终保持原文。
 
 ## 四步开始
@@ -42,7 +43,7 @@ Workflow Monitor 是面向 Windows 科研 Git 项目的本地单文件工作流�
 
 1. 从[最新 Release](https://github.com/DawnDust/workflow-monitor/releases/latest)下载 `workflow-monitor.exe`。
 2. 将它放入新建或已有的项目目录，并保持文件名不变。
-3. 双击运行。空目录会自动初始化 Git 仓库并打开本地工作台。
+3. 双击运行。空目录会自动初始化 Git 仓库并打开本地仪表盘。
 4. 在 AI 编码工具中直接用自然语言描述任务；仓库规范会处理生命周期命令和安全边界。
 
 未签名的程序可能触发 Windows SmartScreen。请确认文件来自本项目正式 GitHub Release，使用 `release-manifest.json` 核对 SHA-256、检查 `workflow-monitor.spdx.json`，并运行 `gh attestation verify workflow-monitor.exe --repo DawnDust/workflow-monitor` 验证构建来源；manifest 会明确说明是否应用了 Authenticode 签名。

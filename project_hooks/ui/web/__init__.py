@@ -1,1 +1,1 @@
-"""Local WebView2 workbench bridge and projections."""
+"""Local WebView2 Dashboard bridge and projections."""

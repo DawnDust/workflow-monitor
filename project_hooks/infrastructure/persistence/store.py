@@ -160,11 +160,6 @@ CREATE TABLE IF NOT EXISTS task_archive (
   event_id TEXT PRIMARY KEY, branch TEXT NOT NULL, task_id TEXT, occurred_at TEXT NOT NULL,
   summary TEXT NOT NULL, evidence TEXT NOT NULL, result TEXT NOT NULL, payload_json TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS decisions (
-  decision_id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, branch TEXT NOT NULL,
-  occurred_at TEXT NOT NULL, decision TEXT NOT NULL, alternatives TEXT NOT NULL,
-  basis TEXT NOT NULL, reopen_condition TEXT NOT NULL, task_id TEXT
-);
 CREATE TABLE IF NOT EXISTS attempts (
   attempt_id TEXT PRIMARY KEY, branch TEXT NOT NULL UNIQUE, track TEXT NOT NULL, topic TEXT NOT NULL,
   base_commit TEXT NOT NULL, goal TEXT NOT NULL, acceptance_json TEXT NOT NULL,
@@ -181,8 +176,7 @@ CREATE TABLE IF NOT EXISTS explorations (
 );
 CREATE TABLE IF NOT EXISTS active_tasks (
   task_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, branch TEXT NOT NULL,
-  record_json TEXT NOT NULL, state_updated INTEGER NOT NULL DEFAULT 0,
-  decisions_added INTEGER NOT NULL DEFAULT 0
+  record_json TEXT NOT NULL, state_updated INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS catalog_items (
   item_id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL,
@@ -204,7 +198,7 @@ CREATE INDEX IF NOT EXISTS catalog_relations_target ON catalog_relations(target_
 
 
 PROJECTION_TABLES = (
-    "events", "project_state", "project_profile", "stages", "handoffs", "task_archive", "decisions",
+    "events", "project_state", "project_profile", "stages", "handoffs", "task_archive",
     "attempts", "attempt_evidence", "explorations", "catalog_relations", "catalog_items",
     "task_checkpoints", "test_receipts", "stage_reviews",
 )
@@ -224,7 +218,7 @@ REQUIRED_SCHEMA_COLUMNS = {
         "attempt_id", "branch", "stage_id", "current_step", "progress", "next_step", "state",
     },
     "explorations": {"event_id", "branch", "occurred_at", "goal", "result", "evidence", "disposition_ref"},
-    "active_tasks": {"task_id", "branch", "record_json", "state_updated", "decisions_added"},
+    "active_tasks": {"task_id", "branch", "record_json", "state_updated"},
 }
 
 
@@ -353,7 +347,7 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
              canonical_json(payload["acceptance"]), event["occurred_at"],
              event["occurred_at"], event["task_id"]),
         )
-    elif kind == "stage.updated":
+    elif kind in {"stage.updated", "stage.revised"}:
         stage_id = payload["stage_id"]
         for key, column in (
             ("summary", "summary"), ("current_step", "current_step"),
@@ -415,12 +409,6 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
                 (event["task_id"], review.get("stage_id"), review["result"],
                  event["occurred_at"], event["event_id"]),
             )
-    elif kind == "decision.recorded":
-        connection.execute(
-            "INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (payload["decision_id"], event["event_id"], event["branch"], event["occurred_at"],
-             payload["decision"], payload["alternatives"], payload["basis"], payload["reopen_condition"], event["task_id"]),
-        )
     elif kind == "attempt.started":
         source_task_id = payload.get("source_task_id") or event["task_id"]
         started = connection.execute(
@@ -602,7 +590,7 @@ def rebuild(database: Path, journal: Path, *, preserve_active: bool = True) -> s
             ).fetchone()
             if preserve_active and table:
                 active_tasks = probe.execute(
-                    "SELECT task_id, started_at, branch, record_json, state_updated, decisions_added "
+                    "SELECT task_id, started_at, branch, record_json, state_updated "
                     "FROM active_tasks"
                 ).fetchall()
         except sqlite3.DatabaseError:
@@ -624,7 +612,7 @@ def rebuild(database: Path, journal: Path, *, preserve_active: bool = True) -> s
     with connection:
         if recreate and active_tasks:
             connection.executemany(
-                "INSERT INTO active_tasks VALUES (?, ?, ?, ?, ?, ?)", active_tasks
+                "INSERT INTO active_tasks VALUES (?, ?, ?, ?, ?)", active_tasks
             )
         for table in PROJECTION_TABLES:
             connection.execute(f"DELETE FROM {table}")

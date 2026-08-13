@@ -28,7 +28,10 @@ RESOURCE_DIRECTORIES = (
     ResourceDirectory("outputs", "output", "输出", "图表、模型和其他可交付成果", "outputs"),
     ResourceDirectory("others", "other", "其他", "暂时无法可靠分类的资料"),
     ResourceDirectory("reports", "report", "报告", "面向外部受众的项目总结与报告"),
+    ResourceDirectory("sparks", "spark", "灵感", "自由记录点子、问题、猜想和偶然发现"),
 )
+
+OPTIONAL_CATALOG_KINDS = {"spark"}
 
 RESOURCE_BY_KIND = {item.kind: item for item in RESOURCE_DIRECTORIES}
 RESOURCE_BY_PATH = {item.relative_path.casefold(): item for item in RESOURCE_DIRECTORIES}
@@ -200,7 +203,7 @@ def resource_directory_snapshot(root: Path, items: list[dict]) -> list[dict]:
         directory = root / resource.relative_path
         if not directory.is_dir():
             status = "missing"
-        elif unindexed or mismatched:
+        elif (unindexed and resource.kind not in OPTIONAL_CATALOG_KINDS) or mismatched:
             status = "attention"
         else:
             status = "ok"
@@ -302,7 +305,8 @@ def catalog_consistency_errors(root: Path, items: list[dict]) -> list[str]:
         for path in files_under(root, resource.relative_path):
             relative = path.relative_to(root).as_posix()
             covered = any(bundle_contains(str(bundle["path"]), relative) for bundle in bundles)
-            if relative.casefold() not in indexed_by_path and not covered:
+            if (resource.kind not in OPTIONAL_CATALOG_KINDS
+                    and relative.casefold() not in indexed_by_path and not covered):
                 errors.append(f"标准资源目录存在未索引文件: {relative}；请运行 catalog scan")
 
     legacy_files: list[str] = []

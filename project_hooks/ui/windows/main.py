@@ -163,7 +163,7 @@ def show_error(message: str) -> None:
             pass
 
 
-def run_portable_web_workbench(
+def run_portable_dashboard(
     root: Path | None = None, refresh_seconds: float = 3.0,
 ) -> int:
     project = (root or portable_root()).resolve()
@@ -237,13 +237,13 @@ def main(argv: list[str] | None = None) -> int:
             args = ["--project", str(project), *args]
         return cli_main(args)
     try:
-        return run_portable_web_workbench(project)
+        return run_portable_dashboard(project)
     except Exception as exc:
         from project_hooks.infrastructure.system.diagnostics import execution_mode, format_failure, record_failure
         from project_hooks.infrastructure.persistence.store import SCHEMA_VERSION
 
         record = record_failure(
-            project, exc, command="web-workbench.startup", application_version=__version__,
+            project, exc, command="dashboard.startup", application_version=__version__,
             schema_version=SCHEMA_VERSION, execution_mode=execution_mode(),
         )
         show_error(format_failure(record))

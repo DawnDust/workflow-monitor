@@ -40,7 +40,7 @@ def assemble_finish_preflight(
         changed_paths=changed_paths,
     )
     stage_changed = any(
-        event["event_type"] in {"stage.started", "stage.updated", "stage.state_changed"}
+        event["event_type"] in {"stage.started", "stage.updated", "stage.revised", "stage.state_changed"}
         and event.get("payload", {}).get("stage_id") == linked_stage_id
         for event in events
     )
@@ -51,9 +51,6 @@ def assemble_finish_preflight(
         "linked_stage_id": linked_stage_id,
         "stage_changed": stage_changed,
         "stage_review": stage_review_result,
-        "decisions_added": sum(
-            event["event_type"] == "decision.recorded" for event in events
-        ),
         "project_updated": any(
             event["event_type"] == "project.profile_updated" for event in events
         ),
