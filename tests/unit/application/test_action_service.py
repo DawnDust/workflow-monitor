@@ -152,7 +152,6 @@ class WorkflowActionTests(unittest.TestCase):
                 "suite": "full", "reason": "missing", "command": "python scripts/run_tests.py full",
             }]},
             "linked_stage_id": "stage",
-            "decisions_added": 1,
             "project_updated": True,
         })
         self.assertEqual(blocked["status"], "blocked")
@@ -160,7 +159,7 @@ class WorkflowActionTests(unittest.TestCase):
             {item["code"] for item in blocked["blockers"]},
             {"CHECKPOINT_STALE", "VERIFICATION_MISSING", "STAGE_REVIEW_REQUIRED"},
         )
-        self.assertEqual(blocked["inferred"]["route"], "changed")
+        self.assertNotIn("route", blocked["inferred"])
         self.assertEqual(blocked["inferred"]["main_goal"], "changed")
 
         ready = finish_preflight({
@@ -176,7 +175,6 @@ class WorkflowActionTests(unittest.TestCase):
             "declaration": {"verification_profile": "auto"},
         }
         base_events = [
-            {"event_type": "decision.recorded", "payload": {}},
             {"event_type": "project.profile_updated", "payload": {}},
             {"event_type": "stage.updated", "payload": {"stage_id": "stage-1"}},
         ]
@@ -200,10 +198,9 @@ class WorkflowActionTests(unittest.TestCase):
                         linked_stage_id="stage-1", changed_paths=["project_hooks/x.py"],
                     )
                     self.assertEqual(result["checkpoint_status"], expected)
-                    self.assertEqual(result["facts"]["decisions_added"], 1)
                     self.assertTrue(result["facts"]["project_updated"])
                     self.assertTrue(result["facts"]["stage_changed"])
-                    self.assertEqual(result["inferred"]["route"], "changed")
+                    self.assertNotIn("route", result["inferred"])
                     self.assertEqual(result["inferred"]["main_goal"], "changed")
 
     def test_availability_explains_active_branch_version_and_update_blocks(self) -> None:
@@ -215,7 +212,7 @@ class WorkflowActionTests(unittest.TestCase):
             )
             self.assertTrue(service.availability("task.start").enabled)
             state["active_task"] = {
-                "task_id": "task-1", "branch": "main", "state_updated": False, "decisions_added": 0,
+                "task_id": "task-1", "branch": "main", "state_updated": False,
             }
             state["sidecar"] = {"phase": "active"}
             blocked = service.availability("task.start", force=True)
@@ -231,7 +228,7 @@ class WorkflowActionTests(unittest.TestCase):
             classification={"kind": "exploration", "track": "research", "topic": "x"},
             branch="research/x",
             active_task={
-                "task_id": "task", "branch": "main", "state_updated": False, "decisions_added": 0,
+                "task_id": "task", "branch": "main", "state_updated": False,
             },
             sidecar={"phase": "finishing"},
         )
@@ -248,16 +245,16 @@ class WorkflowActionTests(unittest.TestCase):
             recover = service.availability("task.recover", force=True)
             self.assertNotIn("RECOVERY_REQUIRED", {item.code for item in recover.blockers})
 
-    def test_finish_preflight_reports_health_decision_confirmation_and_activity(self) -> None:
+    def test_finish_preflight_reports_health_confirmation_and_activity(self) -> None:
         state = stable_state(
             active_task={
-                "task_id": "task", "branch": "main", "state_updated": True, "decisions_added": 0,
+                "task_id": "task", "branch": "main", "state_updated": True,
             },
             sidecar={"phase": "active"},
             health_errors=["database mismatch"],
         )
         fields = {
-            "result": "completed", "route": "changed", "methods_action": "updated",
+            "result": "completed", "methods_action": "updated",
             "main_goal": "unchanged", "note": "done", "writer_stopped": False,
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -267,8 +264,7 @@ class WorkflowActionTests(unittest.TestCase):
             blocked = service.availability("task.finish", fields, force=True)
             codes = {item.code for item in blocked.blockers}
             self.assertTrue({
-                "HEALTH_CHECK_FAILED", "DECISION_REQUIRED",
-                "WRITER_CONFIRMATION_REQUIRED", "WRITE_ACTIVITY_RECENT",
+                "HEALTH_CHECK_FAILED", "WRITER_CONFIRMATION_REQUIRED", "WRITE_ACTIVITY_RECENT",
             }.issubset(codes))
 
     def test_update_preflight_explains_main_dirty_sync_and_frozen_requirements(self) -> None:
@@ -310,23 +306,13 @@ class WorkflowActionTests(unittest.TestCase):
             with self.assertRaisesRegex(ActionProtocolError, "最多"):
                 service.validate_fields("project.update", {"description": "x" * 501})
 
-    def test_external_workbench_actions_require_active_stable_task(self) -> None:
+    def test_removed_workbench_action_is_not_public(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             service = action_service(
                 Path(directory), state_provider=lambda: stable_state(), executor=lambda *_args: {},
             )
-            blocked = service.availability("workbench.external.add", force=True)
-            self.assertIn("ACTIVE_TASK_REQUIRED", {item.code for item in blocked.blockers})
-            fields = service.validate_fields("workbench.external.add", {
-                "tool_id": "obsidian", "name": "Obsidian", "kind": "notes",
-                "purpose": "管理笔记", "usage_hint": "整理研究笔记", "reference": "Obsidian",
-            })
-            self.assertEqual(fields["kind"], "notes")
-            state = stable_state(active_task={"task_id": "task", "branch": "main"})
-            service = action_service(
-                Path(directory), state_provider=lambda: state, executor=lambda *_args: {},
-            )
-            self.assertTrue(service.availability("workbench.external.add", fields, force=True).enabled)
+            with self.assertRaises(ActionProtocolError):
+                service.availability("workbench.external.add", force=True)
 
     def test_blocked_request_does_not_execute_or_write_diagnostics(self) -> None:
         calls = []
@@ -334,7 +320,7 @@ class WorkflowActionTests(unittest.TestCase):
             root = Path(directory)
             service = action_service(
                 root, state_provider=lambda: stable_state(active_task={
-                    "task_id": "active", "branch": "main", "state_updated": False, "decisions_added": 0,
+                    "task_id": "active", "branch": "main", "state_updated": False,
                 }), executor=lambda *args: calls.append(args),
             )
             availability = service.availability("task.start", force=True)
@@ -446,7 +432,7 @@ class WorkflowActionIntegrationTests(unittest.TestCase):
                 self.assertEqual(updated.status, "success")
 
                 finish_fields = {
-                    "result": "completed", "route": "unchanged",
+                    "result": "completed",
                     "methods_action": "reviewed-no-change", "main_goal": "unchanged",
                     "note": "dashboard lifecycle complete", "evidence": ["integration test"],
                     "writer_stopped": True,

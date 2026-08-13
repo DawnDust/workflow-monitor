@@ -38,33 +38,27 @@ class ProjectDatabase:
         return dict(row) if row else None
 
     def upsert_active_task(
-        self, record: dict, record_json: str, state_updated: int, decisions_added: int,
+        self, record: dict, record_json: str, state_updated: int,
     ) -> None:
         with self._connection:
             self._connection.execute(
-                """INSERT INTO active_tasks VALUES (?, ?, ?, ?, ?, ?)
+                """INSERT INTO active_tasks VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(task_id) DO UPDATE SET
                      started_at=excluded.started_at,
                      branch=excluded.branch,
                      record_json=excluded.record_json,
-                     state_updated=excluded.state_updated,
-                     decisions_added=excluded.decisions_added""",
+                     state_updated=excluded.state_updated""",
                 (record["task_id"], record["started_at"], record["git"]["branch"],
-                 record_json, state_updated, decisions_added),
+                 record_json, state_updated),
             )
 
     def update_active_flags(
-        self, task_id: str, *, state_updated: bool, decision_added: bool,
+        self, task_id: str, *, state_updated: bool,
     ) -> None:
         with self._connection:
             if state_updated:
                 self._connection.execute(
                     "UPDATE active_tasks SET state_updated=1 WHERE task_id=?", (task_id,),
-                )
-            if decision_added:
-                self._connection.execute(
-                    "UPDATE active_tasks SET decisions_added=decisions_added+1 WHERE task_id=?",
-                    (task_id,),
                 )
 
     def delete_active_task(self, task_id: str) -> None:
@@ -174,7 +168,7 @@ class ProjectDatabase:
         return {str(row[0]) for row in rows}
 
     def table_counts(self, tables: Iterable[str]) -> dict[str, int]:
-        allowed = {"events", "task_archive", "decisions", "handoffs", "project_state", "explorations"}
+        allowed = {"events", "task_archive", "handoffs", "project_state", "explorations"}
         names = list(tables)
         if any(name not in allowed for name in names):
             raise ValueError("unsupported projection table")

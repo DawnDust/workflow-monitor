@@ -13,6 +13,7 @@ CATALOG_KIND_LABELS = {
     "output": "输出",
     "other": "其他",
     "report": "报告",
+    "spark": "灵感",
 }
 
 

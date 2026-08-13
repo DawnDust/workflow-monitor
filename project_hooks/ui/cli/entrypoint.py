@@ -91,12 +91,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "state": output = state_update(args)
         elif args.command == "project": output = project_command(args)
         elif args.command == "stage": output = stage_command(args)
-        elif args.command == "decision": output = decision_add(args)
         elif args.command == "attempt": output = get_attempt(current_branch()) if args.attempt_command == "show" else attempt_update(args)
-        elif args.command in {"history", "decisions", "explorations"}:
+        elif args.command in {"history", "explorations"}:
             output = render_records(query_output(args.command, args.limit), args.format)
         elif args.command == "exploration": output = exploration_import(args)
-        elif args.command == "workbench": output = workbench_command(args)
         elif args.command == "catalog": output = catalog_command(args, catalog_runtime())
         elif args.command == "db": output = db_command(args)
         else: output = finish_task(args)
@@ -107,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         command_parts = [str((args.command if args is not None else (raw_args[0] if raw_args else None)) or "overview")]
         for attribute in ("diagnostics_command", "db_command", "catalog_command", "project_command",
                           "stage_command", "attempt_command", "exploration_command", "task_command",
-                          "workbench_command", "external_command", "item_command", "package_command"):
+                          ):
             value = getattr(args, attribute, None) if args is not None else None
             if value:
                 command_parts.append(str(value))

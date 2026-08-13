@@ -47,7 +47,6 @@ def finish_preflight(state: dict) -> dict:
             "end --stage-review reviewed-no-change",
         ))
     inferred = {
-        "route": "changed" if int(state.get("decisions_added") or 0) else "unchanged",
         "main_goal": "changed" if state.get("project_updated") else "unchanged",
         "stage_review": "updated" if stage_changed else stage_review,
     }

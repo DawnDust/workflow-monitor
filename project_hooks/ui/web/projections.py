@@ -164,16 +164,5 @@ def web_snapshot(snapshot: dict) -> dict:
         "evidence_matrix": evidence_matrix(snapshot),
     }
     projected["status_glossary"] = glossary_snapshot()
-    workbench_search = [{
-        "kind": "workbench", "kind_label": "工作台",
-        "item_id": item.get("item_id"), "title": item.get("title"),
-        "summary": item.get("summary"), "branch": "",
-        "search_text": " ".join([
-            str(item.get("title") or ""), str(item.get("summary") or ""),
-            str(item.get("kind_label") or ""), " ".join(item.get("purpose_labels") or []),
-            " ".join(item.get("purposes") or []), " ".join(item.get("tags") or []),
-            str(item.get("package_id") or ""),
-        ]),
-    } for item in snapshot.get("workbench_items") or []]
-    projected["search_index"] = [*(snapshot.get("search_index") or []), *workbench_search]
+    projected["search_index"] = list(snapshot.get("search_index") or [])
     return projected

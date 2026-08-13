@@ -41,7 +41,7 @@
 - `.project_hooks/maintenance.sqlite3` 是可重建的本地查询投影。
 - `.project_hooks/active-task.json` 保存可恢复的活动任务状态。
 - `resources/` 保存登记的项目证据与输出。
-- `workbench/` 保存已索引的可复用 Markdown 辅助内容。
+- `resources/sparks/` 保存自由 Markdown 灵感，可选择性通过 catalog 登记。
 
 不要手工改写历史事件行或编辑 SQLite。
 

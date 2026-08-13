@@ -12,12 +12,7 @@ from pathlib import Path
 
 from ..git.build_identity import build_identity
 from ..git import client as git_client
-from ...application.workbench_service import taxonomy_migration_items
 from .resource_layout import RESOURCE_DIRECTORIES, ensure_resource_directories
-from .workbench_packages import (
-    WORKBENCH_IMPORTED, WORKBENCH_LOCAL, ensure_workbench_directories,
-    migrate_installed_package_manifests,
-)
 from ..persistence.store import (
     SCHEMA_VERSION,
     append_events,
@@ -30,7 +25,7 @@ from ..persistence.store import (
 from ..persistence.database import integrity_check, latest_active_task_id
 
 
-TEMPLATE_VERSION = 6
+TEMPLATE_VERSION = 7
 INSTALLATION_PATH = Path(".codex/project-maintenance-installation.json")
 CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
 AGENTS_BEGIN = "<!-- project-maintenance-hooks:begin -->"
@@ -59,17 +54,16 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - 用户只需用自然语言描述任务；AI 提取目标、验收和证据，任务 ID、时间、分支、状态令牌和安全默认值由工作流代码处理。
 - 稳定维护只在 `main` 使用 `--track stable`；研究和实验使用独立探索分支；无法可靠判断轨道时必须在对话中询问用户。
 - 一个探索分支只对应一条探索记录；同一分支的后续任务复用该记录，任务回执和 Git 提交仅作为探索内部的过程证据。
-- 使用 `state update --current-step ...`、`decision add` 和 `attempt update` 保存进展，最后必须运行 `end`。
+- 使用 `state update --current-step ...` 和 `attempt update` 保存进展，最后必须运行 `end`。
 - 代码写入后运行 fast；结束时按 Context 的测试回执门禁补齐 full 或 release。
-- 探索启动前必须有关联阶段或记录明确的无阶段理由；有关联阶段的任务结束时必须显式审阅阶段。
-- 项目资料和大阶段只通过 `project update` 与 `stage` 指令记录；探索进度使用 `attempt update` 的结构化步骤字段。
-- 科研资料文件只放在 `resources/` 的七个标准子目录，并通过 `catalog` 指令登记；`check` 必须保持通过。
-- 科研辅助内容通过 `workbench item/package` 建立项目内索引；既有外置软件提醒继续兼容 `workbench external`。工作台不保存凭据或绝对路径，不自动执行、安装、启动、联网检查或加入日常 context。
+- 探索启动前必须有关联研究篇章或记录明确的无篇章理由；有关联篇章的任务结束时必须显式审阅篇章。
+- 项目资料和研究篇章只通过 `project update` 与内部 `stage` 指令记录；新证据改变判断时用 `stage update --revision ... --summary ... --evidence ...` 追加修订；探索进度使用 `attempt update` 的结构化步骤字段。
+- 科研资料文件只放在 `resources/` 的八个标准子目录；`resources/sparks/` 可自由保存，其他资料通过 `catalog` 登记。
 - 只有 `validated` 尝试可准备 Squash PR；推送和合并必须由用户明确确认。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态或绕过 `end`。
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
 - 遇到故障时使用 `diagnostics status/export` 生成脱敏本地诊断；程序不自动上传数据。
-- Dashboard 只读展示任务、阶段、动作可用性和阻塞原因；搜索集中在搜索页，诊断页展示故障与导出覆盖，解释页说明中英文状态；工作台只展示用户创建或外部导入的科研能力索引，用户明确选择后才复制给 AI。生命周期与工作台索引写入由 AI 调用结构化服务，高风险动作必须在对话中取得用户确认。
+- Dashboard 只读展示任务、研究篇章、动作可用性和阻塞原因；生命周期写入由 AI 调用结构化服务，高风险动作必须在对话中取得用户确认。
 <!-- project-maintenance-hooks:end -->"""
 
 GITIGNORE_BLOCK = """# project-maintenance-hooks:begin
@@ -84,7 +78,6 @@ build/
 dist/
 /workflow-monitor.exe
 /diagnostics-export/
-/workbench/exports/
 # project-maintenance-hooks:end"""
 
 GITATTRIBUTES_BLOCK = """# project-maintenance-hooks:begin
@@ -94,16 +87,14 @@ GITATTRIBUTES_BLOCK = """# project-maintenance-hooks:begin
 AGENTS.md text eol=lf
 maintenance/*.md text eol=lf
 maintenance/events.jsonl text eol=lf merge=union
-workbench/**/*.md text eol=lf
-workbench/**/manifest.json text eol=lf
 # project-maintenance-hooks:end"""
 
 MAINTENANCE_README = """# Workflow Monitor 项目维护索引
 
-动态事实只写入 `maintenance/events.jsonl`，SQLite、Context、Dashboard、交接和阶段视图均为可重建投影。
+动态事实只写入 `maintenance/events.jsonl`，SQLite、Context、Dashboard、交接和研究篇章视图均为可重建投影。
 
-- [CORE.md](CORE.md)：每次 AI 任务必读的生命周期、轨道、安全、测试和阶段契约。
-- [RESEARCH.md](RESEARCH.md)：阶段、探索、Catalog 与 Workbench。
+- [CORE.md](CORE.md)：每次 AI 任务必读的生命周期、轨道、安全、测试和篇章契约。
+- [RESEARCH.md](RESEARCH.md)：研究篇章、探索、Catalog 与 Sparks。
 - [OPERATIONS.md](OPERATIONS.md)：安装、升级、恢复、诊断、交付与发布。
 - `ARCHITECTURE.md`：代码边界和读写模型架构。
 
@@ -115,20 +106,24 @@ MAINTENANCE_CORE = """# Workflow Monitor 核心契约
 1. 每次任务先运行 `.\\workflow-monitor.exe context --format markdown`，再读取本文件；首次写入前运行 `start`。
 2. 稳定维护只在 `main` 使用 `--track stable`；不确定改动使用 `research|experiment|sandbox`。无法判断时询问用户。
 3. 动态事实只记录一次：任务目标和验收来自 `task.started`，项目资料来自 `project.profile_updated`，任务进度来自 `task.checkpointed`，结束结果来自 `task.finished`。
-4. 使用 `state update --current-step ...` 保存 checkpoint；路线变化使用 `decision add`；探索证据使用 `attempt update`。
+4. 使用 `state update --current-step ...` 保存 checkpoint；探索证据使用 `attempt update`。
 5. 代码写入后运行 `python scripts/run_tests.py fast`。结束门禁按实际改动要求同一指纹的 fast/full；release profile 要求 fast/release。纯文档和治理改动由 `end` 内置检查验证。
-6. 有关联阶段的任务必须在 `end --stage-review updated|reviewed-no-change` 明确审阅。`updated` 必须有本任务产生的阶段事件。
+6. 有关联研究篇章的任务必须在 `end --stage-review updated|reviewed-no-change` 明确审阅。`updated` 必须有本任务产生的篇章事件；新证据改变判断时以 `stage update --revision ... --summary ... --evidence ...` 追加修订。
 7. 最后必须运行 `end`。禁止改写既有事件、直接编辑 SQLite、删除活动 sidecar、在 main 试改、自动合并。
 8. 推送、PR、合并、数据库重建、软件升级和正式发布必须取得用户授权。
 """
 
-MAINTENANCE_RESEARCH = """# 科研与阶段规范
+MAINTENANCE_RESEARCH = """# 科研与研究篇章规范
 
-全项目最多一个 active 阶段。使用 `stage start/update` 管理阶段事实；探索只引用阶段和任务 ID，不复制目标状态。
+全项目最多一个 active 研究篇章。使用内部 `stage start/update` 管理篇章事实；探索只引用篇章和任务 ID，不复制目标状态。
 
-探索轨道启动前若没有 active 阶段，工作流返回阶段草案并阻止启动。用户确认后先用短 stable 生命周期创建阶段；用户明确不需要阶段时，用 `--without-stage-reason` 记录理由。
+篇章允许反复推进和关联多轮探索。进入 `paused` 时必须记录 `interruption`（暂时中断）或 `temporary-closure`（暂时收束）及说明；暂停后可插入另一篇章，待其不再 active 后恢复旧篇章。`completed` 与 `cancelled` 永久封存，不得重开。
 
-科研资料只放在 `resources/source|data|theory|analysis|outputs|others|reports/` 并通过 `catalog` 登记。工作台内容通过 `workbench item/package` 建立索引；不保存凭据或绝对路径，不自动执行、安装、启动或联网检查。Markdown 公式使用 Markdown/LaTeX 语法。
+新证据改变当前判断时，使用 `stage update --revision ... --summary ... --evidence ...` 追加判断修订。修订必须同步最新篇章概况并引用至少一项证据；它属于篇章历史，不恢复独立决策体系。
+
+探索轨道启动前若没有 active 研究篇章，工作流返回篇章草案并阻止启动。用户确认后先用短 stable 生命周期创建篇章；用户明确不需要篇章时，用 `--without-stage-reason` 记录理由。
+
+科研资料放在 `resources/source|data|theory|analysis|outputs|others|reports|sparks/`。Sparks 可自由保存 Markdown，登记到 `catalog` 是可选的；其他资料通过 `catalog` 登记。Markdown 公式使用 Markdown/LaTeX 语法。
 
 只有证据完整且状态为 `validated` 的探索可准备 Squash PR；合并等待用户明确确认。
 """
@@ -136,7 +131,7 @@ MAINTENANCE_RESEARCH = """# 科研与阶段规范
 MAINTENANCE_OPERATIONS = """# 安装、恢复与交付
 
 - 新 clone/worktree：放置根目录 EXE，运行 `.\\workflow-monitor.exe install`。
-- 升级：在无活动任务、干净且同步的 main 上运行 `.\\workflow-monitor.exe update`。首次写入 Schema v4 后不可降级到仅支持 v1-v3 的版本。
+- 升级：在无活动任务、干净且同步的 main 上运行 `.\\workflow-monitor.exe update`。首次写入 Schema v5 后不可降级到仅支持 v1-v4 的版本。
 - 恢复：异常中断运行 `task recover`；明确放弃运行 `task abandon --reason <原因>`。
 - 诊断：使用 `diagnostics status/export`；诊断不自动上传。
 - 验证：代码写入后 fast，任务结束前按 Context 的 required_actions 补齐 full/release，再运行 `check` 与 `db verify`。
@@ -145,7 +140,7 @@ MAINTENANCE_OPERATIONS = """# 安装、恢复与交付
 
 LEGACY_MAINTENANCE_README = """# 项目维护规范
 
-本项目使用 Workflow Monitor 保存项目资料、阶段、任务生命周期、研究尝试、决策、交接和科研资料索引。
+本项目使用 Workflow Monitor 保存项目资料、研究篇章、任务生命周期、研究尝试、交接和科研资料索引。
 `maintenance/events.jsonl` 是追加式永久事件源；`.project_hooks/maintenance.sqlite3`
 是可从事件源重建的本地查询投影。
 
@@ -155,15 +150,15 @@ LEGACY_MAINTENANCE_README = """# 项目维护规范
 
 1. 运行 `.\\workflow-monitor.exe context --format markdown`。
 2. 首次写入前运行 `.\\workflow-monitor.exe start ...`。
-3. 使用 `.\\workflow-monitor.exe state update` 更新断点；路线变化使用 `decision add`；探索证据使用 `attempt update`。
+3. 使用 `.\\workflow-monitor.exe state update` 更新断点；探索证据使用 `attempt update`。
 4. 最后运行 `.\\workflow-monitor.exe end ...`，不得删除活动状态或绕过收尾。
 
 项目说明和长期大目标通过 `.\\workflow-monitor.exe project update` 记录。全项目同一时间最多
-一个 active 大阶段，使用 `stage start` 和 `stage update` 推进。探索分支自动关联创建时的
-当前阶段，并通过 `attempt update --current-step ... --progress ... --next-step ...` 保存进度。
-Dashboard 是只读观察台：“工作流”页合并当前任务、当前阶段、探索、动作可用性和历史记录，
+一个 active 研究篇章，使用内部 `stage start` 和 `stage update` 推进。探索分支自动关联创建时的
+当前篇章，并通过 `attempt update --current-step ... --progress ... --next-step ...` 保存进度。
+Dashboard 是只读观察台：“工作流”页合并当前任务、当前研究篇章、探索、动作可用性和历史记录，
 顶部近实时显示当前周期、文件变化、进度、写锁和阻塞原因。用户只需在 AI 对话中描述任务，
-AI 按受管理规则调用结构化服务；搜索集中在搜索页，诊断页显示故障、导出覆盖和清理回执，解释页说明中英文状态；工作台只读展示本地创建和外部导入的科研能力索引。Dashboard 不执行业务写入、push、创建 PR、合并或发布。
+AI 按受管理规则调用结构化服务；搜索集中在搜索页，诊断页显示故障、导出覆盖和清理回执，解释页说明中英文状态。Dashboard 不执行业务写入、push、创建 PR、合并或发布。
 
 稳定维护只在 `main` 使用 `--track stable`。新理论、算法、实验和不确定改动使用
 `--track research|experiment|sandbox --topic <slug>`。只有 `validated` 尝试可以准备
@@ -180,8 +175,7 @@ Squash PR，合并必须等待用户明确确认。分支名是稳定的探索�
 | `resources/outputs/` | 图表、模型和其他成果 |
 | `resources/others/` | 暂时无法可靠分类的资料 |
 | `resources/reports/` | 面向外部受众的项目总结与报告 |
-| `workbench/local/` | 用户创建的科研辅助 Markdown |
-| `workbench/imported/` | 从其他项目导入的工作台包 |
+| `resources/sparks/` | 自由 Markdown 灵感；可选择性登记 |
 
 原始资料不覆盖；过程与成果分开。Markdown 文件中的公式使用 Markdown/LaTeX 语法。
 `catalog scan` 固定扫描以上七个目录；`add`、`update` 和 `ingest` 拒绝目录与资料类型不一致。
@@ -199,9 +193,9 @@ Dashboard 只读显示诊断状态，并对不可执行动作提前显示稳定�
 
 诊断导出保存不含绝对路径的本地回执，以便确认每个事件是否进入诊断包。参数错误、工作流前置条件和普通冲突只显示提示，不持久化为 Bug 诊断；内部异常、数据完整性和外部依赖故障保留待复查。用户可在诊断页确认解决后原子删除对应指纹，故障再次出现时会重新记录。
 
-## 科研工作台索引
+## Sparks 灵感池
 
-工作台不提供内置科研内容。每个条目使用一个互斥主类型（工具、AI 指令、科研方法、科研流程、检查清单、参考资料或模板）、零到多个受控科研用途和自由标签；跨项目理论属于参考资料并使用 `theory` 标签，当前项目理论仍位于 `resources/theory/`。用户通过 `.\\workflow-monitor.exe workbench item` 登记项目内 Markdown，通过 `workbench package inspect/import/export` 预览、导入和复用声明式 ZIP 包。既有 `workbench external` 命令继续兼容。完整内容只在用户明确选中后复制给 AI，不进入日常 `context`，也不会被自动执行、安装、启动或联网验证。
+`resources/sparks/` 保存低约束的自由 Markdown 灵感，不要求模板、状态或登记。需要跨记录检索时可选择性使用 `catalog` 登记；未登记 Sparks 不触发目录一致性警告。
 
 ## 崩溃恢复
 
@@ -257,7 +251,6 @@ def template_files() -> dict[str, str]:
         "maintenance/OPERATIONS.md": MAINTENANCE_OPERATIONS,
     }
     files.update({f"{item.relative_path}/.gitkeep": "\n" for item in RESOURCE_DIRECTORIES})
-    files.update({f"{relative.as_posix()}/.gitkeep": "\n" for relative in (WORKBENCH_LOCAL, WORKBENCH_IMPORTED)})
     return files
 
 
@@ -335,7 +328,6 @@ def initialize_project(root: Path, application_version: str) -> dict:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8", newline="\n")
     ensure_resource_directories(root)
-    ensure_workbench_directories(root)
     agents = root / "AGENTS.md"
     agents_text = agents.read_text(encoding="utf-8") if agents.is_file() else "# Agent 操作规范\n"
     agents.write_text(
@@ -477,9 +469,6 @@ def validate_project(root: Path) -> None:
     for item in RESOURCE_DIRECTORIES:
         if not (root / item.relative_path).is_dir():
             raise ProjectManagerError(f"升级后缺少资源目录: {item.relative_path}")
-    for relative in (WORKBENCH_LOCAL, WORKBENCH_IMPORTED, Path("workbench/exports")):
-        if not (root / relative).is_dir():
-            raise ProjectManagerError(f"升级后缺少工作台目录: {relative.as_posix()}")
     load_events(root / "maintenance/events.jsonl")
     configured = git(root, "config", "--local", "--get", "core.hooksPath").stdout.strip()
     if configured != ".githooks":
@@ -544,7 +533,6 @@ def apply_project_update(root: Path, target_version: str) -> dict:
     database = root / ".project_hooks/maintenance.sqlite3"
     paths = [root / CONFIG_PATH, install_path, root / "maintenance/events.jsonl",
              database, Path(str(database) + "-wal"), Path(str(database) + "-shm")]
-    paths.extend(sorted((root / WORKBENCH_IMPORTED).glob("*/*/manifest.json")))
     paths.extend(root / item for item in template_files())
     paths.extend((root / "AGENTS.md", root / ".gitignore", root / ".gitattributes"))
     backup, existed = _backup(paths, root)
@@ -552,8 +540,6 @@ def apply_project_update(root: Path, target_version: str) -> dict:
     conflicts: list[str] = []
     try:
         migrate_config(root)
-        ensure_workbench_directories(root)
-        changed.extend(migrate_installed_package_manifests(root))
         changed.append(CONFIG_PATH.as_posix())
         candidates = root / ".project_hooks/update-conflicts" / target_version
         for relative, content in template_files().items():
@@ -606,15 +592,6 @@ def apply_project_update(root: Path, target_version: str) -> dict:
             _preserving_append(journal, profile_migration)
             changed.append("maintenance/events.jsonl:project-profile-authority-v4")
             existing_events.append(profile_migration)
-        migration_items = taxonomy_migration_items(existing_events)
-        if migration_items:
-            migration_event = new_event(
-                "workbench.taxonomy_migrated", branch="main", task_id=None,
-                payload={"from_schema_version": 1, "to_schema_version": 2, "items": migration_items},
-                timezone=timezone,
-            )
-            _preserving_append(journal, migration_event)
-            changed.append("maintenance/events.jsonl:workbench-taxonomy-v2")
         event = new_event(
             "workflow.upgraded",
             branch="main",

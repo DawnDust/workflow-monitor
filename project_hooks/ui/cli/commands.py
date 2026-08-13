@@ -91,30 +91,6 @@ from ...infrastructure.system.verification import (
 from ...infrastructure.git.build_identity import build_identity
 from ...application.action_service import ActionProgress, WorkflowActionService, action_spec
 from ...composition import build_action_service
-from ...application.workbench_service import (
-    EXTERNAL_TOOL_KINDS,
-    KIND_LABELS,
-    ORIGIN_LABELS,
-    PURPOSE_LABELS,
-    WorkbenchError,
-    external_tools_from_events,
-    legacy_item_type_taxonomy,
-    normalize_external_tool,
-    normalize_workbench_item,
-    sha256_file,
-    validate_item_id,
-    validate_tool_id,
-    workbench_consistency_errors,
-    workbench_items_from_events,
-)
-from ...infrastructure.system.workbench_packages import (
-    WORKBENCH_LOCAL,
-    export_package,
-    import_package,
-    inspect_package_for_project,
-    remove_imported_package,
-    workbench_package_consistency_errors,
-)
 from ...core.branches import classify_branch as classify_branch_with_policy
 
 
@@ -176,7 +152,7 @@ usage: workflow-monitor [-h] [--help-all] [--project PATH] <command> ...
   init, install, update, version, check, status, branch-status
 
 状态与记录:
-  project, stage, state, history, decisions, decision, explorations, catalog, workbench
+  project, stage, state, history, explorations, catalog
 
 探索流程:
   attempt, exploration, prepare-pr, archive-attempt
@@ -184,7 +160,7 @@ usage: workflow-monitor [-h] [--help-all] [--project PATH] <command> ...
 数据维护:
   db, diagnostics
 
-内部 Git Hook 命令不显示；所有既有公开命令保持兼容。
+内部 Git Hook 命令不显示。
 使用 <命令> --help 查看详细参数。
 """
 
@@ -246,7 +222,7 @@ def installed_project_version() -> str | None:
 
 def command_is_read_only(args: argparse.Namespace) -> bool:
     if args.command in {None, "version", "context", "check", "status", "branch-status",
-                        "history", "decisions", "explorations", "dashboard", "diagnostics"}:
+                        "history", "explorations", "dashboard", "diagnostics"}:
         return True
     if args.command == "update" and args.check:
         return True
@@ -265,12 +241,6 @@ def command_is_read_only(args: argparse.Namespace) -> bool:
         or (args.catalog_command == "migrate-layout" and args.dry_run)
     ):
         return True
-    if args.command == "workbench" and args.workbench_command == "external":
-        return args.external_command in {"list", "show"}
-    if args.command == "workbench" and args.workbench_command == "item":
-        return args.item_command in {"list", "show"}
-    if args.command == "workbench" and args.workbench_command == "package":
-        return args.package_command == "inspect"
     return False
 
 
@@ -436,9 +406,6 @@ def check_repository(
                 INSTALLATION_PATH.as_posix(), f"{TRACKED_HOOKS_DIR}/pre-commit"]:
         if not (ROOT / rel).is_file():
             errors.append(f"缺少维护文件: {rel}")
-    for rel in ("workbench/local", "workbench/imported"):
-        if not (ROOT / rel).is_dir():
-            errors.append(f"缺少工作台目录: {rel}")
     for rel in ("maintenance/current_task.md", "maintenance/change_archive.md", "maintenance/decision_log.md", "maintenance/exploration_log.md"):
         if (ROOT / rel).exists():
             errors.append(f"旧动态维护文件仍存在: {rel}")
@@ -455,9 +422,6 @@ def check_repository(
             errors.append(f"SQLite integrity_check: {integrity}")
         if include_catalog_consistency:
             errors.extend(catalog_consistency_errors(ROOT, catalog_items))
-        events = load_events(journal_path())
-        errors.extend(workbench_consistency_errors(ROOT, workbench_items_from_events(events)))
-        errors.extend(workbench_package_consistency_errors(ROOT, events))
     except (WorkflowError, DatabaseError) as exc:
         errors.append(f"维护数据库检查失败: {exc}")
     finally:
@@ -485,7 +449,6 @@ def read_active() -> dict:
     if state is not None:
         record = json.loads(json.dumps(state["record"], ensure_ascii=False))
         record["state_updated"] = bool(state["state_updated"])
-        record["decisions_added"] = int(state["decisions_added"])
         record["recovery_phase"] = state["phase"]
         record["finish"] = state.get("finish")
         return record
@@ -496,7 +459,6 @@ def read_active() -> dict:
         raise WorkflowError("没有活动任务")
     record = json.loads(row["record_json"])
     record["state_updated"] = bool(row["state_updated"])
-    record["decisions_added"] = int(row["decisions_added"])
     return record
 
 
@@ -504,34 +466,31 @@ def save_active(
     record: dict,
     *,
     state_updated: int = 0,
-    decisions_added: int = 0,
     phase: str = "active",
     finish: dict | None = None,
 ) -> None:
     save_active_state(
         state_dir(), record, state_updated=bool(state_updated),
-        decisions_added=decisions_added, phase=phase, finish=finish,
+        phase=phase, finish=finish,
     )
     connection = database()
-    connection.upsert_active_task(record, canonical_json(record), state_updated, decisions_added)
+    connection.upsert_active_task(record, canonical_json(record), state_updated)
     connection.close()
 
 
-def update_active_flags(*, state_updated: bool = False, decision_added: bool = False) -> None:
+def update_active_flags(*, state_updated: bool = False) -> None:
     record = read_active()
     next_state_updated = bool(record["state_updated"] or state_updated)
-    next_decisions = int(record["decisions_added"]) + int(decision_added)
     save_active_state(
         state_dir(), {key: value for key, value in record.items()
-                     if key not in {"state_updated", "decisions_added", "recovery_phase", "finish"}},
+                     if key not in {"state_updated", "recovery_phase", "finish"}},
         state_updated=next_state_updated,
-        decisions_added=next_decisions,
         phase=record.get("recovery_phase", "active"),
         finish=record.get("finish"),
     )
     connection = database()
     connection.update_active_flags(
-        record["task_id"], state_updated=state_updated, decision_added=decision_added,
+        record["task_id"], state_updated=state_updated,
     )
     connection.close()
 
@@ -563,7 +522,7 @@ def stable_write_context() -> tuple[dict, str]:
     branch = assert_active_branch(record)
     default = branch_policy()["default_branch"]
     if branch != default or record["git"]["track"] != "stable":
-        raise WorkflowError(f"项目资料和阶段只能在 {default} 的 stable 活动任务中更新")
+        raise WorkflowError(f"项目资料和研究篇章只能在 {default} 的 stable 活动任务中更新")
     return record, branch
 
 
@@ -571,6 +530,33 @@ def decode_stage(row: dict) -> dict:
     item = dict(row)
     item["acceptance"] = json.loads(item.pop("acceptance_json"))
     item["evidence"] = json.loads(item.pop("evidence_json"))
+    return item
+
+
+def stage_history(stage_id: str) -> tuple[list[dict], dict | None]:
+    revisions, pause = [], None
+    for event in load_events(journal_path()):
+        payload = event.get("payload") or {}
+        if payload.get("stage_id") != stage_id:
+            continue
+        if event["event_type"] == "stage.revised":
+            revisions.append({
+                "event_id": event["event_id"], "occurred_at": event["occurred_at"],
+                "task_id": event.get("task_id"), "revision": payload.get("revision", ""),
+                "summary": payload.get("summary", ""), "evidence": payload.get("evidence") or [],
+            })
+        elif event["event_type"] == "stage.state_changed" and payload.get("status") == "paused":
+            pause = {
+                "kind": payload.get("pause_kind") or "legacy",
+                "note": payload.get("pause_note") or "",
+                "occurred_at": event["occurred_at"], "task_id": event.get("task_id"),
+            }
+    return revisions, pause
+
+
+def enrich_stage_history(item: dict) -> dict:
+    revisions, pause = stage_history(item["stage_id"])
+    item["revisions"], item["pause"] = revisions, pause
     return item
 
 
@@ -628,17 +614,17 @@ def stage_command(args: argparse.Namespace) -> dict | list[dict] | str:
     connection = database()
     try:
         if args.stage_command == "list":
-            items = [decode_stage(row) for row in connection.stages(args.limit)]
+            items = [enrich_stage_history(decode_stage(row)) for row in connection.stages(args.limit)]
             if args.format == "json":
                 return items
-            lines = ["# 项目阶段", ""]
+            lines = ["# 研究篇章", ""]
             lines.extend(
                 f"- {item['sequence']}. `{item['stage_id']}`｜{item['title']}｜{item['status']}｜"
                 f"{item['current_step'] or '未记录当前步骤'}"
                 for item in items
             )
             if not items:
-                lines.append("没有阶段记录。")
+                lines.append("没有研究篇章记录。")
             return "\n".join(lines) + "\n"
         if args.stage_command == "show":
             if args.stage_id:
@@ -646,18 +632,27 @@ def stage_command(args: argparse.Namespace) -> dict | list[dict] | str:
             else:
                 row = connection.active_stage()
             if row is None:
-                raise WorkflowError("找不到指定阶段" if args.stage_id else "当前没有 active 阶段")
-            item = decode_stage(row)
+                raise WorkflowError("找不到指定研究篇章" if args.stage_id else "当前没有 active 研究篇章")
+            item = enrich_stage_history(decode_stage(row))
             if args.format == "json":
                 return item
             acceptance = "\n".join(f"- {value}" for value in item["acceptance"]) or "- 未设置"
             evidence = "\n".join(f"- {value}" for value in item["evidence"]) or "- 无"
+            revisions = "\n".join(
+                f"- {value['occurred_at']}｜{value['revision']}｜新概况：{value['summary']}｜证据：{'；'.join(value['evidence'])}"
+                for value in item["revisions"]
+            ) or "- 无"
+            pause = item.get("pause") or {}
+            pause_text = (
+                f"{pause.get('kind')}｜{pause.get('note') or '无说明'}｜{pause.get('occurred_at')}"
+                if item["status"] == "paused" else "不适用"
+            )
             return (
                 f"# {item['title']}\n\n- ID：`{item['stage_id']}`\n- 状态：{item['status']}\n"
                 f"- 目标：{item['goal']}\n- 当前步骤：{item['current_step'] or '未设置'}\n"
                 f"- 下一步：{item['next_step'] or '未设置'}\n- 阻塞：{item['blocker'] or '无。'}\n\n"
                 f"## 验收条件\n\n{acceptance}\n\n## 总结\n\n{item['summary'] or '未设置'}\n\n"
-                f"## 证据\n\n{evidence}\n"
+                f"## 证据\n\n{evidence}\n\n## 判断演化\n\n{revisions}\n\n## 暂停信息\n\n{pause_text}\n"
             )
     finally:
         connection.close()
@@ -669,12 +664,12 @@ def stage_command(args: argparse.Namespace) -> dict | list[dict] | str:
             if not STAGE_ID_RE.fullmatch(args.stage_id):
                 raise WorkflowError("stage_id 只能使用小写字母、数字和连字符")
             if connection.stage(args.stage_id) is not None:
-                raise WorkflowError(f"阶段已存在: {args.stage_id}")
+                raise WorkflowError(f"研究篇章已存在: {args.stage_id}")
             existing = active_stage(connection)
             if existing:
-                raise WorkflowError(f"已有 active 阶段: {existing['stage_id']}")
-            title = clean_text(args.title, "阶段标题", 100)
-            goal = clean_text(args.goal, "阶段目标", 500)
+                raise WorkflowError(f"已有 active 研究篇章: {existing['stage_id']}")
+            title = clean_text(args.title, "篇章标题", 100)
+            goal = clean_text(args.goal, "篇章目标", 500)
             acceptance = [clean_text(item, "验收条件", 1000) for item in args.acceptance]
             sequence = connection.next_stage_sequence()
             payload = {"stage_id": args.stage_id, "sequence": sequence, "title": title,
@@ -684,29 +679,41 @@ def stage_command(args: argparse.Namespace) -> dict | list[dict] | str:
 
         row = connection.stage(args.stage_id)
         if row is None:
-            raise WorkflowError(f"找不到阶段: {args.stage_id}")
+            raise WorkflowError(f"找不到研究篇章: {args.stage_id}")
         stage = decode_stage(row)
         if stage["status"] in {"completed", "cancelled"}:
-            raise WorkflowError(f"{stage['status']} 阶段不能再更新")
+            raise WorkflowError(f"{stage['status']} 研究篇章不能再更新")
         fields = {
-            "summary": clean_text(args.summary, "阶段总结", 2000),
+            "summary": clean_text(args.summary, "篇章概况", 2000),
             "current_step": clean_text(args.current_step, "当前步骤", 500),
             "next_step": clean_text(args.next_step, "下一步", 500),
-            "blocker": clean_text(args.blocker, "阶段阻塞", 500),
+            "blocker": clean_text(args.blocker, "篇章阻塞", 500),
         }
-        evidence = [clean_text(item, "阶段证据", 1000) for item in (args.evidence or [])]
+        evidence = [clean_text(item, "篇章证据", 1000) for item in (args.evidence or [])]
+        revision = clean_text(args.revision, "判断修订说明", 1000)
+        pause_kind = args.pause_kind
+        pause_note = clean_text(args.pause_note, "暂停或暂时收束说明", 1000)
         requested = {key: value for key, value in fields.items() if value is not None}
         if evidence:
             requested["evidence"] = evidence
         status = args.status
-        if status is None and not requested:
+        if status is None and not requested and revision is None:
             raise WorkflowError("stage update 至少提供一个更新字段或 --status")
+        if revision is not None and ("summary" not in requested or not evidence):
+            raise WorkflowError("--revision 必须同时提供 --summary 和至少一项 --evidence")
+        if revision is None and (pause_kind is not None or pause_note is not None):
+            if status != "paused":
+                raise WorkflowError("--pause-kind 和 --pause-note 只能与 --status paused 一起使用")
+        if status == "paused" and (pause_kind is None or pause_note is None):
+            raise WorkflowError("研究篇章进入 paused 时必须提供 --pause-kind 和 --pause-note")
+        if status != "paused" and (pause_kind is not None or pause_note is not None):
+            raise WorkflowError("--pause-kind 和 --pause-note 只能与 --status paused 一起使用")
         if status == "active" and stage["status"] != "paused":
-            raise WorkflowError("只有 paused 阶段可以恢复为 active")
+            raise WorkflowError("只有 paused 研究篇章可以恢复为 active")
         if status == "active":
             other = active_stage(connection)
             if other and other["stage_id"] != stage["stage_id"]:
-                raise WorkflowError(f"已有 active 阶段: {other['stage_id']}")
+                raise WorkflowError(f"已有 active 研究篇章: {other['stage_id']}")
         final_summary = requested.get("summary", stage["summary"])
         final_evidence = [*stage["evidence"], *evidence]
         if status == "completed":
@@ -718,20 +725,37 @@ def stage_command(args: argparse.Namespace) -> dict | list[dict] | str:
                 if item.get("stage_id") == stage["stage_id"] and item.get("state") == "active"
             )
             if active_branches:
-                raise WorkflowError("阶段仍有 active 探索: " + ", ".join(active_branches))
+                raise WorkflowError("研究篇章仍有 active 探索: " + ", ".join(active_branches))
             if not final_summary or not final_evidence:
-                raise WorkflowError("completed 阶段必须填写总结并至少记录一项证据")
+                raise WorkflowError("completed 研究篇章必须填写篇章回顾并至少记录一项证据")
+        if status == "paused" and pause_kind == "temporary-closure":
+            projected = read_model().attempts_across_branches()
+            local_attempts = connection.attempt_states()
+            by_branch = {item["branch"]: item for item in [*projected, *local_attempts]}
+            active_branches = sorted(
+                item["branch"] for item in by_branch.values()
+                if item.get("stage_id") == stage["stage_id"] and item.get("state") == "active"
+            )
+            if active_branches:
+                raise WorkflowError("研究篇章暂时收束前必须处理 active 探索: " + ", ".join(active_branches))
         events = []
         if requested:
-            events.append(emit("stage.updated", branch=branch, task_id=record["task_id"],
-                               payload={"stage_id": stage["stage_id"], **requested}))
+            event_type = "stage.revised" if revision is not None else "stage.updated"
+            payload = {"stage_id": stage["stage_id"], **requested}
+            if revision is not None:
+                payload["revision"] = revision
+            events.append(emit(event_type, branch=branch, task_id=record["task_id"], payload=payload))
         if status is not None and status != stage["status"]:
             events.append(emit("stage.state_changed", branch=branch, task_id=record["task_id"],
-                               payload={"stage_id": stage["stage_id"], "status": status}))
+                               payload={"stage_id": stage["stage_id"], "status": status,
+                                        **({"pause_kind": pause_kind, "pause_note": pause_note}
+                                           if status == "paused" else {})}))
         if not events:
-            raise WorkflowError("阶段内容和状态均未变化")
+            raise WorkflowError("研究篇章内容和状态均未变化")
         persist(events)
         return {"stage_id": stage["stage_id"], **requested,
+                **({"revision": revision} if revision is not None else {}),
+                **({"pause_kind": pause_kind, "pause_note": pause_note} if status == "paused" else {}),
                 "status": status or stage["status"]}
     finally:
         connection.close()
@@ -763,9 +787,9 @@ def start_task(args: argparse.Namespace) -> dict:
             "acceptance": args.acceptance,
         }
         raise WorkflowError(
-            "PH-S120 needs_input：探索任务需要 active 阶段；尚未创建分支或事件。\n"
-            f"阶段草案：{json.dumps(draft, ensure_ascii=False)}\n"
-            "确认后先用短 stable 生命周期执行 stage start；若明确不需要阶段，使用 --without-stage-reason <理由>。"
+            "PH-S120 needs_input：探索任务需要活动研究篇章；尚未创建分支或事件。\n"
+            f"研究篇章草案：{json.dumps(draft, ensure_ascii=False)}\n"
+            "确认后先用短 stable 生命周期执行 stage start；若明确不需要研究篇章，使用 --without-stage-reason <理由>。"
         )
     # A stable repair task must be able to start while legacy or unindexed resources exist;
     # the normal check and task end still require the inconsistency to be repaired.
@@ -865,7 +889,6 @@ def task_status() -> dict:
         "branch": branch, "track": record["git"]["track"],
         "changed_paths": changed(record["baseline"], snapshot()),
         "checkpoint_recorded": record["state_updated"], "state_updated": record["state_updated"],
-        "decisions_added": record["decisions_added"],
         "missing_updates": [] if record["state_updated"] else ["task checkpoint"],
         "checks": check_repository(),
     }
@@ -883,7 +906,7 @@ def task_recover(args: argparse.Namespace) -> dict:
         record = json.loads(row["record_json"])
         save_active_state(
             state_dir(), record, state_updated=bool(row["state_updated"]),
-            decisions_added=int(row["decisions_added"]), phase="active",
+            phase="active",
         )
         state = load_active_state(state_dir())
     assert state is not None
@@ -930,7 +953,7 @@ def task_recover(args: argparse.Namespace) -> dict:
             persist([event])
         save_active(
             record, state_updated=int(state["state_updated"]),
-            decisions_added=state["decisions_added"], phase="active",
+            phase="active",
         )
         state["phase"] = "active"
     suggestion = (
@@ -960,7 +983,6 @@ def task_abandon(args: argparse.Namespace) -> dict:
         payload={
             "evidence": "",
             "result": "abandoned",
-            "route": "unchanged",
             "note": args.reason,
             "verification": receipts,
             "stage_review": {"stage_id": record.get("stage", {}).get("stage_id"), "result": "abandoned"},
@@ -1056,18 +1078,6 @@ def state_update(args: argparse.Namespace) -> dict:
     return {**payload, **({"warnings": warnings} if warnings else {})}
 
 
-def decision_add(args: argparse.Namespace) -> dict:
-    record = read_active()
-    branch = assert_active_branch(record)
-    unique = hashlib.sha256(f"{branch}:{timestamp()}:{os.getpid()}".encode("utf-8")).hexdigest()[:8]
-    decision_id = args.id or f"D-{datetime.now().strftime('%Y%m%d')}-{unique}"
-    payload = {"decision_id": decision_id, "decision": args.decision, "alternatives": args.alternatives,
-               "basis": args.basis, "reopen_condition": args.reopen_condition}
-    persist([emit("decision.recorded", branch=branch, task_id=record["task_id"], payload=payload)])
-    update_active_flags(decision_added=True)
-    return payload
-
-
 def attempt_update(args: argparse.Namespace) -> dict:
     record = read_active()
     branch = assert_active_branch(record)
@@ -1139,7 +1149,18 @@ def auto_commit(record: dict, paths: list[str], result: str, message: str | None
         if mode == "always":
             raise WorkflowError(detail)
         return {"status": "skipped", "reason": detail}
-    commit_paths = [path for path in paths if not path.startswith(".project_hooks/")]
+    commit_paths = []
+    for path in paths:
+        if path.startswith(".project_hooks/"):
+            continue
+        # Baseline snapshots can retain a short-lived ignored test artifact after
+        # its producer has already cleaned it.  A temporary index starts at HEAD,
+        # so an absent, never-tracked path cannot be staged and must be ignored.
+        # Paths tracked by HEAD stay eligible so real file deletions are committed.
+        exists = (ROOT / path).exists()
+        tracked = run_git(["cat-file", "-e", f"HEAD:{path}"], check=False).returncode == 0
+        if exists or tracked:
+            commit_paths.append(path)
     if not commit_paths:
         return {"status": "skipped", "reason": "没有任务归属文件"}
     git_dir = Path(run_git(["rev-parse", "--git-dir"]).stdout.strip())
@@ -1175,7 +1196,7 @@ def auto_commit(record: dict, paths: list[str], result: str, message: str | None
 def _base_active_record(record: dict) -> dict:
     return {
         key: value for key, value in record.items()
-        if key not in {"state_updated", "decisions_added", "recovery_phase", "finish"}
+        if key not in {"state_updated", "recovery_phase", "finish"}
     }
 
 
@@ -1183,7 +1204,7 @@ def _finish_signature(args: argparse.Namespace) -> str:
     values = {
         name: getattr(args, name, None)
         for name in (
-            "task_id", "result", "route", "methods_action", "main_goal", "note",
+            "task_id", "result", "methods_action", "main_goal", "note",
             "evidence", "commit_message", "attempt_state", *STATE_ARGUMENTS, "next",
             "stage_review",
         )
@@ -1207,17 +1228,17 @@ def stage_review(record: dict, requested: str | None) -> dict:
     stage_events = [
         event for event in load_events(journal_path())
         if event.get("task_id") == record["task_id"]
-        and event["event_type"] in {"stage.started", "stage.updated", "stage.state_changed"}
+        and event["event_type"] in {"stage.started", "stage.updated", "stage.revised", "stage.state_changed"}
         and event.get("payload", {}).get("stage_id") == stage_id
     ]
     if requested is None and stage_events:
         requested = "updated"
     if requested is None:
-        raise WorkflowError("有关联阶段时必须使用 --stage-review updated|reviewed-no-change")
+        raise WorkflowError("有关联研究篇章时必须使用 --stage-review updated|reviewed-no-change")
     if requested == "updated" and not stage_events:
-        raise WorkflowError("--stage-review updated 无效：找不到本任务产生的阶段事件")
+        raise WorkflowError("--stage-review updated 无效：找不到本任务产生的研究篇章事件")
     if requested == "reviewed-no-change" and stage_events:
-        raise WorkflowError("本任务已经更新阶段，--stage-review 必须选择 updated")
+        raise WorkflowError("本任务已经更新研究篇章，--stage-review 必须选择 updated")
     return {"stage_id": stage_id, "result": requested}
 
 
@@ -1271,9 +1292,6 @@ def finish_task(args: argparse.Namespace) -> dict:
         )
         raise WorkflowError(details)
     inferred = preflight["inferred"]
-    if args.route is not None and args.route != inferred["route"]:
-        raise WorkflowError(f"--route {args.route} 与本任务事件推导值 {inferred['route']} 冲突")
-    route = args.route or inferred["route"]
     if args.main_goal is not None and args.main_goal != inferred["main_goal"]:
         raise WorkflowError(
             f"--main-goal {args.main_goal} 与 project.profile_updated 推导值 {inferred['main_goal']} 冲突"
@@ -1304,7 +1322,6 @@ def finish_task(args: argparse.Namespace) -> dict:
     evidence = "; ".join(args.evidence or [])
     events.append(emit("task.finished", branch=branch, task_id=args.task_id, payload={
         "evidence": evidence, "result": args.result,
-        "route": route,
         "note": args.note,
         "verification": verification["accepted"], "stage_review": review,
     }))
@@ -1312,7 +1329,6 @@ def finish_task(args: argparse.Namespace) -> dict:
     finished_at = timestamp()
     finish_values = {
         "result": args.result,
-        "route": route,
         "main_goal": inferred["main_goal"],
         "note": args.note,
         "attempt_state": args.attempt_state,
@@ -1329,7 +1345,6 @@ def finish_task(args: argparse.Namespace) -> dict:
     save_active(
         _base_active_record(record),
         state_updated=int(record["state_updated"] or final_state_requested),
-        decisions_added=record["decisions_added"],
         phase="finishing",
         finish=finish_state,
     )
@@ -1451,7 +1466,6 @@ def archive_attempt() -> dict:
 def context_data(branch: str | None = None) -> dict:
     try:
         result = read_model().context(branch)
-        result["recent_decisions"] = read_model().records("decisions", 3)
         return result
     except ReadModelError as exc:
         raise WorkflowError(str(exc)) from exc
@@ -1460,7 +1474,7 @@ def context_data(branch: str | None = None) -> dict:
 def markdown_context(data: dict) -> str:
     state = data.get("overview_state") or data.get("state") or {}
     profile = data.get("project_profile") or {}
-    stage = data.get("current_stage") or {}
+    stage = data.get("current_stage") or data.get("latest_stage") or {}
     active = data.get("active_task") or {}
     contract = data.get("contract") or {}
     verification = data.get("verification") or {}
@@ -1484,13 +1498,33 @@ def markdown_context(data: dict) -> str:
              f"- 状态：{verification.get('status') or 'not-applicable'}",
              "", "## 项目资料", "", f"- 项目描述：{profile.get('description') or '未设置'}",
              f"- 大目标：{profile.get('big_goal') or '未设置'}",
-             "", "## 当前大阶段", "", f"- 阶段：{stage.get('title') or '未设置'}",
-             f"- 阶段目标：{stage.get('goal') or '未设置'}",
-             f"- 阶段进展：{stage.get('summary') or '未设置'}",
+             "", "## 当前或最近研究篇章", "", f"- 篇章：{stage.get('title') or '未设置'}",
+             f"- 篇章目标：{stage.get('goal') or '未设置'}",
+             f"- 篇章概况：{stage.get('summary') or '未设置'}",
              f"- 当前步骤：{stage.get('current_step') or '未设置'}",
              f"- 下一步：{stage.get('next_step') or '未设置'}",
-             f"- 阶段阻塞：{stage.get('blocker') or '无。'}",
-             "", "## 阶段建议与待审阅动作", ""]
+             f"- 篇章阻塞：{stage.get('blocker') or '无。'}"]
+    if stage.get("status") == "paused":
+        pause = stage.get("pause") or {"kind": "legacy", "note": ""}
+        labels = {"interruption": "暂时中断", "temporary-closure": "暂时收束", "legacy": "历史暂停"}
+        lines += [f"- 暂停类型：{labels.get(pause.get('kind'), pause.get('kind'))}",
+                  f"- 暂停说明：{pause.get('note') or '旧日志未记录'}",
+                  f"- 暂停时间：{pause.get('occurred_at') or '未知'}"]
+    lines += ["", "### 判断演化", ""]
+    lines.extend(
+        f"- {item['occurred_at']}｜{item['revision']}｜新概况：{item['summary']}｜证据：{'；'.join(item['evidence'])}"
+        for item in stage.get("revisions") or []
+    )
+    if not stage.get("revisions"):
+        lines.append("- 尚无显式判断修订。")
+    lines += ["", "## 研究注意事项", ""]
+    for item in data.get("research_attention") or []:
+        summary = (item.get("summary") or {}).get("zh-CN") or item.get("code")
+        sources = "、".join(item.get("source_ids") or []) or "无"
+        lines.append(f"- [{item.get('code')}] {summary}｜来源：{item.get('source_type')} / {sources}")
+    if not data.get("research_attention"):
+        lines.append("- 无。")
+    lines += ["", "## 研究篇章建议与待审阅动作", ""]
     for item in data.get("required_actions") or []:
         lines.append(f"- {item}")
     if not data.get("required_actions"):
@@ -1516,14 +1550,9 @@ def markdown_context(data: dict) -> str:
     for attempt in data.get("active_attempts") or []:
         lines.append(
             f"- `{attempt['branch']}`｜当前：{attempt.get('current_step') or '未设置'}｜"
-            f"下一步：{attempt.get('next_step') or '未设置'}｜阶段：{attempt.get('stage_id') or '未归属阶段'}"
+            f"下一步：{attempt.get('next_step') or '未设置'}｜研究篇章：{attempt.get('stage_id') or '未归属篇章'}"
         )
     if not data.get("active_attempts"):
-        lines.append("无。")
-    lines += ["", "## 最近决策", ""]
-    for item in (data.get("recent_decisions") or [])[:3]:
-        lines.append(f"- {item.get('occurred_at')}｜{item.get('decision')}｜{item.get('basis')}")
-    if not data.get("recent_decisions"):
         lines.append("无。")
     lines += ["", "## 最近交接", ""]
     for item in data["recent_handoffs"][:3]:
@@ -1598,7 +1627,6 @@ def catalog_auto_finish(success: bool, note: str, evidence: list[str]) -> dict:
     return finish_task(argparse.Namespace(
         task_id=record["task_id"],
         result="completed" if success else "failed",
-        route="unchanged",
         methods_action="reviewed-no-change",
         main_goal="unchanged",
         note=note,
@@ -1700,17 +1728,9 @@ def migrate_legacy(delete_legacy: bool) -> dict:
             events.append(emit("task.finished", branch="main", task_id=task_id, occurred_at=occurred_at,
                                event_id=legacy_event_id("change", "|".join(row)), payload={
                                    "summary": summary, "evidence": evidence, "result": result,
-                                   "route": "legacy", "note": result, "legacy_source": "change_archive.md",
+                                   "note": result, "legacy_source": "change_archive.md",
                                }))
     decision_file = ROOT / "maintenance/decision_log.md"
-    for row in legacy_rows(decision_file):
-        if len(row) >= 6:
-            decision_id, occurred_at, decision, alternatives, basis, reopen = row[:6]
-            events.append(emit("decision.recorded", branch="main", task_id=None, occurred_at=occurred_at,
-                               event_id=legacy_event_id("decision", decision_id), payload={
-                                   "decision_id": decision_id, "decision": decision, "alternatives": alternatives,
-                                   "basis": basis, "reopen_condition": reopen, "legacy_source": "decision_log.md",
-                               }))
     current_file = ROOT / "maintenance/current_task.md"
     if current_file.is_file():
         text = current_file.read_text(encoding="utf-8")
@@ -1754,7 +1774,7 @@ def migrate_legacy(delete_legacy: bool) -> dict:
         start, end = receipt.get("start", {}), receipt.get("end", {})
         payload = {"summary": start.get("declaration", {}).get("scope", path.stem),
                    "evidence": canonical_json(end.get("git", {})), "result": end.get("result", "unknown"),
-                   "route": end.get("route", "legacy"), "note": end.get("note", ""),
+                   "note": end.get("note", ""),
                    "started_at": start.get("started_at"), "legacy_source": path.name}
         events.append(emit("task.receipt_imported", branch=start.get("git", {}).get("branch") or "main",
                            task_id=start.get("task_id") or path.stem, occurred_at=end.get("finished_at") or start.get("started_at") or timestamp(),
@@ -1772,7 +1792,7 @@ def migrate_legacy(delete_legacy: bool) -> dict:
                       event_id=legacy_event_id("active", record["task_id"]), occurred_at=record["started_at"], payload=record["declaration"])])
     connection = database()
     counts = connection.table_counts(
-        ("events", "task_archive", "decisions", "handoffs", "project_state", "explorations")
+        ("events", "task_archive", "handoffs", "project_state", "explorations")
     )
     connection.close()
     if delete_legacy:
@@ -1895,238 +1915,6 @@ def diagnostics_command(args: argparse.Namespace) -> dict:
     return result
 
 
-def external_tools() -> list[dict]:
-    return external_tools_from_events(load_events(journal_path()))
-
-
-def workbench_items() -> list[dict]:
-    return workbench_items_from_events(load_events(journal_path()))
-
-
-def _external_tool_text(items: list[dict]) -> str:
-    lines = ["# 外置工作台工具", ""]
-    if not items:
-        lines.append("尚未登记外置工具。")
-    for item in items:
-        lines.append(
-            f"- `{item['tool_id']}`｜{item['name']}｜{item['kind']}｜{item['status']}｜{item['purpose']}"
-        )
-    return "\n".join(lines) + "\n"
-
-
-def _workbench_item_text(items: list[dict]) -> str:
-    lines = ["# 科研工作台索引", ""]
-    if not items:
-        lines.append("尚未登记工作台条目。")
-    for item in items:
-        source = ORIGIN_LABELS.get(item.get("origin"), item.get("origin") or "未知")
-        package = f"｜{item.get('package_id')} {item.get('package_version')}" if item.get("package_id") else ""
-        purposes = "、".join(PURPOSE_LABELS[value] for value in item.get("purposes", [])) or "未指定用途"
-        review = "｜待复核" if item.get("review_state") == "needs_review" else ""
-        lines.append(
-            f"- `{item['item_id']}`｜{KIND_LABELS.get(item['kind'], item['kind'])}｜{purposes}"
-            f"｜{item['title']}｜{item['status']}｜{source}{package}{review}｜{item['summary']}"
-        )
-    return "\n".join(lines) + "\n"
-
-
-def _package_text(package: dict) -> str:
-    lines = [
-        "# 工作台包预览", "",
-        f"- 包：`{package['package_id']}`",
-        f"- 名称：{package['name']}",
-        f"- 版本：{package['version']}",
-        f"- 包格式：v{package['schema_version']}（来源 v{package.get('source_schema_version', package['schema_version'])}）",
-        f"- 作者：{package['author']}",
-        f"- 说明：{package.get('description') or '未提供'}",
-        f"- 许可证：{package.get('license') or '未注明'}",
-        f"- 内容哈希：`{package['package_sha256']}`", "", "## 条目", "",
-    ]
-    if package.get("project_status"):
-        lines.insert(8, f"- 当前项目：{package['project_status']}｜目标 `{package.get('destination', '')}`")
-    actions = {item.get("item_id"): item.get("action") for item in package.get("item_actions") or []}
-    for item in package.get("items") or []:
-        original = item.get("original_item_id") or item.get("item_id")
-        action = f"｜{actions.get(original)}" if actions.get(original) else ""
-        purposes = "、".join(PURPOSE_LABELS[value] for value in item.get("purposes", [])) or "未指定用途"
-        lines.append(f"- `{original}`｜{KIND_LABELS.get(item['kind'], item['kind'])}｜{purposes}{action}｜{item['title']}｜{item['summary']}")
-    return "\n".join(lines) + "\n"
-
-
-def workbench_command(args: argparse.Namespace) -> dict | list[dict] | str:
-    if args.workbench_command == "external":
-        items = external_tools()
-        by_id = {item["tool_id"]: item for item in items}
-        command = args.external_command
-        if command == "list":
-            return items if args.format == "json" else _external_tool_text(items)
-        tool_id = validate_tool_id(args.tool_id)
-        current = by_id.get(tool_id)
-        if command == "show":
-            if current is None:
-                raise WorkflowError("没有找到该外置工具")
-            return current if args.format == "json" else _external_tool_text([current])
-        record, branch = stable_write_context()
-        if command == "add":
-            if current is not None:
-                raise WorkflowError("该外置工具已经存在；请使用 update")
-            payload = normalize_external_tool({
-                "tool_id": tool_id, "name": args.name, "kind": args.kind,
-                "purpose": args.purpose, "usage_hint": args.usage_hint,
-                "reference": args.reference, "status": "active",
-            })
-            event_type = "workbench.external_upserted"
-        elif command == "update":
-            if current is None:
-                raise WorkflowError("没有找到该外置工具；请先 add")
-            supplied = {key: value for key, value in {
-                "tool_id": tool_id, "name": args.name, "kind": args.kind,
-                "purpose": args.purpose, "usage_hint": args.usage_hint,
-                "reference": args.reference,
-            }.items() if value is not None}
-            if set(supplied) == {"tool_id"}:
-                raise WorkflowError("update 至少提供一个要修改的字段")
-            payload = normalize_external_tool(supplied, current=current)
-            event_type = "workbench.external_upserted"
-        else:
-            if current is None:
-                raise WorkflowError("没有找到该外置工具")
-            payload = {"tool_id": tool_id, "status": {"pause": "paused", "restore": "active", "retire": "retired"}[command], "note": clean_text(args.note, "说明", 500) or ""}
-            event_type = "workbench.external_status_changed"
-        persist([emit(event_type, branch=branch, task_id=record["task_id"], payload=payload)])
-        return payload
-
-    if args.workbench_command == "item":
-        items = workbench_items()
-        by_id = {item["item_id"]: item for item in items}
-        command = args.item_command
-        if command == "list":
-            legacy_filter = legacy_item_type_taxonomy(args.legacy_item_type) if args.legacy_item_type else None
-            kind_filter = args.kind or (legacy_filter or {}).get("kind")
-            purpose_filters = set(args.purposes or (legacy_filter or {}).get("purposes") or [])
-            selected = [item for item in items if (
-                (not kind_filter or item["kind"] == kind_filter)
-                and (not purpose_filters or purpose_filters.intersection(item.get("purposes", [])))
-                and (not args.status or item["status"] == args.status)
-            )]
-            return selected if args.format == "json" else _workbench_item_text(selected)
-        item_id = validate_item_id(args.item_id)
-        current = by_id.get(item_id)
-        if command == "show":
-            if current is None:
-                raise WorkflowError("没有找到该工作台条目")
-            return current if args.format == "json" else _workbench_item_text([current])
-        record, branch = stable_write_context()
-        if command == "add":
-            if current is not None:
-                raise WorkflowError("该工作台条目已经存在；请使用 update")
-            relative = Path(str(args.path).replace("\\", "/"))
-            if not relative.as_posix().startswith(WORKBENCH_LOCAL.as_posix() + "/"):
-                raise WorkflowError("本地条目 Markdown 必须位于 workbench/local")
-            content = (ROOT / relative).resolve()
-            try:
-                content.relative_to((ROOT / WORKBENCH_LOCAL).resolve())
-            except ValueError as exc:
-                raise WorkflowError("本地条目 Markdown 路径越界") from exc
-            if not content.is_file():
-                raise WorkflowError("没有找到本地条目 Markdown")
-            if bool(args.kind) == bool(args.legacy_item_type):
-                raise WorkflowError("add 必须且只能提供 --kind；旧脚本可改用单独的 --type")
-            taxonomy = ({"kind": args.kind, "purposes": args.purposes or []}
-                        if args.kind else {**legacy_item_type_taxonomy(args.legacy_item_type), "source_schema_version": 2})
-            payload = normalize_workbench_item({
-                "item_id": item_id, **taxonomy, "title": args.title,
-                "summary": args.summary, "path": relative.as_posix(),
-                "content_sha256": sha256_file(content), "tags": args.tags or [],
-                "reference": args.reference, "status": "active", "origin": "local",
-            })
-            event_type = "workbench.entry_upserted"
-        elif command == "update":
-            if current is None:
-                raise WorkflowError("没有找到该工作台条目；请先 add")
-            if current.get("legacy_external"):
-                raise WorkflowError("旧版外置条目请使用 workbench external update")
-            imported_metadata_only = current.get("origin") == "imported"
-            if imported_metadata_only and any((args.title, args.summary, args.path, args.reference, args.refresh_content)):
-                raise WorkflowError("导入条目只允许复核主类型、科研用途、标签和复核状态；不能修改包内正文或来源")
-            if args.kind and args.legacy_item_type:
-                raise WorkflowError("update 不能同时提供 --kind 和弃用的 --type")
-            taxonomy = {}
-            if args.kind:
-                taxonomy["kind"] = args.kind
-            elif args.legacy_item_type:
-                taxonomy = {**legacy_item_type_taxonomy(args.legacy_item_type), "source_schema_version": 2}
-            supplied = {key: value for key, value in {
-                "item_id": item_id, **taxonomy, "purposes": args.purposes,
-                "title": args.title, "summary": args.summary, "path": args.path,
-                "tags": args.tags, "reference": args.reference,
-                "review_state": args.review_state, "review_note": args.review_note,
-            }.items() if value is not None}
-            if args.review_state == "reviewed" and args.review_note is None:
-                supplied["review_note"] = ""
-            if len(supplied) == 1 and not args.refresh_content:
-                raise WorkflowError("update 至少提供一个修改字段或 --refresh-content")
-            if not imported_metadata_only:
-                path_value = supplied.get("path") or current.get("path")
-                content = (ROOT / str(path_value)).resolve()
-                try:
-                    content.relative_to((ROOT / WORKBENCH_LOCAL).resolve())
-                except ValueError as exc:
-                    raise WorkflowError("本地条目 Markdown 路径越界") from exc
-                if not content.is_file():
-                    raise WorkflowError("没有找到本地条目 Markdown")
-                supplied["content_sha256"] = sha256_file(content)
-            payload = normalize_workbench_item(supplied, current=current)
-            event_type = "workbench.entry_upserted"
-        else:
-            if current is None:
-                raise WorkflowError("没有找到该工作台条目")
-            payload = {"item_id": item_id, "status": {"pause": "paused", "restore": "active", "retire": "retired"}[command], "note": clean_text(args.note, "说明", 500) or ""}
-            event_type = "workbench.entry_status_changed"
-        persist([emit(event_type, branch=branch, task_id=record["task_id"], payload=payload)])
-        return payload
-
-    if args.workbench_command == "package":
-        command = args.package_command
-        if command == "inspect":
-            package = inspect_package_for_project(ROOT, Path(args.archive))
-            current_ids = {item["item_id"] for item in workbench_items()}
-            package["item_actions"] = [{
-                "item_id": item["original_item_id"],
-                "action": "update" if item["item_id"] in current_ids else "add",
-            } for item in package["items"]]
-            return package if args.format == "json" else _package_text(package)
-        if command == "export":
-            by_id = {item["item_id"]: item for item in workbench_items()}
-            missing = [item_id for item_id in args.item_ids if item_id not in by_id]
-            if missing:
-                raise WorkflowError("没有找到工作台条目: " + ", ".join(missing))
-            return export_package(
-                ROOT, [by_id[item_id] for item_id in args.item_ids], package_id=args.package_id,
-                name=args.name, version=args.version, author=args.author,
-                description=args.description or "", license_name=args.license_name or "",
-            )
-        record, branch = stable_write_context()
-        result = import_package(ROOT, Path(args.archive))
-        if result["status"] == "unchanged":
-            return {key: value for key, value in result.items() if key != "items"}
-        payload = {
-            "package_id": result["package_id"], "name": result["name"],
-            "version": result["version"], "author": result["author"],
-            "source_schema_version": result.get("source_schema_version", 2),
-            "description": result.get("description", ""), "license": result.get("license", ""),
-            "package_sha256": result["package_sha256"], "destination": result["destination"],
-            "items": result["items"],
-        }
-        try:
-            persist([emit("workbench.package_imported", branch=branch, task_id=record["task_id"], payload=payload)])
-        except Exception:
-            remove_imported_package(ROOT, result)
-            raise
-        return payload
-    raise WorkflowError("未知工作台命令")
-
-
 def _next_dashboard_task_id() -> str:
     date = datetime.now(resolve_timezone(config()["timezone"])).strftime("%Y%m%d")
     prefix = f"{date}_dashboard_"
@@ -2169,7 +1957,6 @@ def dashboard_action_state() -> dict:
             "kind": record.get("declaration", {}).get("kind"),
             "scope": record.get("declaration", {}).get("scope"),
             "state_updated": bool(record.get("state_updated")),
-            "decisions_added": int(record.get("decisions_added") or 0),
             "base_head": record.get("git", {}).get("base_head"),
         }
     except WorkflowError as exc:
@@ -2259,8 +2046,6 @@ def dashboard_execute_action(
             fields, goal=None, judgment=None, breakpoint=None, blocker=None,
             current_step=None, status=None, main_goal_version=None, next=None,
         ))
-    if action_id == "decision.add":
-        return decision_add(_action_namespace(fields, id=None))
     if action_id == "attempt.update":
         return attempt_update(_action_namespace(
             fields, hypothesis=None, evidence=None, conclusion=None,
@@ -2274,7 +2059,7 @@ def dashboard_execute_action(
         return finish_task(_action_namespace(
             values,
             task_id=requested_task_id or record["task_id"], evidence=None, commit_message=None,
-            route=None, methods_action=None, main_goal=None,
+            methods_action=None, main_goal=None,
             attempt_state=None, goal=None, judgment=None, breakpoint=None,
             blocker=None, current_step=None, status=None, main_goal_version=None, next=None,
             stage_review=None,
@@ -2296,6 +2081,7 @@ def dashboard_execute_action(
         return stage_command(_action_namespace(
             fields, stage_command="update", summary=None, current_step=None,
             next_step=None, blocker=None, evidence=None, status=None,
+            revision=None, pause_kind=None, pause_note=None,
         ))
     if action_id == "exploration.prepare_pr":
         return prepare_pr()
@@ -2322,20 +2108,6 @@ def dashboard_execute_action(
         if action_id == "catalog.update":
             values["item_id"] = fields["item_id"]
         return catalog_command(argparse.Namespace(**values), catalog_runtime())
-    if action_id.startswith("workbench.external."):
-        command = action_id.rsplit(".", 1)[1]
-        values = {
-            "workbench_command": "external",
-            "external_command": command,
-            "tool_id": fields.get("tool_id"),
-            "name": fields.get("name"),
-            "kind": fields.get("kind") or None,
-            "purpose": fields.get("purpose"),
-            "usage_hint": fields.get("usage_hint"),
-            "reference": fields.get("reference"),
-            "note": fields.get("note"),
-        }
-        return workbench_command(argparse.Namespace(**values))
     if action_id == "health.check":
         check_repository(raise_on_error=True)
         return {"status": "passed"}
@@ -2369,8 +2141,6 @@ def cli_shared_action(args: argparse.Namespace) -> tuple[str, dict] | None:
         action_id = "task.finish"
     elif args.command == "state":
         action_id = "state.update"
-    elif args.command == "decision":
-        action_id = "decision.add"
     elif args.command == "attempt" and args.attempt_command == "update":
         action_id = "attempt.update"
     elif args.command == "project" and args.project_command == "update":
@@ -2390,8 +2160,6 @@ def cli_shared_action(args: argparse.Namespace) -> tuple[str, dict] | None:
         action_id = "exploration.archive"
     elif args.command == "exploration":
         action_id = "exploration.import"
-    elif args.command == "workbench" and args.workbench_command == "external" and args.external_command not in {"list", "show"}:
-        action_id = f"workbench.external.{args.external_command}"
     if action_id is None:
         return None
     names = {field.name for field in action_spec(action_id).fields}

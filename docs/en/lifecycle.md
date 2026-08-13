@@ -15,12 +15,14 @@ Use `research`, `experiment`, or `sandbox` with a topic when testing a new theor
 1. Read the current context and relevant repository rules.
 2. Start a task with scope and acceptance criteria.
 3. Work on the correct stable or exploratory track.
-4. Update structured progress and record route-changing decisions.
+4. Update structured progress and preserve evidence at useful checkpoints.
 5. Run the required tests and integrity checks.
 6. End with evidence and a precise next step.
 
 Crashes do not justify deleting state. Use recovery commands to resume or explicitly abandon the task with a reason.
 
-## Project stages and resources
+## Research Chapters, Sparks, and resources
 
-Large goals are organized into stages. Research materials belong only in the seven standard `resources/` subdirectories and must be registered in the catalog. `check` verifies that files and indexes remain consistent.
+Large goals are organized into nonlinear Research Chapters. A chapter may be updated repeatedly, contain multiple explorations, pause while another chapter becomes active, and later resume. `paused` records either an interruption or a temporary closure; temporary closure is still resumable, while `completed` is permanently sealed. When new evidence overturns an earlier judgment, a revision records the reason, the new current summary, and its evidence as append-only chapter history rather than a separate decision system.
+
+Research materials belong in the standard `resources/` subdirectories and are registered in the catalog. Free-form Markdown Sparks live in `resources/sparks/`; registration is optional until a Spark should become searchable. `check` verifies registered files and indexes while leaving unregistered Sparks unconstrained.

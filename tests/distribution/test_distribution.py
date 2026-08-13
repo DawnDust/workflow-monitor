@@ -75,7 +75,7 @@ class DistributionTests(unittest.TestCase):
             "version": CURRENT_VERSION,
             "build_identity": {"build_id": build_id} if build_id else {},
             "launcher_min_version": "1.0.0",
-            "event_schema": {"minimum": 1, "maximum": 4},
+            "event_schema": {"minimum": 1, "maximum": 5},
             "windows_exe": {
                 "file": windows_exe.name,
                 "url": windows_exe.as_uri(),
@@ -393,7 +393,7 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(promoted[0]["payload"]["description"], "legacy project")
         self.assertEqual(promoted[0]["payload"]["big_goal"], "legacy goal")
 
-    def test_project_update_appends_taxonomy_v2_migration_once(self) -> None:
+    def test_project_update_leaves_retired_workbench_events_untouched(self) -> None:
         self.init("1.3.0")
         journal = self.root / "maintenance/events.jsonl"
         append_events(journal, self.root / ".project_hooks", [new_event(
@@ -406,17 +406,11 @@ class DistributionTests(unittest.TestCase):
         )])
         self.commit()
         apply_project_update(self.root, CURRENT_VERSION)
-        migrated = [event for event in load_events(journal) if event["event_type"] == "workbench.taxonomy_migrated"]
-        self.assertEqual(len(migrated), 1)
-        item = migrated[0]["payload"]["items"][0]
-        self.assertEqual(item["kind"], "method")
-        self.assertEqual(item["purposes"], ["validation"])
-        self.assertEqual(item["review_state"], "needs_review")
-        self.commit("taxonomy migrated")
-        apply_project_update(self.root, CURRENT_VERSION)
-        self.assertEqual(len([event for event in load_events(journal) if event["event_type"] == "workbench.taxonomy_migrated"]), 1)
+        events = load_events(journal)
+        self.assertEqual(len([event for event in events if event["event_type"] == "workbench.entry_upserted"]), 1)
+        self.assertFalse(any(event["event_type"] == "workbench.taxonomy_migrated" for event in events))
 
-    def test_failed_package_manifest_migration_rolls_back_prior_manifest(self) -> None:
+    def test_update_preserves_retired_workbench_package_files(self) -> None:
         self.init("1.3.0")
         imported = self.root / "workbench/imported"
         body = b"# Item\n"
@@ -437,8 +431,7 @@ class DistributionTests(unittest.TestCase):
         (invalid / "manifest.json").write_text(json.dumps(invalid_manifest), encoding="utf-8")
         before = (valid / "manifest.json").read_bytes()
         self.commit()
-        with self.assertRaises(Exception):
-            apply_project_update(self.root, CURRENT_VERSION)
+        apply_project_update(self.root, CURRENT_VERSION)
         self.assertEqual((valid / "manifest.json").read_bytes(), before)
 
     def test_customized_managed_file_is_preserved_and_reported(self) -> None:
