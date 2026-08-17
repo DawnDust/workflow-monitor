@@ -1,5 +1,5 @@
 coverage==7.13.5
-pillow==10.1.0
+pillow==12.3.0
 pyinstaller==6.21.0
 pywebview==6.2.1
 PyYAML==6.0.3
