@@ -644,11 +644,10 @@
 </rect>
 <text y="-10.1" style="">
 <tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em">
-<tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Is there an applicable</tspan>
-<tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> active</tspan>
+<tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Applicable active</tspan>
 </tspan>
 <tspan class="text-outer-tspan row" x="0" y="1em" dy="1.1em">
-<tspan font-style="normal" class="text-inner-tspan" font-weight="normal">stage?</tspan>
+<tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Research Chapter?</tspan>
 </tspan>
 </text>
 </g>
@@ -665,7 +664,7 @@
 </rect>
 <text y="-10.1" style="">
 <tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em">
-<tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Link the stage; create or reuse an</tspan>
+<tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Link the chapter; create or reuse an</tspan>
 </tspan>
 <tspan class="text-outer-tspan row" x="0" y="1em" dy="1.1em">
 <tspan font-style="normal" class="text-inner-tspan" font-weight="normal">exploration branch</tspan>
@@ -685,10 +684,10 @@
 </rect>
 <text y="-10.1" style="">
 <tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em">
-<tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Create a stage, or record why no</tspan>
+<tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Create or link a Research Chapter,</tspan>
 </tspan>
 <tspan class="text-outer-tspan row" x="0" y="1em" dy="1.1em">
-<tspan font-style="normal" class="text-inner-tspan" font-weight="normal">stage applies</tspan>
+<tspan font-style="normal" class="text-inner-tspan" font-weight="normal">or record why none applies</tspan>
 </tspan>
 </text>
 </g>
@@ -745,13 +744,13 @@
 <tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Update facts in </tspan>
 <tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> state</tspan>
 <tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> /</tspan>
-<tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> decision</tspan>
+<tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> judgment</tspan>
 </tspan>
 <tspan class="text-outer-tspan row" x="0" y="1em" dy="1.1em">
 <tspan font-style="normal" class="text-inner-tspan" font-weight="normal">/</tspan>
 <tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> attempt</tspan>
 <tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> /</tspan>
-<tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> stage</tspan>
+<tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> chapter</tspan>
 <tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> /</tspan>
 <tspan font-style="normal" class="text-inner-tspan" font-weight="normal"> catalog</tspan>
 </tspan>
@@ -869,7 +868,7 @@
 </rect>
 <text y="-10.1" style="">
 <tspan class="text-outer-tspan row" x="0" y="-0.1em" dy="1.1em">
-<tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Review project stage</tspan>
+<tspan font-style="normal" class="text-inner-tspan" font-weight="normal">Review Research Chapter</tspan>
 </tspan>
 </text>
 </g>

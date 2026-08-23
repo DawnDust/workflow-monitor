@@ -27,7 +27,7 @@ Workflow Monitor coordinates three distinct responsibilities without replacing h
 
 ## How it works
 
-Natural-language requests enter a structured but lightweight lifecycle. Read-only questions remain read-only; changes become explicit stable or exploratory tasks; verification and stage review must pass before completion; and external delivery actions still require user authorization.
+Natural-language requests enter a structured but lightweight lifecycle. Read-only questions remain read-only; changes become explicit stable or exploratory tasks; verification and Research Chapter review must pass before completion; and external delivery actions still require user authorization.
 
 <p align="center"><img src="docs/assets/workflow-monitor-lifecycle.svg" alt="Workflow Monitor lifecycle from natural-language request through verification and authorized delivery" width="760"></p>
 
