@@ -279,6 +279,9 @@ class MaintenanceReadModel:
         }
 
     def _branch_attempts(self) -> list[dict]:
+        from ...core.stage_versions import stage_versions, merge_versions
+        from .store import load_events
+        self._stage_variants = stage_versions(load_events(self.journal_path), "working-tree")
         try:
             output = self._git(
                 "for-each-ref", "--format=%(refname)",
@@ -312,6 +315,7 @@ class MaintenanceReadModel:
                     continue
                 if isinstance(event, dict):
                     events.append(event)
+            self._stage_variants = merge_versions(self._stage_variants + stage_versions(events, ref))
             events.sort(key=lambda item: (item.get("occurred_at", ""), item.get("event_id", "")))
             attempts_in_ref: dict[tuple[str, str], dict] = {}
             for event in events:
@@ -413,6 +417,7 @@ class MaintenanceReadModel:
         return [cls._decode_attempt(connection, row) for row in attempt_rows]
 
     def _context(self, connection: sqlite3.Connection, branch: str) -> dict:
+        from ...core.stage_versions import conflicting_stages
         legacy_state = connection.execute("SELECT * FROM project_state WHERE branch=?", (branch,)).fetchone()
         state_branch = branch
         if legacy_state is None and branch != "main":
@@ -657,7 +662,7 @@ class MaintenanceReadModel:
 
         def choose(field: str, candidates: list[tuple[object, dict | None]]) -> None:
             for value, source in candidates:
-                if value not in (None, "", []):
+                if value not in (None, "", []) or (value is not None and source and source.get("event_type") == "task.checkpointed" and source.get("event_id")):
                     projection[field] = value
                     field_sources[field] = source
                     return
@@ -743,6 +748,7 @@ class MaintenanceReadModel:
             checkpoint_status = preflight["checkpoint_status"]
         if active_data:
             active_data["checkpoint_status"] = checkpoint_status
+            active_data["stage_id"] = linked_stage_id
         try:
             config = json.loads((root / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -765,13 +771,11 @@ class MaintenanceReadModel:
             "active_task": active_data,
             "project_profile": profile,
             "current_stage": current_stage,
+            "stage_versions": getattr(self, "_stage_variants", []),
+            "stage_version_conflicts": conflicting_stages(getattr(self, "_stage_variants", [])),
             "latest_stage": stages[0] if stages else None,
             "stage_review_status": stage_review_data,
-            "stage_freshness_warning": (
-                None
-                if stage_review_data and handoffs and stage_review_data.get("task_id") == handoffs[0].get("task_id")
-                else stage_freshness_warning(current_stage, handoffs)
-            ),
+            "stage_freshness_warning": None,
             "stages": stages,
             "attempts": attempts,
             "active_attempts": [item for item in attempts if item["state"] == "active"],
@@ -795,9 +799,22 @@ class MaintenanceReadModel:
                 connection, "SELECT * FROM catalog_relations ORDER BY updated_at DESC, relation_id",
             )
             context["research_attention"] = research_attention(context, catalog_items, catalog_relations)
+            self._review_context(connection, context, catalog_items, catalog_relations)
             return context
         finally:
             connection.close()
+
+    def _review_context(self, connection, context, catalog_items, catalog_relations):
+        from ..system.reviews import inventory, summary
+        events = rows(connection, "SELECT event_id, event_type, occurred_at, branch, task_id, payload_json FROM events ORDER BY rowid")
+        for event in events:
+            event["payload"] = json.loads(event.pop("payload_json"))
+        settings = json.loads((self.repo_path / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
+        items = inventory(self.repo_path, context["branch"], events, context, catalog_items, catalog_relations, settings)
+        context["reviews"] = items
+        context["review_summary"] = summary(items)
+        # Superseded by explicit coverage, not unrelated task completion time.
+        context["stage_freshness_warning"] = None
 
     def attempt(self, branch: str | None = None) -> dict | None:
         branch = branch or self.branch_provider()
@@ -1143,6 +1160,7 @@ class MaintenanceReadModel:
                 "SELECT * FROM catalog_relations ORDER BY updated_at DESC, relation_id",
             )
             context["research_attention"] = research_attention(context, catalog_items, catalog_relations)
+            self._review_context(connection, context, catalog_items, catalog_relations)
             return {
                 "branch": branch,
                 "health": {

@@ -10,6 +10,7 @@ from pathlib import Path
 from ... import __version__
 from .commands import *
 from .parser import build_parser
+from .agent_output import brief_context, verification_view, markdown_view, compact_result
 
 def main(argv: list[str] | None = None) -> int:
     raw_args = list(os.sys.argv[1:] if argv is None else argv)
@@ -17,8 +18,15 @@ def main(argv: list[str] | None = None) -> int:
     root: Path | None = None
     writer_context = None
     shared_action: tuple[str, dict] | None = None
+    receipt_task_id = None
+    before_events = None
+    expanded_args = raw_args
     try:
-        args = build_parser().parse_args(raw_args)
+        from .structured_input import expand
+        expanded_args = expand(raw_args)
+        args = build_parser().parse_args(expanded_args)
+        if args.command == "end" and not args.check_only and (not args.result or not args.note):
+            raise WorkflowError("结束任务必须填写 --result 和 --note；只检查使用 end --check-only")
         if args.command == "init":
             root = (args.project or args.path).resolve()
         else:
@@ -36,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=0.25,
                 )
                 writer_context.__enter__()
+                before_events = set() if args.command == "init" else {e["event_id"] for e in load_events(journal_path())}
         if args.basic_help:
             output = DAILY_HELP
         elif args.help_all:
@@ -43,13 +52,15 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "version":
             output = version_report(root)
         elif args.command == "init":
-            output = initialize_project(ROOT, __version__)
+            output = initialize_project(root, __version__)
         elif root is None:
             raise WorkflowError(
                 "当前目录不在 Workflow Monitor 科研项目中；请先运行 `.\\workflow-monitor.exe init .`，"
                 "或使用 `--project <path>`"
             )
         elif shared_action is not None:
+            if getattr(args, "compact", False) and args.command != "start":
+                receipt_task_id = read_active()["task_id"]
             output = dashboard_execute_action(
                 shared_action[0], shared_action[1], lambda _progress: None,
             )
@@ -86,8 +97,27 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "install": output = {"status": install_git_hook(args.force)}
         elif args.command == "pre-commit": pre_commit_check(); output = {"status": "passed"}
         elif args.command == "context":
-            data = context_data(); output = data if args.format == "json" else markdown_context(data)
+            data = context_data()
+            if args.view == "full":
+                output = data if args.format == "json" else markdown_context(data)
+            else:
+                data = brief_context(data) if args.view == "brief" else verification_view(data)
+                output = data if args.format == "json" else markdown_view(data, view=args.view)
         elif args.command == "diagnostics": output = diagnostics_command(args)
+        elif args.command == "review":
+            from . import commands as runtime
+            from .review_commands import show
+            output = show(runtime, args)
+        elif args.command == "report":
+            from . import commands as runtime
+            from .reporting import report
+            output = report(runtime, args)
+            if args.verify:
+                from ...infrastructure.system.automatic_verification import run_missing
+                record = read_active()
+                verification = task_finish_preflight(record)["verification"]
+                verification["problems"] = [item for item in verification["problems"] if item["suite"] == "fast"]
+                output["logs"] = run_missing(root, record["task_id"], config(), verification)
         elif args.command == "state": output = state_update(args)
         elif args.command == "project": output = project_command(args)
         elif args.command == "stage": output = stage_command(args)
@@ -98,6 +128,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "catalog": output = catalog_command(args, catalog_runtime())
         elif args.command == "db": output = db_command(args)
         else: output = finish_task(args)
+        if args.command == "start" and isinstance(output, dict):
+            review_summary = context_data().get("review_summary") or {}
+            if review_summary.get("pending_count"):
+                output["review_summary"] = review_summary
+        if getattr(args, "compact", False) and isinstance(output, dict) and not getattr(args, "check_only", False):
+            output = compact_result(output, task_id=receipt_task_id)
+            if getattr(args, "next", None) and "next_actions" not in output:
+                output["next_actions"] = args.next
         if isinstance(output, str): print(output, end="")
         else: print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0
@@ -128,7 +166,13 @@ def main(argv: list[str] | None = None) -> int:
             message = format_failure(record)
         except Exception:
             message = str(exc)
-        print(message, file=os.sys.stderr)
+        if "--compact" in expanded_args or "--compact" in raw_args:
+            from .failure_output import failure_result
+            from . import commands as runtime
+            print(json.dumps(failure_result(runtime, exc, locals().get("record"), root, before_events),
+                             ensure_ascii=False, indent=2), file=os.sys.stderr)
+        else:
+            print(message, file=os.sys.stderr)
         return 1
     finally:
         if writer_context is not None:

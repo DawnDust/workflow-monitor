@@ -44,7 +44,14 @@ def assemble_finish_preflight(
         and event.get("payload", {}).get("stage_id") == linked_stage_id
         for event in events
     )
+    if stage_review_result is None and linked_stage_id:
+        reviews = [event for event in events if event["event_type"] == "review.recorded"
+                   and event["branch"] == record["git"]["branch"]
+                   and event["payload"].get("object") == "stage:" + linked_stage_id]
+        if reviews and reviews[-1]["payload"].get("result") in {"updated", "reviewed-no-change"}:
+            stage_review_result = reviews[-1]["payload"]["result"]
     facts = {
+        "recovery_required": bool(record.get("pending_report") or record.get("pending_start")),
         "checkpoint_status": checkpoint_status,
         "verification": verification,
         "health_errors": health_errors or [],

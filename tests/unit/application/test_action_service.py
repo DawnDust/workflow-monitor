@@ -263,9 +263,9 @@ class WorkflowActionTests(unittest.TestCase):
             )
             blocked = service.availability("task.finish", fields, force=True)
             codes = {item.code for item in blocked.blockers}
-            self.assertTrue({
-                "HEALTH_CHECK_FAILED", "WRITER_CONFIRMATION_REQUIRED", "WRITE_ACTIVITY_RECENT",
-            }.issubset(codes))
+            self.assertIn("HEALTH_CHECK_FAILED", codes)
+            self.assertNotIn("WRITER_CONFIRMATION_REQUIRED", codes)
+            self.assertNotIn("WRITE_ACTIVITY_RECENT", codes)
 
     def test_update_preflight_explains_main_dirty_sync_and_frozen_requirements(self) -> None:
         state = stable_state(
