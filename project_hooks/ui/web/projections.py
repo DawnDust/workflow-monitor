@@ -7,53 +7,7 @@ without a browser or WebView2 runtime.
 
 from __future__ import annotations
 
-from collections import defaultdict
-
 from .glossary import glossary_snapshot
-
-
-EVIDENCE_RELATIONS = frozenset({"supports", "validates", "contradicts"})
-RESULT_KINDS = frozenset({"output", "report"})
-
-
-def evidence_matrix(snapshot: dict) -> dict:
-    """Project only explicit evidence; missing cells deliberately mean unregistered."""
-    items = {item["item_id"]: item for item in snapshot.get("catalog_items") or []}
-    theories = [item for item in items.values() if item.get("kind") == "theory"]
-    columns = {"paper": [], "experiment": [], "result": []}
-    for item in items.values():
-        kind = item.get("kind")
-        if kind == "literature":
-            columns["paper"].append(item)
-        elif kind == "simulation":
-            columns["experiment"].append(item)
-        elif kind in RESULT_KINDS:
-            columns["result"].append(item)
-
-    evidence: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for relation in snapshot.get("catalog_relations") or []:
-        relation_type = relation.get("relation_type")
-        if relation_type not in EVIDENCE_RELATIONS:
-            continue
-        source, target = relation.get("source_id"), relation.get("target_id")
-        if source in items and target in items:
-            evidence[(source, target)].append(relation)
-            evidence[(target, source)].append(relation)
-
-    rows = []
-    for theory in theories:
-        cells = {}
-        for column, candidates in columns.items():
-            relations = [rel for candidate in candidates
-                         for rel in evidence.get((theory["item_id"], candidate["item_id"]), [])]
-            cells[column] = {
-                "status": "registered" if relations else "unregistered",
-                "label": ", ".join(sorted({rel["relation_type"] for rel in relations}))
-                         if relations else "未登记",
-                "relations": relations,
-            }
-        rows.append({"theory": theory, "cells": cells})
-    return {"columns": columns, "rows": rows, "empty_label": "未登记"}
 
 
 def _stage_for_time(stages: list[dict], occurred_at: object) -> dict | None:
@@ -161,7 +115,6 @@ def web_snapshot(snapshot: dict) -> dict:
     projected = dict(snapshot)
     projected["research"] = {
         "stages": research_stages(snapshot),
-        "evidence_matrix": evidence_matrix(snapshot),
     }
     projected["status_glossary"] = glossary_snapshot()
     projected["search_index"] = list(snapshot.get("search_index") or [])

@@ -20,16 +20,20 @@ def inventory(root, branch, events, context, catalog_items, catalog_relations, c
     attempts = {e["payload"].get("attempt_id"): e["payload"] for e in events if e["event_type"] == "attempt.started"}
 
     def obj(key, title=None):
+        review_kind = "stage" if key.startswith("stage:") else ("attempt" if key.startswith("attempt:") else "resource")
         return objects.setdefault(key, {"object": key, "branch": branch, "title": title or key,
             "status": "active", "sources": {}, "source_details": {}, "issues": [], "task_ids": [],
-            "last_changed_at": None})
+            "review_kind": review_kind, "usage": "formal", "last_changed_at": None,
+            "last_activity_at": None, "legacy_reviewed_at": None})
 
-    def add(target, event):
+    def add(target, event, *, content=True):
         key = "event:" + event["event_id"]
         target["sources"][key] = digest(event["payload"])
         target["source_details"][key] = {"type": event["event_type"], "at": event["occurred_at"],
                                          "payload": event["payload"]}
-        target["last_changed_at"] = event["occurred_at"]
+        target["last_activity_at"] = event["occurred_at"]
+        if content:
+            target["last_changed_at"] = event["occurred_at"]
         if event.get("task_id"):
             target["task_ids"].append(event["task_id"])
 
@@ -52,11 +56,14 @@ def inventory(root, branch, events, context, catalog_items, catalog_relations, c
             add(target, event)
             sid = initial.get("stage_id")
             if sid:
-                add(obj("stage:" + sid), event)
+                add(obj("stage:" + sid), event, content=False)
         if kind == "task.finished":
             sid = (payload.get("stage_review") or {}).get("stage_id")
             if sid:
-                add(obj("stage:" + sid), event)
+                target = obj("stage:" + sid)
+                target["last_activity_at"] = event["occurred_at"]
+                if (payload.get("stage_review") or {}).get("result") in {"updated", "reviewed-no-change"}:
+                    target["legacy_reviewed_at"] = event["occurred_at"]
 
     registered = {}
     for item in catalog_items:
@@ -69,6 +76,10 @@ def inventory(root, branch, events, context, catalog_items, catalog_relations, c
         if item.get("path"):
             registered[item["path"]] = item
         metadata = item.get("metadata") or {}
+        tags = {str(tag).lower() for tag in item.get("tags", [])}
+        declared_usage = metadata.get("review_usage")
+        target["usage"] = declared_usage if declared_usage in {"formal", "reference", "example"} else (
+            "example" if tags & {"example", "demo"} else "reference" if tags & {"reference", "stable-reference"} else "formal")
         target["stage_id"] = metadata.get("stage_id")
         target["attempt_id"] = metadata.get("attempt_id")
     for relation in catalog_relations:
@@ -143,8 +154,8 @@ def inventory(root, branch, events, context, catalog_items, catalog_relations, c
             if parent:
                 parent["sources"].update(target["sources"])
                 parent["source_details"].update(target["source_details"])
-                if parse_date(parent["last_changed_at"]) < parse_date(target["last_changed_at"]):
-                    parent["last_changed_at"] = target["last_changed_at"]
+                if parse_date(parent["last_activity_at"]) < parse_date(target["last_changed_at"]):
+                    parent["last_activity_at"] = target["last_changed_at"]
     for sid in context.get("stage_version_conflicts", []):
         if "stage:" + sid in objects:
             objects["stage:" + sid]["issues"].append("本地分支存在判断分歧；请查看 stage list --all-branches")
@@ -180,11 +191,34 @@ def inventory(root, branch, events, context, catalog_items, catalog_relations, c
     return results
 
 
-def summary(items):
+def summary(items, events=(), branch=None):
+    if branch is not None:
+        items = [item for item in items if not item.get("owner_branch") or item["owner_branch"] == branch]
     pending = [item for item in items if item["pending"]]
     related = [item for item in pending if item["related"]]
-    return {"pending_count": len(pending), "related_count": len(related),
-            "items": [{key: item[key] for key in ("object", "title", "reasons", "last_changed_at", "last_reviewed_at", "last_verified_at")}
+    research_items = [item for item in items if item.get("usage") != "example"]
+    changed_at = max((item["last_changed_at"] for item in research_items
+                      if item.get("last_changed_at")), key=parse_date, default=None)
+    terminal = {"paused", "completed", "cancelled", "archived", "validated", "negative", "inconclusive"}
+    reviewable = [item for item in research_items if item.get("status") not in terminal or item.get("issues")]
+    completed = [event for event in events if event["event_type"] == "review.coverage_completed"
+                 and (branch is None or event["branch"] == branch)]
+    overall_reviewed_at = completed[-1]["occurred_at"] if completed else None
+    hard = [item for item in pending if "integrity_issue" in item.get("reason_codes", [])]
+    deferred = [item for item in items if item.get("deferred")]
+    status = "action_required" if hard else "review_suggested" if pending else "normal"
+    counts = {kind: sum(item.get("review_kind") == kind for item in pending)
+              for kind in ("stage", "attempt", "resource")}
+    return {"status": status, "hard_issue_count": len(hard),
+            "deferred_count": len(deferred),
+            "deferred_until": min((item["deferred_until"] for item in deferred
+                                   if item.get("deferred_until") and item["deferred_until"] != "resume"),
+                                  key=parse_date, default=None),
+            "reviewable_count": len(reviewable),
+            "pending_count": len(pending), "related_count": len(related),
+            "pending_by_kind": counts, "last_research_changed_at": changed_at,
+            "last_overall_reviewed_at": overall_reviewed_at,
+            "items": [{key: item.get(key) for key in ("object", "title", "review_kind", "usage", "reasons", "reason_codes", "last_changed_at", "last_activity_at", "last_reviewed_at", "last_verified_at")}
                       for item in related], "next_action": "review list --all" if pending else None}
 
 

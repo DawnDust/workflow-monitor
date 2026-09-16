@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 from PIL import Image
+from project_hooks import __version__
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -94,7 +95,7 @@ class PublicReleaseSurfaceTests(unittest.TestCase):
         self.assertNotIn("project-maintenance-template", combined)
         headings = re.findall(r"^## (.+)$", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), re.M)
         self.assertEqual(headings.count("Unreleased"), 1)
-        self.assertTrue(any(item.startswith("2.0.0") for item in headings))
+        self.assertTrue(any(item.startswith(__version__) for item in headings))
         self.assertIn("1.6.1", headings)
 
     def test_release_workflow_uses_pinned_attestations_and_sbom(self) -> None:

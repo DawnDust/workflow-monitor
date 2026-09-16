@@ -103,13 +103,16 @@ def report(c, args):
         fresh = [item for item in evidence if item not in previous_evidence]
         if fresh:
             checkpoint["evidence"] = fresh
-    from .review_commands import prepare
+    from .review_commands import prepare, coverage_completion
     events.extend(prepare(c, record, reviews, events))
     actual_fields = {name for name in checkpoint if name != "source_event_id"}
     if not events and not attempt_changed and not actual_fields and prior and prior["payload"].get("workspace_fingerprint") == fingerprint:
         return {"task_id": record["task_id"], "result": "unchanged", "changed_count": 0}
     checkpoint.update(workspace_fingerprint=fingerprint, report_signature=signature)
     events.append(c.emit("task.checkpointed", branch=branch, task_id=record["task_id"], payload=checkpoint))
+    completed = coverage_completion(c, record, events)
+    if completed:
+        events.append(completed)
     # Persist pending IDs in the existing recovery sidecar before the event batch.
     durable = c._base_active_record(record)
     durable["pending_report"] = events

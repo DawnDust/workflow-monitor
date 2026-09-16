@@ -9,6 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
+from .. import __version__
 from .ports import FailureRecorder, MutationLockFactory
 from ..core.actions import *
 from ..core.actions import _normalized_fields
@@ -28,7 +29,7 @@ class WorkflowActionService:
         failure_recorder: FailureRecorder,
         failure_formatter: Callable[[dict[str, Any]], str],
         execution_mode_provider: Callable[[], str],
-        application_version: str = "2.0.0",
+        application_version: str = __version__,
         schema_version: int = 5,
     ):
         self.project_root = project_root.resolve()

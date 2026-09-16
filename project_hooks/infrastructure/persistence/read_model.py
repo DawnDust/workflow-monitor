@@ -812,7 +812,7 @@ class MaintenanceReadModel:
         settings = json.loads((self.repo_path / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
         items = inventory(self.repo_path, context["branch"], events, context, catalog_items, catalog_relations, settings)
         context["reviews"] = items
-        context["review_summary"] = summary(items)
+        context["review_summary"] = summary(items, events, context["branch"])
         # Superseded by explicit coverage, not unrelated task completion time.
         context["stage_freshness_warning"] = None
 

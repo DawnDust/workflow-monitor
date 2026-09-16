@@ -42,16 +42,25 @@ class ReviewIntegrationTests(unittest.TestCase):
         item = self.show_review()
         data = dict(reviews=[dict(token=item["token"], result="reviewed-no-change")])
         self.submit("report", data)
+        coverage = [e for e in self.events() if e["event_type"] == "review.coverage_completed"]
+        self.assertEqual(len(coverage), 1)
+        reviewed_at = json.loads(self.hooks("context", "--format", "json").stdout)["review_summary"]["last_overall_reviewed_at"]
+        self.assertEqual(reviewed_at, coverage[0]["occurred_at"])
         count = len(self.events())
         self.submit("report", data)
         self.assertEqual(len(self.events()), count)
         self.assertFalse(self.show_review()["pending"])
+        self.hooks("stage", "update", "chapter", "--summary", "New information")
+        summary = json.loads(self.hooks("context", "--format", "json").stdout)["review_summary"]
+        self.assertEqual(summary["last_overall_reviewed_at"], reviewed_at)
+        self.assertEqual(summary["status"], "review_suggested")
 
-    def test_new_change_between_read_and_report_remains_pending(self):
+    def test_new_change_between_read_and_report_requires_refresh(self):
         self.create_stage()
         token = self.show_review()["token"]
         self.hooks("stage", "update", "chapter", "--summary", "New information")
-        self.submit("report", dict(reviews=[dict(token=token, result="reviewed-no-change")]))
+        result = self.submit("report", dict(reviews=[dict(token=token, result="reviewed-no-change")]), check=False)
+        self.assertNotEqual(result.returncode, 0)
         self.assertTrue(self.show_review()["pending"])
 
     def test_deferred_does_not_count_as_review(self):
@@ -111,6 +120,7 @@ class ReviewIntegrationTests(unittest.TestCase):
                                 conclusion="not supported", evidence=["measurement"], stage_review="updated"))
         self.assertFalse(self.show_review()["pending"])
         self.assertEqual(len([e for e in self.events() if e["event_type"] == "review.recorded"]), 1)
+        self.assertEqual(len([e for e in self.events() if e["event_type"] == "review.coverage_completed"]), 1)
         self.assertEqual(self.events()[-1]["event_type"], "task.finished")
 
     def test_resource_changes_sparks_and_original_gate(self):
@@ -125,6 +135,23 @@ class ReviewIntegrationTests(unittest.TestCase):
         item = json.loads(self.hooks("review", "show", "path:resources/theory/proof.md").stdout)
         self.submit("report", dict(reviews=[dict(token=item["token"], result="deferred", reason="Later")]))
         self.assertNotEqual(self.hooks("check", check=False).returncode, 0)
+
+    def test_review_list_categories_and_filter(self):
+        self.create_stage()
+        listing = json.loads(self.hooks("review", "list", "--all").stdout)["items"]
+        stage = next(item for item in listing if item["object"] == "stage:chapter")
+        self.assertEqual(stage["review_kind"], "stage")
+        filtered = json.loads(self.hooks("review", "list", "--all", "--kind", "stage").stdout)["items"]
+        self.assertTrue(filtered)
+        self.assertTrue(all(item["review_kind"] == "stage" for item in filtered))
+
+    def test_default_show_is_bounded_and_full_is_explicit(self):
+        self.create_stage()
+        brief = self.show_review()
+        full = json.loads(self.hooks("review", "show", "stage:chapter", "--full").stdout)
+        self.assertLessEqual(brief["details_shown"], 8)
+        self.assertNotIn("changes", brief)
+        self.assertIn("changes", full)
 
     def test_review_projection_rebuild_equivalence(self):
         self.create_stage()

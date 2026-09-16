@@ -41,7 +41,7 @@ def research_attention(context: dict, catalog_items: list[dict],
             "EXPLICIT_EVIDENCE_CONTRADICTION",
             f"存在 {len(contradictions)} 条已登记的矛盾证据关系，请复核相关判断。",
             f"{len(contradictions)} explicit contradictory evidence relation(s) need review.",
-            "catalog_relation", [item.get("relation_id") for item in contradictions], "evidence-matrix",
+            "catalog_relation", [item.get("relation_id") for item in contradictions], "resources",
         ))
     stage = context.get("current_stage") or {}
     if stage and _present(stage.get("blocker")):

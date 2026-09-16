@@ -6,19 +6,82 @@ from ...core.events import resolve_timezone
 from ...core.reviews import decode_token, parse_time
 
 
+def coverage_completion(c, record, pending):
+    """Append an audit boundary only when this batch completes exact coverage."""
+    from ...core.reviews import digest, project_review
+    from ...core.events import resolve_timezone
+    if not any(e["event_type"] == "review.recorded" and e["payload"].get("result") != "deferred"
+               for e in pending):
+        return None
+    branch = record["git"]["branch"]
+    history = c.load_events(c.journal_path())
+    items = c.context_data().get("reviews", [])
+    now = datetime.now(resolve_timezone(c.config()["timezone"])).replace(tzinfo=None)
+    reviews = [e for e in history + pending if e["event_type"] == "review.recorded"]
+    attempt_stages = {item["object"].split(":", 1)[1]: item.get("stage_id")
+                      for item in items if item.get("review_kind") == "attempt"}
+    terminal = {"paused", "completed", "cancelled", "archived", "validated", "negative", "inconclusive"}
+    scope = {}
+    for original in items:
+        if original.get("owner_branch") and original["owner_branch"] != branch:
+            continue
+        item = {**original, "sources": dict(original["sources"])}
+        for event in pending:
+            kind, payload = event["event_type"], event["payload"]
+            applies = (kind.startswith("stage.") and item["object"] == "stage:" + str(payload.get("stage_id"))
+                       or kind.startswith("attempt.") and (item["object"] == "attempt:" + str(payload.get("attempt_id"))
+                       or kind.startswith("attempt.") and item.get("review_kind") == "stage"
+                       and item["object"] == "stage:" + str(attempt_stages.get(payload.get("attempt_id")))))
+            if applies:
+                item["sources"]["event:" + event["event_id"]] = digest(payload)
+                if kind.startswith("stage."):
+                    item["status"] = payload.get("status", item.get("status"))
+                elif item["review_kind"] == "attempt":
+                    item["status"] = payload.get("state", item.get("status"))
+        result = project_review(item, reviews, now, c.config().get("review_interval_days", 14))
+        if result["pending"] or result["deferred"] or item.get("issues"):
+            return None
+        if item.get("usage") == "example" or item.get("status") in terminal:
+            continue
+        if not result["exact_reviewed_at"]:
+            return None
+        scope[item["object"]] = digest(item["sources"])
+    if not scope:
+        return None
+    # A repeated submission of the same exact source versions is one boundary.
+    fingerprint = digest(scope)
+    prior = [e for e in history if e["event_type"] == "review.coverage_completed" and e["branch"] == branch]
+    if prior and prior[-1]["payload"].get("fingerprint") == fingerprint:
+        return None
+    return c.emit("review.coverage_completed", branch=branch, task_id=record["task_id"],
+                  payload={"fingerprint": fingerprint, "scope": scope, "count": len(scope)})
+
+
 def show(c, args):
     items = c.context_data().get("reviews", [])
     if args.review_command == "show":
         item = next((i for i in items if i["object"] == args.object), None)
         if item is None:
             raise c.WorkflowError("找不到审阅对象；请运行 review list --all")
-        # Include the actual delta, not just an opaque receipt token.
-        result = {k: v for k, v in item.items() if k not in {"sources", "source_details", "task_ids"}}
-        keys = item["changes"] or list(item["sources"])
-        result["details"] = {key: item["source_details"].get(key, {"version": item["sources"][key]}) for key in keys}
+        # Default output is bounded; full history remains explicitly available.
+        hidden = {"sources", "source_details", "task_ids"} | (set() if args.full else {"changes"})
+        result = {k: v for k, v in item.items() if k not in hidden}
+        keys = list(item["sources"]) if args.full else item["changes"]
+        selected = keys if args.full else keys[-8:]
+        result["change_count"] = len(item["changes"])
+        result["details"] = {key: item["source_details"].get(key, {"version": item["sources"][key]}) for key in selected}
+        result["detail_count"] = len(keys)
+        result["details_shown"] = len(selected)
+        result["details_truncated"] = len(selected) < len(keys)
+        if result["details_truncated"]:
+            result["full_action"] = f"review show {item['object']} --full"
+        if not keys:
+            result["message"] = "当前范围没有未审阅变化"
         return result
-    return {"items": [{k: item[k] for k in ("object", "title", "pending", "deferred", "reasons", "last_reviewed_at")}
-                       for item in items if args.all or (item["related"] and item["pending"])],
+    kind = getattr(args, "kind", None)
+    return {"items": [{k: item.get(k) for k in ("object", "title", "review_kind", "usage", "pending", "deferred", "reasons", "last_changed_at", "last_reviewed_at")}
+                       for item in items if (not kind or item.get("review_kind") == kind)
+                       and (args.all or (item["related"] and item["pending"]))],
             "next_action": "review show <object>"}
 
 
@@ -46,7 +109,12 @@ def prepare(c, record, submissions, pending):
             raise c.WorkflowError("审阅范围不属于当前分支或对象已不存在；请重新 review show")
         if item.get("owner_branch") and item["owner_branch"] != snap["branch"]:
             raise c.WorkflowError("其他分支的探索只能查看；请在其所属分支审阅")
-        for key, value in snap["sources"].items():
+        snapshot_sources = snap.get("sources")
+        if snapshot_sources is None:
+            if digest(item["sources"]) != snap.get("digest"):
+                raise c.WorkflowError("审阅范围已变化；请重新 review show")
+            snapshot_sources = dict(item["sources"])
+        for key, value in snapshot_sources.items():
             if key.startswith("event:"):
                 source = next((e for e in history if e["event_id"] == key[6:]), None)
                 if source is None or digest(source["payload"]) != value or key not in item["sources"]:
@@ -57,7 +125,8 @@ def prepare(c, record, submissions, pending):
         result = submission.get("result")
         if result not in {"updated", "reviewed-no-change", "deferred"}:
             raise c.WorkflowError("审阅结果必须为 updated/reviewed-no-change/deferred")
-        payload = {**snap, "result": result}
+        payload = {"object": snap["object"], "branch": snap["branch"],
+                   "sources": snapshot_sources, "result": result}
         previous = [e for e in history + prepared if e["event_type"] == "review.recorded"
                     and e["branch"] == snap["branch"] and e["payload"].get("object") == snap["object"]]
         if result == "updated":
@@ -67,10 +136,10 @@ def prepare(c, record, submissions, pending):
                           else "resource:" + source["item_id"] if event["event_type"].startswith("catalog.") and source.get("item_id") else None)
                 if target == snap["object"]:
                     # The submitted edit is known to the reviewer; concurrent external edits are not.
-                    snap["sources"]["event:" + event["event_id"]] = digest(source)
+                    snapshot_sources["event:" + event["event_id"]] = digest(source)
             valid = {e["event_id"] for e in history + pending if e.get("task_id") == record["task_id"]
                      and e["event_type"].startswith({"stage": "stage.", "attempt": "attempt.", "resource": "catalog."}.get(snap["object"].split(":", 1)[0], "never."))
-                     and ("event:" + e["event_id"] in item["sources"] or "event:" + e["event_id"] in snap["sources"])}
+                     and ("event:" + e["event_id"] in item["sources"] or "event:" + e["event_id"] in snapshot_sources)}
             evidence = submission.get("evidence", sorted(valid))
             if not isinstance(evidence, list) or not evidence or not all(isinstance(i, str) for i in evidence) or not set(evidence) <= valid:
                 raise c.WorkflowError("updated 的证据不是本任务对应对象的修改事件")
@@ -81,7 +150,7 @@ def prepare(c, record, submissions, pending):
             until = submission.get("until") or (now + timedelta(days=14)).isoformat(timespec="seconds")
             if not submission.get("until") and previous:
                 last = previous[-1]["payload"]
-                if (last.get("result") == "deferred" and last.get("sources") == snap["sources"]
+                if (last.get("result") == "deferred" and last.get("sources") == snapshot_sources
                         and last.get("reason") == submission["reason"].strip()
                         and parse_time(last.get("until")) and parse_time(last["until"]) > now):
                     until = last["until"]

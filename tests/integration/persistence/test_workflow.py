@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from project_hooks import __version__
 from project_hooks.ui.cli import commands as cli_module
 from project_hooks.infrastructure.persistence.active_task import load_active_state
 from project_hooks.infrastructure.persistence.database import repository
@@ -46,6 +47,11 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         cls.seed_root.mkdir()
         for name in (".codex", ".githooks", "maintenance", "project_hooks"):
             shutil.copytree(SOURCE_ROOT / name, cls.seed_root / name, ignore=shutil.ignore_patterns("__pycache__"))
+        installation = cls.seed_root / ".codex/project-maintenance-installation.json"
+        if installation.is_file():
+            installed = json.loads(installation.read_text(encoding="utf-8"))
+            installed["application_version"] = __version__
+            installation.write_text(json.dumps(installed), encoding="utf-8")
         for name in ("source", "data", "theory", "analysis", "outputs", "others", "reports", "sparks"):
             directory = cls.seed_root / "resources" / name
             directory.mkdir(parents=True)

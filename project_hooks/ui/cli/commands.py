@@ -1463,6 +1463,7 @@ def finish_task(args: argparse.Namespace) -> dict:
         "verification": verification["accepted"], "stage_review": review,
     }))
     _fixed_finish_event_ids(args.task_id, events)
+    acknowledgement = None
     if review.get("stage_id"):
         from ...core.reviews import digest
         key = "stage:" + review["stage_id"]
@@ -1479,6 +1480,16 @@ def finish_task(args: argparse.Namespace) -> dict:
                 for event in events:
                     if event["event_type"] in {"attempt.state_changed", "task.finished"}:
                         sources["event:" + event["event_id"]] = digest(event["payload"])
+    from .review_commands import coverage_completion
+    completed = coverage_completion(runtime, record, events)
+    if completed:
+        old_finish_id = events[-1]["event_id"]
+        events.insert(len(events) - 1, completed)
+        _fixed_finish_event_ids(args.task_id, events)
+        if acknowledgement is not None:
+            sources = acknowledgement["payload"]["sources"]
+            sources.pop("event:" + old_finish_id, None)
+            sources["event:" + events[-1]["event_id"]] = digest(events[-1]["payload"])
     finished_at = timestamp()
     finish_values = {
         "result": args.result,
