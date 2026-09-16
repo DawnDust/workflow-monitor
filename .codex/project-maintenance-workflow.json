@@ -7,7 +7,7 @@
   "core_read_order": [
     "maintenance/CORE.md"
   ],
-  "context_command": ".\\workflow-monitor.exe context --format markdown",
+  "context_command": ".\\workflow-monitor.exe context --view brief --format markdown",
   "maintenance_store": {
     "engine": "sqlite",
     "database": ".project_hooks/maintenance.sqlite3",
@@ -16,13 +16,52 @@
   },
   "branch_policy": {
     "default_branch": "main",
-    "exploration_types": ["research", "experiment", "sandbox"],
+    "exploration_types": [
+      "research",
+      "experiment",
+      "sandbox"
+    ],
     "archive_prefix": "archive",
     "success_integration": "squash_pr",
     "require_user_merge_confirmation": true
   },
   "git_auto_commit": {
     "enabled": true,
-    "eligible_task_sizes": ["large"]
-  }
+    "eligible_task_sizes": [
+      "large"
+    ]
+  },
+  "verification_commands": {
+    "fast": {
+      "argv": [
+        "py",
+        "-3.12",
+        "scripts/run_tests.py",
+        "fast"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1800
+    },
+    "full": {
+      "argv": [
+        "py",
+        "-3.12",
+        "scripts/run_tests.py",
+        "full"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1800
+    },
+    "release": {
+      "argv": [
+        "py",
+        "-3.12",
+        "scripts/run_tests.py",
+        "release"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1800
+    }
+  },
+  "review_interval_days": 14
 }

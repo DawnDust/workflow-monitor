@@ -16,14 +16,16 @@ def finish_preflight(state: dict) -> dict:
     """Evaluate objective finish gates from already collected project facts."""
     blockers: list[dict] = []
     warnings: list[dict] = []
+    if state.get("recovery_required"):
+        blockers.append(_preflight_item("RECOVERY_REQUIRED", "前次记录尚未完成", "task recover"))
     checkpoint_status = state.get("checkpoint_status") or "missing"
     if checkpoint_status == "missing":
         blockers.append(_preflight_item(
-            "CHECKPOINT_REQUIRED", "结束前必须记录 task checkpoint", "state update",
+            "CHECKPOINT_REQUIRED", "结束前必须记录 task checkpoint", "report --current-step ... 或 end --current-step ...",
         ))
     elif checkpoint_status == "stale":
         blockers.append(_preflight_item(
-            "CHECKPOINT_STALE", "checkpoint 后工作内容又发生变化", "state update",
+            "CHECKPOINT_STALE", "checkpoint 后工作内容又发生变化", "report --current-step ... 或 end --current-step ...",
         ))
     elif checkpoint_status == "legacy-unknown":
         warnings.append(_preflight_item(
@@ -87,6 +89,8 @@ def lifecycle_step(state: dict) -> dict:
             return {"key": "completed", "label": "已完成", "index": 7, "needs_recovery": False}
         return {"key": "idle", "label": "未开始", "index": 0, "needs_recovery": False}
     phase = sidecar.get("phase") or "active"
+    if (sidecar.get("record") or {}).get("pending_report"):
+        return {"key": "working", "label": "记录待恢复", "index": 2, "needs_recovery": True}
     if phase == "starting":
         return {"key": "starting", "label": "周期已建立", "index": 1, "needs_recovery": True}
     if phase == "finishing":
@@ -108,7 +112,7 @@ def lifecycle_step(state: dict) -> dict:
             "warning": {
                 "code": "CHECKPOINT_STALE",
                 "message": "Checkpoint 已过期，请重新记录进展",
-                "next_action": "state update",
+                "next_action": "report --current-step ... 或 end --current-step ...",
             },
         }
     if not state.get("worktree_quiet", True):

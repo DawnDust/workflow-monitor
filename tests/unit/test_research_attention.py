@@ -32,6 +32,7 @@ class ResearchAttentionTests(unittest.TestCase):
         ])
         self.assertEqual(signals[0]["source_ids"], ["missing-1", "missing-2"])
         self.assertEqual(signals[1]["source_ids"], ["r1"])
+        self.assertEqual(signals[1]["target"], "resources")
         self.assertNotIn("ACTIVE_EXPLORATION_CONTINUITY_MISSING", [item["code"] for item in signals])
 
     def test_empty_blocker_values_and_unregistered_evidence_do_not_warn(self) -> None:

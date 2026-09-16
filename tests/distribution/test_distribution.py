@@ -456,15 +456,18 @@ class DistributionTests(unittest.TestCase):
         config_path = self.root / ".codex/project-maintenance-workflow.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
         config["core_read_order"] = ["maintenance/README.md"]
+        config["context_command"] = ".\\workflow-monitor.exe context --format markdown"
         config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self.commit()
         apply_project_update(self.root, CURRENT_VERSION)
         migrated = json.loads(config_path.read_text(encoding="utf-8"))
         self.assertEqual(migrated["core_read_order"], ["maintenance/CORE.md"])
+        self.assertEqual(migrated["context_command"], ".\\workflow-monitor.exe context --view brief --format markdown")
 
         self.commit("migrate default core order")
         custom = json.loads(config_path.read_text(encoding="utf-8"))
         custom["core_read_order"] = ["custom/RULES.md", "maintenance/README.md", "custom/RULES.md"]
+        custom["context_command"] = "custom-context --format json"
         (self.root / "custom").mkdir()
         (self.root / "custom/RULES.md").write_text("# Rules\n", encoding="utf-8")
         config_path.write_text(json.dumps(custom, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -472,6 +475,7 @@ class DistributionTests(unittest.TestCase):
         apply_project_update(self.root, CURRENT_VERSION)
         preserved = json.loads(config_path.read_text(encoding="utf-8"))["core_read_order"]
         self.assertEqual(preserved, ["maintenance/CORE.md", "custom/RULES.md", "maintenance/README.md"])
+        self.assertEqual(json.loads(config_path.read_text(encoding="utf-8"))["context_command"], "custom-context --format json")
 
     def test_failed_migration_restores_managed_files(self) -> None:
         self.init()

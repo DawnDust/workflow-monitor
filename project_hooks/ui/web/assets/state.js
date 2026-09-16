@@ -16,10 +16,6 @@ export function filterRecords(records, query, fields = []) {
     text(record?.[field], "").toLocaleLowerCase().includes(needle)));
 }
 
-export function evidenceLabel(cell) {
-  return cell?.status === "registered" ? text(cell.label) : "未登记";
-}
-
 export function paginate(records, requestedPage, pageSize) {
   const pages = Math.max(1, Math.ceil(records.length / pageSize));
   const page = Math.min(pages, Math.max(1, Number(requestedPage) || 1));

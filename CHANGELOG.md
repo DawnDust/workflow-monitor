@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 2.0.1 - 2026-09-16
+
+- Reduced Codex workflow overhead with brief and verification context views, compact receipts, automatic task IDs, and fewer duplicate checkpoints.
+- Added change-based review reminders for Research Chapters, explorations, and resources, with computed Dashboard status and durable complete-review records.
+- Removed the Evidence Matrix page and its dedicated projection while keeping registered relationships and contradiction reminders in the Resources view.
+- Refined project instructions and templates so routine maintenance reads only relevant guidance and retains the existing verification and authorization gates.
+
 ## 2.0.0 - 2026-08-23
 
 - Added up to three deterministic, sourced Research Attention signals to AI Context and the read-only Dashboard Overview without adding persistence or model calls.

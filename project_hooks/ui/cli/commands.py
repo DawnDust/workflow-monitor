@@ -123,22 +123,26 @@ STATE_ARGUMENTS = (
     "goal", "current_step", "judgment", "breakpoint", "blocker", "status", "main_goal_version",
 )
 DAILY_HELP = """\
-usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,end,diagnostics} ...
+usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,report,end,diagnostics} ...
 
-项目内维护入口。无参数运行时显示行动概览。
+项目内维护入口。冻结 EXE 无参数启动桌面界面；Codex 使用显式子命令。
 
 日常命令:
-  context     读取完整动态上下文
+  context     读取上下文；Codex 使用 --view brief，门禁使用 --view verification
   start       开始任务生命周期
+  report      按需填报进展、证据与审阅结果
   end         完成任务生命周期
   diagnostics 查看或导出本地脱敏诊断
+
+Codex 常用:
+  context --view brief --format markdown
+  start --kind code --scope "目标" --acceptance "验收" --compact
+  end --result completed --note "结果" --current-step "完成步骤" --compact
+  start/end 的任务 ID 可省略；完整输出和显式 ID 保持兼容。
 
 首次使用:
   .\\workflow-monitor.exe init .
   .\\workflow-monitor.exe check
-
-软件升级:
-  .\\workflow-monitor.exe update
 
 使用 --help-all 查看全部高级命令；使用 <命令> --help 查看参数。
 """
@@ -146,7 +150,7 @@ FULL_HELP = """\
 usage: workflow-monitor [-h] [--help-all] [--project PATH] <command> ...
 
 日常命令:
-  context, start, end, diagnostics
+  context, start, report, end, diagnostics
 
 仓库维护:
   init, install, update, version, check, status, branch-status
@@ -201,7 +205,7 @@ def config() -> dict:
     data.setdefault("timezone", "Asia/Shanghai")
     data.setdefault("state_dir", ".project_hooks")
     data.setdefault("core_read_order", STATIC_READ_ORDER)
-    data.setdefault("context_command", ".\\workflow-monitor.exe context --format markdown")
+    data.setdefault("context_command", ".\\workflow-monitor.exe context --view brief --format markdown")
     data.setdefault("maintenance_store", DEFAULT_STORE)
     data.setdefault("git_auto_commit", {"enabled": True, "eligible_task_sizes": ["large"]})
     data.setdefault("branch_policy", DEFAULT_BRANCH_POLICY)
@@ -221,6 +225,8 @@ def installed_project_version() -> str | None:
 
 
 def command_is_read_only(args: argparse.Namespace) -> bool:
+    if args.command == "review" or (args.command == "end" and getattr(args, "check_only", False)):
+        return True
     if args.command in {None, "version", "context", "check", "status", "branch-status",
                         "history", "explorations", "dashboard", "diagnostics"}:
         return True
@@ -610,7 +616,20 @@ def project_command(args: argparse.Namespace) -> dict | str:
     return payload
 
 
-def stage_command(args: argparse.Namespace) -> dict | list[dict] | str:
+def stage_command(args: argparse.Namespace, pending_events: list | None = None) -> dict | list[dict] | str:
+    if getattr(args, "all_branches", False) or getattr(args, "source", None):
+        model = read_model()
+        model.attempts_across_branches()
+        versions = getattr(model, "_stage_variants", [])
+        if getattr(args, "source", None):
+            versions = [item for item in versions if args.source in item["sources"] and (not args.stage_id or item["stage_id"] == args.stage_id)]
+            if not versions:
+                raise WorkflowError("找不到该来源的篇章；请先运行 stage list --all-branches")
+        if args.format == "json":
+            return versions
+        return "# 篇章分支版本\n" + "\n".join(
+            f"- {item['stage_id']} | {item['version']} | {', '.join(item['sources'])} | {item.get('summary') or item.get('goal', '')}"
+            for item in versions) + "\n"
     connection = database()
     try:
         if args.stage_command == "list":
@@ -657,7 +676,12 @@ def stage_command(args: argparse.Namespace) -> dict | list[dict] | str:
     finally:
         connection.close()
 
-    record, branch = stable_write_context()
+    record = read_active()
+    branch = assert_active_branch(record)
+    if record["git"]["track"] != "stable" and (
+        args.stage_command != "update" or args.stage_id != (record.get("stage") or {}).get("stage_id")
+    ):
+        raise WorkflowError("探索任务只能修订其关联篇章")
     connection = database()
     try:
         if args.stage_command == "start":
@@ -752,7 +776,7 @@ def stage_command(args: argparse.Namespace) -> dict | list[dict] | str:
                                            if status == "paused" else {})}))
         if not events:
             raise WorkflowError("研究篇章内容和状态均未变化")
-        persist(events)
+        (pending_events.extend(events) if pending_events is not None else persist(events))
         return {"stage_id": stage["stage_id"], **requested,
                 **({"revision": revision} if revision is not None else {}),
                 **({"pause_kind": pause_kind, "pause_note": pause_note} if status == "paused" else {}),
@@ -778,6 +802,53 @@ def start_task(args: argparse.Namespace) -> dict:
         requested_track in {"research", "experiment", "sandbox"}
         or classification["kind"] == "exploration"
     )
+    stage_choice = getattr(args, "stage", "auto")
+    new_stage = getattr(args, "new_stage", None)
+    previous_stage = getattr(args, "previous_stage", None)
+    stage_events_payloads = []
+    if stage_choice == "none" or (stage_choice == "auto" and not planned_exploration):
+        linked_stage = None
+    elif stage_choice == "new":
+        if not planned_exploration:
+            raise WorkflowError("组合创建篇章用于探索任务；维护篇章请显式使用 stage start")
+        if not isinstance(new_stage, dict) or set(new_stage) - {"stage_id", "title", "goal", "acceptance"}:
+            raise WorkflowError("new_stage 必须提供 title、goal、acceptance，可选 stage_id")
+        stage_id = new_stage.get("stage_id") or requested_topic
+        if not stage_id or not STAGE_ID_RE.fullmatch(stage_id):
+            raise WorkflowError("新篇章 ID 只能使用小写字母、数字和连字符")
+        if not all(new_stage.get(name) for name in ("title", "goal", "acceptance")) or not isinstance(new_stage["acceptance"], list):
+            raise WorkflowError("新篇章必须填写标题、目标和验收列表")
+        connection = database()
+        try:
+            if connection.stage(stage_id):
+                raise WorkflowError("篇章 ID 已存在，请选择现有篇章")
+            sequence = connection.next_stage_sequence()
+        finally:
+            connection.close()
+        if linked_stage:
+            if (not isinstance(previous_stage, dict) or previous_stage.get("status") != "paused"
+                    or not previous_stage.get("reason")):
+                raise WorkflowError("已有活动篇章；请提供 previous_stage={status: paused, reason: 原因} 或选择当前篇章")
+            stage_events_payloads.append(("stage.state_changed", {
+                "stage_id": linked_stage["stage_id"], "status": "paused", "pause_kind": "interruption",
+                "pause_note": clean_text(previous_stage["reason"], "暂停原因", 1000)}))
+        payload = {"stage_id": stage_id, "sequence": sequence,
+                   "title": clean_text(new_stage["title"], "篇章标题", 100),
+                   "goal": clean_text(new_stage["goal"], "篇章目标", 500),
+                   "acceptance": [clean_text(value, "篇章验收", 1000) for value in new_stage["acceptance"]]}
+        stage_events_payloads.append(("stage.started", payload))
+        linked_stage = payload
+    elif stage_choice != "auto":
+        connection = database()
+        try:
+            selected = connection.stage(stage_choice)
+            if selected is None or selected["status"] != "active":
+                raise WorkflowError("指定篇章不存在或未激活；请选择本分支活动篇章")
+            linked_stage = decode_stage(selected)
+        finally:
+            connection.close()
+    if stage_choice != "new" and (new_stage is not None or previous_stage is not None):
+        raise WorkflowError("new_stage/previous_stage 只能与 --stage new 使用")
     if planned_exploration and not linked_stage and not args.without_stage_reason:
         topic = requested_topic or classification.get("topic") or "research-stage"
         draft = {
@@ -789,7 +860,7 @@ def start_task(args: argparse.Namespace) -> dict:
         raise WorkflowError(
             "PH-S120 needs_input：探索任务需要活动研究篇章；尚未创建分支或事件。\n"
             f"研究篇章草案：{json.dumps(draft, ensure_ascii=False)}\n"
-            "确认后先用短 stable 生命周期执行 stage start；若明确不需要研究篇章，使用 --without-stage-reason <理由>。"
+            "请使用 --stage new --new-stage 填写篇章，或 --stage none --without-stage-reason <理由>。"
         )
     # A stable repair task must be able to start while legacy or unindexed resources exist;
     # the normal check and task end still require the inconsistency to be repaired.
@@ -849,6 +920,8 @@ def start_task(args: argparse.Namespace) -> dict:
         },
     }
     events = [emit("task.started", branch=branch, task_id=args.task_id, payload=record["declaration"])]
+    events.extend(emit(kind, branch=branch, task_id=args.task_id, payload=payload)
+                  for kind, payload in stage_events_payloads)
     if classification["kind"] == "exploration" and created_branch:
         events.append(emit("attempt.started", branch=branch, task_id=args.task_id, payload={
             "attempt_id": args.task_id, "track": classification["track"], "topic": classification["topic"],
@@ -863,18 +936,20 @@ def start_task(args: argparse.Namespace) -> dict:
                 "attempt_id": attempt["attempt_id"], "state": "active",
             }))
     try:
+        record["pending_start"] = events
         save_active(record, phase="starting")
         persist(events)
+        record.pop("pending_start", None)
         save_active(record, phase="active")
-    except Exception:
-        try:
-            delete_active(args.task_id)
-        except Exception:
-            pass
-        if created_branch:
-            run_git(["switch", original_branch], check=False)
-            run_git(["branch", "-D", branch], check=False)
-        raise
+    except Exception as exc:
+        # If the sidecar was never created, there is nothing recoverable to replay.
+        # Only undo our untouched, newly created branch in that narrow case.
+        if created_branch and not (state_dir() / "active-task.json").exists():
+            if current_branch() == branch and not git_dirty_paths() and run_git(["rev-parse", "HEAD"]).stdout.strip() == base_head:
+                run_git(["switch", original_branch])
+                run_git(["branch", "-D", branch])
+                raise WorkflowError(f"启动失败，已恢复原分支：{exc}") from exc
+        raise WorkflowError(f"启动未完成：{exc}；保留恢复记录，请运行 task recover 后继续") from exc
     return {"task_id": args.task_id, "started_at": record["started_at"], "branch": branch, "track": classification["track"]}
 
 
@@ -938,7 +1013,13 @@ def task_recover(args: argparse.Namespace) -> dict:
             "auto_commit": "skipped",
             "reason": args.reason,
         }
+    if record.get("pending_report"):
+        persist(record.pop("pending_report"))
+        save_active(record, state_updated=1)
     if state["phase"] == "starting":
+        if record.get("pending_start"):
+            persist(record.pop("pending_start"))
+            events = load_events(journal_path())
         if not any(
             event.get("task_id") == record["task_id"] and event["event_type"] == "task.started"
             for event in events
@@ -1206,7 +1287,7 @@ def _finish_signature(args: argparse.Namespace) -> str:
         for name in (
             "task_id", "result", "methods_action", "main_goal", "note",
             "evidence", "commit_message", "attempt_state", *STATE_ARGUMENTS, "next",
-            "stage_review",
+            "stage_review", "hypothesis", "progress", "conclusion", "clear", "stage_update", "reviews",
         )
     }
     return hashlib.sha256(canonical_json(values).encode("utf-8")).hexdigest()
@@ -1234,6 +1315,12 @@ def stage_review(record: dict, requested: str | None) -> dict:
     if requested is None and stage_events:
         requested = "updated"
     if requested is None:
+        completed = [e for e in load_events(journal_path()) if e["event_type"] == "review.recorded"
+                     and e.get("task_id") == record["task_id"] and e["branch"] == record["git"]["branch"]
+                     and e["payload"].get("object") == "stage:" + stage_id]
+        if completed and completed[-1]["payload"].get("result") in {"updated", "reviewed-no-change"}:
+            requested = completed[-1]["payload"]["result"]
+    if requested is None:
         raise WorkflowError("有关联研究篇章时必须使用 --stage-review updated|reviewed-no-change")
     if requested == "updated" and not stage_events:
         raise WorkflowError("--stage-review updated 无效：找不到本任务产生的研究篇章事件")
@@ -1244,9 +1331,15 @@ def stage_review(record: dict, requested: str | None) -> dict:
 
 def finish_task(args: argparse.Namespace) -> dict:
     record = read_active()
+    if args.task_id is None:
+        args.task_id = record["task_id"]
     if args.task_id != record["task_id"]:
         raise WorkflowError(f"活动任务是 {record['task_id']}，不是 {args.task_id}")
     branch = assert_active_branch(record)
+    if getattr(args, "check_only", False):
+        result = task_finish_preflight(record, health_errors=check_repository(), stage_review_result=args.stage_review)
+        result["review_summary"] = context_data().get("review_summary")
+        return result
     signature = _finish_signature(args)
     pending_finish = record.get("finish") if record.get("recovery_phase") == "finishing" else None
     if pending_finish is not None:
@@ -1270,8 +1363,52 @@ def finish_task(args: argparse.Namespace) -> dict:
         clear_test_receipts(ROOT, args.task_id)
         delete_active(args.task_id)
         return report
+    if not getattr(args, "result", None) or not getattr(args, "note", None):
+        raise WorkflowError("结束任务必须填写 --result 和 --note；只检查使用 end --check-only")
+    from . import commands as runtime
+    from .reporting import report
+    from ...infrastructure.system.automatic_verification import run_missing
+    if not getattr(args, "current_step", None) and "current_step" not in (getattr(args, "clear", None) or []):
+        previous_step = next((e["payload"]["current_step"] for e in reversed(load_events(journal_path()))
+                              if e.get("task_id") == record["task_id"] and e["event_type"] == "task.checkpointed"
+                              and "current_step" in e["payload"]), None)
+        args.current_step = getattr(args, "status", None) or previous_step or args.note
+    report(runtime, args)
+    # The report owns the final checkpoint, so finish must not write it again.
+    record = read_active()
+    stage_error = None
+    try:
+        checked_review = stage_review(record, args.stage_review)["result"]
+    except WorkflowError as exc:
+        stage_error = str(exc)
+        checked_review = args.stage_review
+    inspection = task_finish_preflight(record, health_errors=check_repository(), stage_review_result=checked_review)
+    non_test = [item for item in inspection["blockers"] if not item["code"].startswith("VERIFICATION_")]
+    attempt = get_attempt(branch) if record["git"]["track"] != "stable" else None
+    if attempt:
+        if not args.attempt_state:
+            non_test.append({"message": "探索任务结束必须填写 attempt_state"})
+        elif args.attempt_state in {"validated", "negative", "inconclusive"}:
+            required = ("hypothesis", "evidence", "conclusion") if args.attempt_state == "validated" else ("evidence", "conclusion")
+            missing = [name for name in required if not attempt.get(name)]
+            if missing:
+                non_test.append({"message": "科研结论缺少：" + ", ".join(missing)})
+        elif args.attempt_state == "paused" and (not attempt.get("progress") or not attempt.get("next_step")):
+            non_test.append({"message": "暂停需要 progress 说明原因及 next_step 恢复条件"})
+    elif args.attempt_state:
+        non_test.append({"message": "stable 任务不能使用 --attempt-state"})
+    if args.main_goal is not None and args.main_goal != inspection["inferred"]["main_goal"]:
+        non_test.append({"message": "--main-goal 与项目事件推导值冲突"})
+    if stage_error:
+        non_test.append({"message": stage_error})
+    if non_test:
+        raise WorkflowError("；".join(item["message"] + ("；" + item["next_action"] if item.get("next_action") else "") for item in non_test))
+    try:
+        run_missing(ROOT, record["task_id"], config(), inspection["verification"])
+    except RuntimeError as exc:
+        raise WorkflowError(str(exc)) from exc
     check_repository(raise_on_error=True)
-    final_state_requested = state_arguments_requested(args)
+    final_state_requested = False
     attempt = get_attempt(branch) if record["git"]["track"] != "stable" else None
     events: list[dict] = []
     if final_state_requested:
@@ -1282,7 +1419,7 @@ def finish_task(args: argparse.Namespace) -> dict:
     preflight = task_finish_preflight(
         record,
         stage_review_result=review["result"],
-        checkpoint_override="fresh" if final_state_requested else None,
+        checkpoint_override="fresh" if final_state_requested and checkpoint else None,
     )
     if preflight["blockers"]:
         details = "；".join(
@@ -1326,6 +1463,33 @@ def finish_task(args: argparse.Namespace) -> dict:
         "verification": verification["accepted"], "stage_review": review,
     }))
     _fixed_finish_event_ids(args.task_id, events)
+    acknowledgement = None
+    if review.get("stage_id"):
+        from ...core.reviews import digest
+        key = "stage:" + review["stage_id"]
+        explicit = [e for e in load_events(journal_path()) if e["event_type"] == "review.recorded"
+                    and e.get("task_id") == record["task_id"] and e["payload"].get("object") == key]
+        if not explicit or getattr(args, "stage_review", None):
+            item = next((i for i in context_data().get("reviews", []) if i["object"] == key), None)
+            if item:
+                sources = dict(item["sources"])
+                acknowledgement = emit("review.recorded", branch=branch, task_id=args.task_id,
+                    payload={"object": key, "branch": branch, "sources": sources, "result": review["result"]})
+                events.insert(len(events) - 1, acknowledgement)
+                _fixed_finish_event_ids(args.task_id, events)
+                for event in events:
+                    if event["event_type"] in {"attempt.state_changed", "task.finished"}:
+                        sources["event:" + event["event_id"]] = digest(event["payload"])
+    from .review_commands import coverage_completion
+    completed = coverage_completion(runtime, record, events)
+    if completed:
+        old_finish_id = events[-1]["event_id"]
+        events.insert(len(events) - 1, completed)
+        _fixed_finish_event_ids(args.task_id, events)
+        if acknowledgement is not None:
+            sources = acknowledgement["payload"]["sources"]
+            sources.pop("event:" + old_finish_id, None)
+            sources["event:" + events[-1]["event_id"]] = digest(events[-1]["payload"])
     finished_at = timestamp()
     finish_values = {
         "result": args.result,
@@ -2012,6 +2176,7 @@ def dashboard_action_state() -> dict:
         "attempt": attempt,
         "health_errors": health_errors,
         "finish_preflight": preflight,
+        "automatic_verification_suites": list((config().get("verification_commands") or {}).keys()),
         "checkpoint_status": (preflight or {}).get("checkpoint_status", "not-applicable"),
         "last_completed": last_completed,
     }
@@ -2137,7 +2302,7 @@ def cli_shared_action(args: argparse.Namespace) -> tuple[str, dict] | None:
     action_id: str | None = None
     if args.command == "start":
         action_id = "task.start"
-    elif args.command == "end":
+    elif args.command == "end" and not getattr(args, "check_only", False):
         action_id = "task.finish"
     elif args.command == "state":
         action_id = "state.update"
@@ -2168,6 +2333,11 @@ def cli_shared_action(args: argparse.Namespace) -> tuple[str, dict] | None:
         for name in names
         if hasattr(args, name) and getattr(args, name) is not None
     }
+    extra = ("stage", "new_stage", "previous_stage") if args.command == "start" else (
+        "hypothesis", "progress", "conclusion", "clear", "stage_update", "check_only", "reviews") if args.command == "end" else ()
+    for name in extra:
+        if hasattr(args, name):
+            fields[name] = getattr(args, name)
     if args.command in {"start", "end"}:
         fields["_task_id"] = args.task_id
     if action_id == "task.finish":

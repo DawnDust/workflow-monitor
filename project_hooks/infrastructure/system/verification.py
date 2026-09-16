@@ -110,6 +110,7 @@ def receipt_directory(root: Path, task_id: str) -> Path:
 def write_test_receipt(
     root: Path, *, suite: str, result: str, tests: int, failures: int,
     coverage: float | None, started_at: str, finished_at: str,
+    started_identity: dict | None = None,
 ) -> dict | None:
     task = active_task(root)
     if task is None:
@@ -128,6 +129,10 @@ def write_test_receipt(
         "runner_hash": hashlib.sha256(runner.read_bytes()).hexdigest(),
         "fingerprint": verification_fingerprint(root),
     }
+    if started_identity is not None and any(receipt.get(key) != value for key, value in started_identity.items()):
+        receipt["result"] = "failed"
+        receipt["failures"] = max(1, receipt["failures"])
+        receipt["input_changed"] = True
     atomic_write_json(receipt_directory(root, task["task_id"]) / f"{suite}.json", receipt)
     return receipt
 
@@ -186,6 +191,9 @@ def verify_receipts(
     required = required_suites(profile, changed_paths)
     problems: list[dict] = []
     accepted: list[dict] = []
+    current_head = git_head(root)
+    runner = root / "scripts/run_tests.py"
+    current_runner = hashlib.sha256(runner.read_bytes()).hexdigest() if runner.is_file() else None
     for suite in required:
         item = by_suite.get(suite)
         reason = None
@@ -197,6 +205,10 @@ def verify_receipts(
             reason = "failed"
         elif item.get("fingerprint") != fingerprint:
             reason = "stale"
+        elif item.get("head") != current_head:
+            reason = "head-changed"
+        elif item.get("runner_hash") != current_runner:
+            reason = "runner-changed"
         if reason:
             problems.append({
                 "suite": suite,
@@ -231,3 +243,11 @@ def clear_test_receipts(root: Path, task_id: str) -> None:
 
 def iso_now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def verification_identity(root: Path) -> dict:
+    task = active_task(root)
+    runner = root / "scripts/run_tests.py"
+    return {"task_id": task["task_id"] if task else None, "head": git_head(root),
+            "runner_hash": hashlib.sha256(runner.read_bytes()).hexdigest(),
+            "fingerprint": verification_fingerprint(root)}

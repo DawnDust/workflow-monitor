@@ -9,10 +9,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
+from .. import __version__
 from .ports import FailureRecorder, MutationLockFactory
 from ..core.actions import *
 from ..core.actions import _normalized_fields
-from ..core.lifecycle import lifecycle_step
+from ..core.lifecycle import lifecycle_step, finish_preflight
 def _block(code: str, message: str, evidence: str = "", next_action: str | None = None) -> ActionBlocker:
     return ActionBlocker(code, message, evidence, next_action)
 
@@ -28,7 +29,7 @@ class WorkflowActionService:
         failure_recorder: FailureRecorder,
         failure_formatter: Callable[[dict[str, Any]], str],
         execution_mode_provider: Callable[[], str],
-        application_version: str = "2.0.0",
+        application_version: str = __version__,
         schema_version: int = 5,
     ):
         self.project_root = project_root.resolve()
@@ -133,7 +134,8 @@ class WorkflowActionService:
                 f"任务分支 {active.get('branch')} / 当前 {state.get('branch')}", "task.recover",
             ))
         sidecar = state.get("sidecar") or {}
-        if sidecar.get("phase") in {"starting", "finishing"} and action_id not in {
+        pending_report = bool((sidecar.get("record") or {}).get("pending_report"))
+        if (sidecar.get("phase") in {"starting", "finishing"} or pending_report) and action_id not in {
             "task.recover", "task.recover_skip_commit", "task.abandon", "health.check", "db.verify"
         }:
             blockers.append(_block(
@@ -147,7 +149,7 @@ class WorkflowActionService:
                 "NO_RECOVERABLE_TASK", "当前没有可恢复的工作周期",
                 "活动任务和恢复 sidecar 均不存在", "refresh",
             ))
-        if action_id == "task.recover" and sidecar and sidecar.get("phase") not in {"starting", "finishing", "invalid"}:
+        if action_id == "task.recover" and sidecar and not pending_report and sidecar.get("phase") not in {"starting", "finishing", "invalid"}:
             blockers.append(_block(
                 "NO_RECOVERY_NEEDED", "当前工作周期不需要恢复",
                 f"当前阶段：{sidecar.get('phase') or 'active'}", "state.update",
@@ -161,6 +163,16 @@ class WorkflowActionService:
             blockers.append(_block("ATTEMPT_REQUIRED", "当前活动任务没有探索记录"))
         if action_id == "task.finish" and active:
             preflight = state.get("finish_preflight")
+            if fields and preflight and preflight.get("facts"):
+                facts = deepcopy(preflight["facts"])
+                if fields.get("current_step") or fields.get("note"):
+                    facts["checkpoint_status"] = "fresh"
+                facts["stage_review"] = fields.get("stage_review") or facts.get("stage_review")
+                verification = facts.get("verification") or {}
+                verification["problems"] = [item for item in verification.get("problems", [])
+                                            if item.get("suite") not in state.get("automatic_verification_suites", [])]
+                facts["verification"] = verification
+                preflight = finish_preflight(facts)
             for item in (preflight or {}).get("blockers", []):
                 blockers.append(_block(
                     str(item.get("code")), str(item.get("message")),
@@ -170,13 +182,6 @@ class WorkflowActionService:
                 blockers.append(_block(
                     "HEALTH_CHECK_FAILED", "项目检查尚未通过",
                     "；".join(str(item) for item in state.get("health_errors") or []), "health.check",
-                ))
-            if fields and not fields.get("writer_stopped"):
-                blockers.append(_block("WRITER_CONFIRMATION_REQUIRED", "请确认 AI 和其他编辑器已经停止写入"))
-            if fields and not state.get("worktree_quiet", False):
-                blockers.append(_block(
-                    "WRITE_ACTIVITY_RECENT", "工作树尚未连续 3 秒保持稳定",
-                    f"最近变化：{state.get('last_worktree_change') or '刚刚'}", "refresh",
                 ))
         if action_id == "update.apply":
             git = state.get("git") or {}

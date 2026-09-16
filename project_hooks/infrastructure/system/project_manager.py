@@ -25,7 +25,7 @@ from ..persistence.store import (
 from ..persistence.database import integrity_check, latest_active_task_id
 
 
-TEMPLATE_VERSION = 7
+TEMPLATE_VERSION = 12
 INSTALLATION_PATH = Path(".codex/project-maintenance-installation.json")
 CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
 AGENTS_BEGIN = "<!-- project-maintenance-hooks:begin -->"
@@ -48,14 +48,15 @@ fi
 AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 ## 项目维护生命周期
 
-- 所有命令使用仓库根目录的 `.\\workflow-monitor.exe`。
+- 项目生命周期操作和维护状态写入使用仓库根目录的 `.\\workflow-monitor.exe`；文件读取、搜索和测试使用相应工具。
 - 新 clone 或 worktree 首次使用时，将 `workflow-monitor.exe` 放到仓库根目录并运行 `.\\workflow-monitor.exe install`。
-- 每次任务先运行 `.\\workflow-monitor.exe context --format markdown`，按 `core_read_order` 阅读规范，首次写入前运行 `start`。
+- 每次任务先运行 `.\\workflow-monitor.exe context --view brief --format markdown`，按 `core_read_order` 读取尚未掌握或已变更的规范，首次写入前运行 `start`。
+- 纯只读咨询和审查不启动写入生命周期，也不调用 `end`；准备首次写入时再判断轨道。已启动的任务必须通过 `end` 或规定的放弃流程收尾。
 - 用户只需用自然语言描述任务；AI 提取目标、验收和证据，任务 ID、时间、分支、状态令牌和安全默认值由工作流代码处理。
 - 稳定维护只在 `main` 使用 `--track stable`；研究和实验使用独立探索分支；无法可靠判断轨道时必须在对话中询问用户。
 - 一个探索分支只对应一条探索记录；同一分支的后续任务复用该记录，任务回执和 Git 提交仅作为探索内部的过程证据。
-- 使用 `state update --current-step ...` 和 `attempt update` 保存进展，最后必须运行 `end`。
-- 代码写入后运行 fast；结束时按 Context 的测试回执门禁补齐 full 或 release。
+- 已启动的任务使用 `state update --current-step ...` 和 `attempt update` 保存进展，完成时运行 `end`。
+- 完成一批相关代码修改后运行 fast；结束时程序按实际门禁自动补齐同一软件输入指纹的回执：软件改动要求 fast/full，release profile 要求 fast/release；纯文档和治理改动由 `end` 内置检查验证。
 - 探索启动前必须有关联研究篇章或记录明确的无篇章理由；有关联篇章的任务结束时必须显式审阅篇章。
 - 项目资料和研究篇章只通过 `project update` 与内部 `stage` 指令记录；新证据改变判断时用 `stage update --revision ... --summary ... --evidence ...` 追加修订；探索进度使用 `attempt update` 的结构化步骤字段。
 - 科研资料文件只放在 `resources/` 的八个标准子目录；`resources/sparks/` 可自由保存，其他资料通过 `catalog` 登记。
@@ -64,6 +65,13 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
 - 遇到故障时使用 `diagnostics status/export` 生成脱敏本地诊断；程序不自动上传数据。
 - Dashboard 只读展示任务、研究篇章、动作可用性和阻塞原因；生命周期写入由 AI 调用结构化服务，高风险动作必须在对话中取得用户确认。
+
+## Codex 简短调用
+
+- 默认读取 `context --view brief --format markdown`；只查结束门禁使用 `context --view verification`，追溯全部事实使用 `context --view full`。篇章和交接详情按需使用 `stage show`、`history`。
+- `start` 可省略任务 ID，由工作流自动分配；`end` 可省略 ID，使用当前活动任务。两者及 `report` 可加 `--compact` 返回简短回执；复杂填报支持 `--input-json <文件或 ->`。
+- 中途仅在阶段完成、判断变化、阻塞或交接时保存 checkpoint。短任务可通过 `end --current-step ... --next ...` 同时保存最终进展，不在结束前重复调用内容相同的 `state update`。
+- 精简显示不改变测试、篇章审阅和授权门禁；失败与警告必须处理。不要用无参 EXE 获取上下文，无参冻结 EXE 会启动桌面界面。
 <!-- project-maintenance-hooks:end -->"""
 
 GITIGNORE_BLOCK = """# project-maintenance-hooks:begin
@@ -93,7 +101,7 @@ MAINTENANCE_README = """# Workflow Monitor 项目维护索引
 
 动态事实只写入 `maintenance/events.jsonl`，SQLite、Context、Dashboard、交接和研究篇章视图均为可重建投影。
 
-- [CORE.md](CORE.md)：每次 AI 任务必读的生命周期、轨道、安全、测试和篇章契约。
+- [CORE.md](CORE.md)：新会话、上下文丢失或规范变更时读取的生命周期、轨道、安全、测试和篇章契约。
 - [RESEARCH.md](RESEARCH.md)：研究篇章、探索、Catalog 与 Sparks。
 - [OPERATIONS.md](OPERATIONS.md)：安装、升级、恢复、诊断、交付与发布。
 - `ARCHITECTURE.md`：代码边界和读写模型架构。
@@ -103,25 +111,26 @@ MAINTENANCE_README = """# Workflow Monitor 项目维护索引
 
 MAINTENANCE_CORE = """# Workflow Monitor 核心契约
 
-1. 每次任务先运行 `.\\workflow-monitor.exe context --format markdown`，再读取本文件；首次写入前运行 `start`。
+1. 每次任务先运行 `.\\workflow-monitor.exe context --view brief --format markdown`，新会话、上下文丢失或本文件变更时读取本文件，同一任务内无需重复读取未变规范；首次写入前运行 `start`。
+   纯只读咨询和审查不启动写入生命周期，也不调用 `end`；准备首次写入时再判断轨道。已启动的任务必须通过 `end` 或规定的放弃流程收尾。
 2. 稳定维护只在 `main` 使用 `--track stable`；不确定改动使用 `research|experiment|sandbox`。无法判断时询问用户。
 3. 动态事实只记录一次：任务目标和验收来自 `task.started`，项目资料来自 `project.profile_updated`，任务进度来自 `task.checkpointed`，结束结果来自 `task.finished`。
-4. 使用 `state update --current-step ...` 保存 checkpoint；探索证据使用 `attempt update`。
-5. 代码写入后运行 `python scripts/run_tests.py fast`。结束门禁按实际改动要求同一指纹的 fast/full；release profile 要求 fast/release。纯文档和治理改动由 `end` 内置检查验证。
+4. 使用 `report` 一次填报进度和科研证据，程序自动保存 checkpoint；短任务可直接在 `end` 填报最终进展。
+5. 完成一批相关代码修改后运行 `report --current-step ... --verify fast`；已通过的检查仅在新改动、失败或未解决问题影响其结果时重跑。结束时程序按实际门禁自动补齐同一软件输入指纹的回执：软件改动要求 fast/full，release profile 要求 fast/release；纯文档和治理改动由 `end` 内置检查验证。
 6. 有关联研究篇章的任务必须在 `end --stage-review updated|reviewed-no-change` 明确审阅。`updated` 必须有本任务产生的篇章事件；新证据改变判断时以 `stage update --revision ... --summary ... --evidence ...` 追加修订。
-7. 最后必须运行 `end`。禁止改写既有事件、直接编辑 SQLite、删除活动 sidecar、在 main 试改、自动合并。
+7. 已启动的任务完成时运行 `end`。禁止改写既有事件、直接编辑 SQLite、删除活动 sidecar、在 main 试改、自动合并。
 8. 推送、PR、合并、数据库重建、软件升级和正式发布必须取得用户授权。
 """
 
 MAINTENANCE_RESEARCH = """# 科研与研究篇章规范
 
-全项目最多一个 active 研究篇章。使用内部 `stage start/update` 管理篇章事实；探索只引用篇章和任务 ID，不复制目标状态。
+每个分支最多一个 active 研究篇章。探索任务可创建或修订关联篇章，其他分支版本只读展示；任务引用篇章和探索 ID，不复制目标状态。
 
 篇章允许反复推进和关联多轮探索。进入 `paused` 时必须记录 `interruption`（暂时中断）或 `temporary-closure`（暂时收束）及说明；暂停后可插入另一篇章，待其不再 active 后恢复旧篇章。`completed` 与 `cancelled` 永久封存，不得重开。
 
 新证据改变当前判断时，使用 `stage update --revision ... --summary ... --evidence ...` 追加判断修订。修订必须同步最新篇章概况并引用至少一项证据；它属于篇章历史，不恢复独立决策体系。
 
-探索轨道启动前若没有 active 研究篇章，工作流返回篇章草案并阻止启动。用户确认后先用短 stable 生命周期创建篇章；用户明确不需要篇章时，用 `--without-stage-reason` 记录理由。
+探索启动使用 `--stage auto|new|none|篇章ID`；新篇章通过 `--new-stage` 同次创建，无需额外维护周期。已有活动篇章时必须明确暂停原因，不自动替换。维护默认不关联篇章，探索不关联时须填写 `--without-stage-reason`。
 
 科研资料放在 `resources/source|data|theory|analysis|outputs|others|reports|sparks/`。Sparks 可自由保存 Markdown，登记到 `catalog` 是可选的；其他资料通过 `catalog` 登记。Markdown 公式使用 Markdown/LaTeX 语法。
 
@@ -134,7 +143,7 @@ MAINTENANCE_OPERATIONS = """# 安装、恢复与交付
 - 升级：在无活动任务、干净且同步的 main 上运行 `.\\workflow-monitor.exe update`。首次写入 Schema v5 后不可降级到仅支持 v1-v4 的版本。
 - 恢复：异常中断运行 `task recover`；明确放弃运行 `task abandon --reason <原因>`。
 - 诊断：使用 `diagnostics status/export`；诊断不自动上传。
-- 验证：代码写入后 fast，任务结束前按 Context 的 required_actions 补齐 full/release，再运行 `check` 与 `db verify`。
+- 验证：完成一批相关代码修改后使用 report --verify fast；结束时自动补齐同一软件输入指纹的回执（软件改动 fast/full，release profile 为 fast/release；纯文档和治理改动使用内置检查），正常收尾使用 `end` 内置检查，不重复运行独立 `check`；专项诊断可按需检查，涉及持久化或本机交付时运行 `db verify`。
 - 交付：Dashboard 只读。提交、推送、PR、合并、正式 EXE 构建和发布分别等待用户确认。
 """
 
@@ -223,8 +232,10 @@ def default_config() -> dict:
         "timezone": "Asia/Shanghai",
         "state_dir": ".project_hooks",
         "backend": "project_hooks",
+        "verification_commands": {},
+        "review_interval_days": 14,
         "core_read_order": ["maintenance/CORE.md"],
-        "context_command": ".\\workflow-monitor.exe context --format markdown",
+        "context_command": ".\\workflow-monitor.exe context --view brief --format markdown",
         "maintenance_store": {
             "engine": "sqlite",
             "database": ".project_hooks/maintenance.sqlite3",
@@ -242,11 +253,27 @@ def default_config() -> dict:
     }
 
 
+MAINTENANCE_CORE += "\n自动填报、组合篇章启动及本地执行器配置见 [AUTOMATION.md](AUTOMATION.md)，使用这些功能或排查失败时按需读取。\n"
+
+MAINTENANCE_CORE += '\n9. 科研审阅按篇章、探索、资料分类；review show 默认返回精简变化，--full 按需展开。正式研究使用变化触发和 14 天提醒，稳定参考不作周期提醒，示例只提示完整性问题。\n'
+MAINTENANCE_CORE += '10. 审阅状态与完整覆盖由程序自动判定和记录；延期与完整性问题不算完成，新变化不清除旧整体审阅记录。\n'
+MAINTENANCE_RESEARCH += '\n审阅按篇章、探索、资料分类；正式研究按变化和 14 天提醒，稳定参考不作周期提醒，示例只检查完整性；详见 AUTOMATION.md。\n'
+AGENTS_BLOCK = AGENTS_BLOCK.replace("<!-- project-maintenance-hooks:end -->", '- 科研审阅按篇章、探索、资料分类；review list --kind 可筛选，review show 默认精简、--full 展开。正式研究使用变化和 14 天提醒，稳定参考不作周期提醒，示例只提示完整性问题。\n<!-- project-maintenance-hooks:end -->')
+AGENTS_BLOCK = AGENTS_BLOCK.replace("<!-- project-maintenance-hooks:end -->", '- 审阅状态与完整覆盖由程序自动判定和记录；AI 只选择必要的审阅结果，完整性问题不能靠延期清除。\n<!-- project-maintenance-hooks:end -->')
+MAINTENANCE_AUTOMATION = '# 自动填报与验证\n\n日常使用 `start → report（按需）→ end`。短任务只需开始和结束两次写调用。旧 `state update`、`attempt update` 继续兼容，不要求重复调用。\n\n三个入口支持 `--input-json <文件或 ->`；`-` 从标准输入读取 JSON 对象。键使用参数名称的下划线形式，例如 `current_step`、`stage_update`。同名字段不得同时从 JSON 和命令行提供。省略表示保持原值；`clear` 可列出要清空的进展、判断、阻塞、假设或结论字段。证据追加去重，不通过清空删除历史。\n\n`start` 提供 `kind`、`scope`、`acceptance`，按需选择 `track` 和 `topic`。`stage` 默认为 `auto`：维护不关联篇章，探索关联当前分支活动篇章。`new` 同时提供 `new_stage` 对象，包含 `title`、`goal`、`acceptance`，可选 `stage_id`（默认 topic）。已有活动篇章时，必须以 `previous_stage` 提供 `status: paused` 和 `reason`；不自动结束其他篇章。`none` 用于不关联，探索必须填写 `without_stage_reason`。\n\n`report` 接收 `current_step`、`judgment`、`blocker`、`breakpoint`、`next`，探索可同时填 `hypothesis`、`progress`、`evidence`、`conclusion`。程序将科研记录关联到 checkpoint，避免重复输入。`stage_update` 接收关联篇章的 `summary`、`revision`、`evidence`、状态等现有篇章字段。改变判断必须同时提交修订说明、概况和证据。\n\n完成代码批次使用 `report --current-step ... --verify fast`。`end` 填写 `result`、`note`，可同时提交汇报字段；程序复用已有进展，并在尚无进展时使用结束说明。关联篇章且没有修订时必须提供 `stage_review: reviewed-no-change`。科研结果 `negative`、`inconclusive` 需要结论和证据；暂停需要 `progress` 说明原因和 `next` 给出恢复条件。\n\n`end` 自动补齐所需的本地测试；`--check-only` 只检查，不保存填报或运行测试。项目配置 `verification_commands` 按套件设置 `argv` 参数数组、`cwd`（项目内，默认 `.`）、`timeout_seconds`（默认 1800）。未配置时明确报缺项，不猜测 Python 环境。新项目默认不配置执行器；配置受项目维护权限控制。执行器必须是本地验证命令，不包含发布操作。\n\n有效回执不重跑；失败或超时停止，保留任务和汇报。日志保存到 `.project_hooks/verification-logs/`，命令返回日志位置；修复后再次结束即可。运行期间任务、HEAD 或软件输入改变，结果不可作为通过凭据。恢复使用 `task recover`，不要删除活动状态。\n\n`stage list --all-branches` 查看本地已知分支的篇章版本；`stage show <ID> --source <完整ref或working-tree>` 明确查看来源。当前分支是本任务的权威版本；其他分支未合并的判断不会覆盖它。分叉判断由 AI 比较证据后在当前关联篇章追加修订，不自动合并或按时间选择。\n\n操作后更新记录和监控视图，不增加常驻监控服务。完整输出继续可用，日常加 `--compact`。提交、推送、PR、合并及对外发布仍遵循原有授权边界。\n\n## 按变化审阅\n\nAI 自主处理当前任务有关的登记与审阅，无关事项留待相关任务处理。程序根据明确关联生成变化摘要，不按关键词猜测研究关系。审阅分为篇章、探索和资料；资料用途由 `metadata.review_usage` 明确为 `formal`、`reference` 或 `example`。正式研究按变化和 `review_interval_days` 提醒，稳定参考只在初次或变化时提醒，示例只提示完整性问题。内容更新、关联活动、审阅和验证时间分别记录。\n\n`review list` 查看当前相关的待审阅对象，`review list --all` 查看全项目对象，`--kind stage|attempt|resource` 按类别筛选。`review show <object>` 返回有界的变化摘要和短范围令牌，`--full` 才展开完整来源；没有变化时不会回退输出全部历史。读取不产生已读记录。\n\n`report` 或 `end` 可提交 `reviews` 数组，成员包含 `token`、`result`，按需填写 `reason`、`until`、`evidence`。结果选择 `updated`（程序关联本任务对应修改事件，可用 evidence 指定事件 ID）、`reviewed-no-change` 或 `deferred`。延后必须说明原因，`until` 使用项目时区的 ISO 日期时间，或暂停对象使用 `resume`；省略时默认延后 14 天。延期内出现新变化时重新提示。短令牌提交时重新构建并校验完整范围；旧令牌继续兼容。\n\n关联篇章的 `end --stage-review` 自动形成同一套审阅记录；已通过 `reviews` 填报的篇章不要求再填同义确认。延后不等于完成审阅，也不能替代既有篇章、资料一致性或测试门禁。无变化的重复填报不新增记录；允许审阅后不修改内容，禁止为刷新时间而改写科学结论。\n\n`end --check-only` 无需结果和说明，只读返回阻塞及审阅摘要。正常结束仍需 `result` 和 `note`。精简失败回执在标准错误流输出 JSON，说明本次已保存事件、最近 checkpoint、日志位置及重试方式；执行测试时该流还可能包含进度文字。保存状态为未知时先检查，不假设操作成功或重复提交。恢复仍使用 `task recover`。\n'
+
+
+MAINTENANCE_AUTOMATION += ('\nDashboard 固定展示「当前正常／建议审阅／需要处理」，只高亮程序计算的状态。完整性问题不会因审阅或延期消失；待办按篇章、探索、资料展开，延期另行显示。'
+                           '最后整体审阅时间只来自随 `report` 或 `end` 自动生成的 `review.coverage_completed` 事件：所有适用对象精确覆盖且无待办、延期及完整性问题时写入。'
+                           '不从历史单项时间推算或补写；新变化保留旧记录。AI 不另填整体状态。\n')
+
+
 def template_files() -> dict[str, str]:
     files = {
         ".githooks/pre-commit": HOOK_TEMPLATE,
         "maintenance/README.md": MAINTENANCE_README,
         "maintenance/CORE.md": MAINTENANCE_CORE,
+        "maintenance/AUTOMATION.md": MAINTENANCE_AUTOMATION,
         "maintenance/RESEARCH.md": MAINTENANCE_RESEARCH,
         "maintenance/OPERATIONS.md": MAINTENANCE_OPERATIONS,
     }
@@ -441,7 +468,8 @@ def migrate_config(root: Path) -> None:
         current["core_read_order"] = list(dict.fromkeys([
             "maintenance/CORE.md", *old_order,
         ]))
-    current.setdefault("context_command", defaults["context_command"])
+    if current.get("context_command") in (None, ".\\workflow-monitor.exe context --format markdown"):
+        current["context_command"] = defaults["context_command"]
     current.setdefault("maintenance_store", defaults["maintenance_store"])
     current["maintenance_store"]["schema_version"] = SCHEMA_VERSION
     current.setdefault("branch_policy", defaults["branch_policy"])

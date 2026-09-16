@@ -18,8 +18,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from project_hooks.infrastructure.system.verification import iso_now, write_test_receipt
+from project_hooks.infrastructure.system.verification import iso_now, write_test_receipt, verification_identity
 MODULES = (
+    "tests.unit.test_reviews",
+    "tests.integration.persistence.test_reviews",
+    "tests.unit.test_automation",
+    "tests.integration.persistence.test_reporting",
+    "tests.unit.test_agent_output",
     "tests.integration.system.test_diagnostics",
     "tests.unit.application.test_action_service",
     "tests.integration.persistence.test_workflow",
@@ -30,6 +35,10 @@ MODULES = (
     "tests.unit.test_research_attention",
 )
 FAST_CLASSES = (
+    "tests.unit.test_reviews.ReviewTests",
+    "tests.integration.persistence.test_reviews.ReviewIntegrationTests",
+    "tests.unit.test_automation.AutomationTests",
+    "tests.unit.test_agent_output.AgentOutputTests",
     "tests.integration.system.test_diagnostics.DiagnosticsTests",
     "tests.unit.application.test_action_service.WorkflowActionTests",
     "tests.integration.web.test_dashboard.WebProjectionTests",
@@ -379,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     selected = fast_ids() if args.suite == "fast" else all_ids
     started_at = iso_now()
+    identity = verification_identity(ROOT)
     code, failures, coverage = run_parallel(
         selected, jobs=max(1, args.jobs), coverage=args.suite in {"full", "release"},
     )
@@ -389,12 +399,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"release smoke failed: {exc}", file=sys.stderr)
             code = 1
         failures = int(bool(code))
-    write_test_receipt(
+    receipt = write_test_receipt(
         ROOT, suite=args.suite, result="passed" if code == 0 else "failed",
         tests=len(selected), failures=failures, coverage=coverage,
-        started_at=started_at, finished_at=iso_now(),
+        started_at=started_at, finished_at=iso_now(), started_identity=identity,
     )
-    return code
+    return code or (1 if receipt and receipt["result"] != "passed" else 0)
 
 
 if __name__ == "__main__":

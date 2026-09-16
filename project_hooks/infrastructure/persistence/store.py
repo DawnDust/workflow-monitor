@@ -296,6 +296,22 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
              payload.get("main_goal_version", "v1"), event["occurred_at"], event["task_id"], event["event_id"]),
         )
     elif kind == "task.checkpointed":
+        if payload.get("source_event_id"):
+            source = connection.execute(
+                "SELECT payload_json, task_id, event_type, branch FROM events WHERE event_id=?",
+                (payload["source_event_id"],),
+            ).fetchone()
+            if not source or source[2] != "attempt.updated" or source[3] != event["branch"]:
+                raise StoreError("checkpoint 科研来源不存在或不属于当前任务")
+            data = json.loads(source[0])
+            # Resolve cumulative attempt progress, including fields omitted in this update.
+            attempt_row = connection.execute("SELECT current_step, next_step FROM attempts WHERE attempt_id=?", (data["attempt_id"],)).fetchone()
+            payload = dict(payload)
+            if attempt_row:
+                if attempt_row[0] is not None:
+                    payload.setdefault("current_step", attempt_row[0])
+                if attempt_row[1] is not None:
+                    payload.setdefault("next_actions", [attempt_row[1]] if attempt_row[1] else [])
         task_id = event["task_id"]
         if not task_id:
             raise StoreError("task.checkpointed 必须包含 task_id")

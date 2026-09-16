@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from project_hooks import __version__
 from project_hooks.cli import build_parser
 from project_hooks.ui.web.bridge import (
     WEBVIEW2_DOWNLOAD_URL,
@@ -20,7 +21,6 @@ from project_hooks.ui.web.bridge import (
 )
 from project_hooks.ui.web.glossary import STATUS_GLOSSARY
 from project_hooks.ui.web.projections import (
-    evidence_matrix,
     research_stages,
     web_snapshot,
 )
@@ -224,13 +224,6 @@ class WebProjectionTests(unittest.TestCase):
         self.assertEqual(without_stages["unassigned_explorations"][0]["attempt_id"], "late")
         self.assertEqual(len(without_stages["unassigned_materials"]), 3)
 
-    def test_evidence_matrix_uses_only_registered_evidence(self) -> None:
-        matrix = evidence_matrix(sample_snapshot())
-        row = matrix["rows"][0]
-        self.assertEqual(row["cells"]["paper"]["label"], "supports")
-        self.assertEqual(row["cells"]["experiment"]["status"], "unregistered")
-        self.assertEqual(row["cells"]["experiment"]["label"], "未登记")
-
     def test_web_snapshot_does_not_mutate_source(self) -> None:
         source = sample_snapshot()
         original = copy.deepcopy(source)
@@ -239,6 +232,7 @@ class WebProjectionTests(unittest.TestCase):
         self.assertNotIn("research", source)
         self.assertIn("research", projected)
         self.assertIn("stages", projected["research"])
+        self.assertNotIn("evidence_matrix", projected["research"])
         self.assertNotIn("graph", projected["research"])
         self.assertNotIn("explorations", projected["research"])
 
@@ -256,7 +250,7 @@ class WebDashboardBridgeTests(unittest.TestCase):
         bridge = WebDashboardBridge(FakeProvider(self.root), refresh_seconds=2.5)
         ready = bridge.ready()["data"]
         self.assertEqual(ready["refresh_seconds"], 2.5)
-        self.assertEqual(ready["version"], "2.0.0")
+        self.assertEqual(ready["version"], __version__)
         self.assertIn("source_commit", ready["build_identity"])
         first = bridge.bootstrap()
         self.assertTrue(first["ok"])
@@ -467,10 +461,10 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         source = (asset_root() / "state.js").read_bytes()
         module_url = "data:text/javascript;base64," + base64.b64encode(source).decode("ascii")
         script = f"""
-          import {{filterRecords, evidenceLabel, paginate}} from {json.dumps(module_url)};
+          import {{filterRecords, paginate}} from {json.dumps(module_url)};
           const rows = filterRecords([{{title:'Alpha'}},{{title:'Beta'}}], 'alp', ['title']);
           const page = paginate(Array.from({{length: 21}}, (_, i) => i), 3, 10);
-          if (rows.length !== 1 || evidenceLabel({{status:'unregistered'}}) !== '未登记' || page.items.length !== 1) process.exit(1);
+          if (rows.length !== 1 || page.items.length !== 1) process.exit(1);
         """
         subprocess.run(["node", "--input-type=module", "-e", script], check=True)
 

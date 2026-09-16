@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from project_hooks import __version__
 from project_hooks.ui.cli import commands as cli_module
 from project_hooks.infrastructure.persistence.active_task import load_active_state
 from project_hooks.infrastructure.persistence.database import repository
@@ -46,6 +47,11 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         cls.seed_root.mkdir()
         for name in (".codex", ".githooks", "maintenance", "project_hooks"):
             shutil.copytree(SOURCE_ROOT / name, cls.seed_root / name, ignore=shutil.ignore_patterns("__pycache__"))
+        installation = cls.seed_root / ".codex/project-maintenance-installation.json"
+        if installation.is_file():
+            installed = json.loads(installation.read_text(encoding="utf-8"))
+            installed["application_version"] = __version__
+            installation.write_text(json.dumps(installed), encoding="utf-8")
         for name in ("source", "data", "theory", "analysis", "outputs", "others", "reports", "sparks"):
             directory = cls.seed_root / "resources" / name
             directory.mkdir(parents=True)
@@ -53,6 +59,10 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         for name in ("AGENTS.md", ".gitignore", ".gitattributes"):
             shutil.copy2(SOURCE_ROOT / name, cls.seed_root / name)
         (cls.seed_root / "maintenance/events.jsonl").write_text("", encoding="utf-8")
+        settings = cls.seed_root / ".codex/project-maintenance-workflow.json"
+        config = json.loads(settings.read_text(encoding="utf-8"))
+        config["verification_commands"] = {}
+        settings.write_text(json.dumps(config), encoding="utf-8")
         commands = (
             ("init", "-b", "main"),
             ("config", "user.name", "Project Hooks Test"),
@@ -120,6 +130,63 @@ class ProjectHooksSqliteTests(unittest.TestCase):
     def commit_all(self, message: str) -> None:
         self.git("add", ".")
         self.git("commit", "-m", message)
+
+    def test_optional_task_id_and_compact_end_keep_full_audit(self) -> None:
+        started = json.loads(self.hooks("start", "--kind", "docs", "--scope", "Review instructions",
+                                       "--acceptance", "Keep gates", "--git-commit", "never", "--compact").stdout)
+        task_id = started["task_id"]
+        self.assertTrue(task_id)
+        repeated = self.hooks("start", "--kind", "docs", "--scope", "Other task", "--acceptance", "No collision", check=False)
+        self.assertNotEqual(repeated.returncode, 0)
+        wrong = self.hooks("end", "wrong-id", "--result", "completed", "--note", "Wrong", "--compact", check=False)
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertEqual(load_active_state(self.root / ".project_hooks")["record"]["task_id"], task_id)
+        ended = json.loads(self.hooks("end", "--result", "completed", "--note", "Full completion note",
+                                     "--evidence", "Full audit evidence", "--current-step", "Finished",
+                                     "--next", "Observe", "--compact").stdout)
+        self.assertEqual(ended["task_id"], task_id)
+        self.assertEqual(ended["result"], "completed")
+        self.assertEqual(ended["next_actions"], ["Observe"])
+        events = load_events(self.root / "maintenance/events.jsonl")
+        own = [item for item in events if item.get("task_id") == task_id]
+        self.assertEqual(len([item for item in own if item["event_type"] == "task.checkpointed"]), 1)
+        finished = next(item for item in own if item["event_type"] == "task.finished")
+        self.assertEqual(finished["payload"]["note"], "Full completion note")
+        self.assertEqual(finished["payload"]["evidence"], "Full audit evidence")
+        self.assertNotEqual(self.hooks("end", "--result", "completed", "--note", "No active", check=False).returncode, 0)
+
+    def test_context_views_preserve_full_contract_and_finish_blockers(self) -> None:
+        self.start("20260914_view_test_001")
+        (self.root / "project_hooks/changed.py").write_text("value = 1\n", encoding="utf-8")
+        original = json.loads(self.hooks("context", "--format", "json").stdout)
+        full = json.loads(self.hooks("context", "--view", "full", "--format", "json").stdout)
+        self.assertEqual(original, full)
+        brief = json.loads(self.hooks("context", "--view", "brief", "--format", "json").stdout)
+        gate = json.loads(self.hooks("context", "--view", "verification", "--format", "json").stdout)
+        self.assertEqual(brief["task"]["acceptance"], full["active_task"]["acceptance"])
+        self.assertEqual(gate["blockers"], full["finish_preflight"]["blockers"])
+        failed = self.hooks("end", "--result", "completed", "--note", "Not tested", "--current-step", "Ready", "--compact", check=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("VERIFICATION", failed.stderr)
+
+    def test_compact_checkpoint_and_attempt_keep_task_identity(self) -> None:
+        self.start("20260914_compact_experiment_001", "--track", "experiment", "--topic", "compact")
+        checkpoint = json.loads(self.hooks("state", "update", "--current-step", "Working", "--compact").stdout)
+        attempt = json.loads(self.hooks("attempt", "update", "--progress", "Evidence collected", "--next-step", "Review", "--compact").stdout)
+        self.assertEqual(checkpoint["task_id"], "20260914_compact_experiment_001")
+        self.assertEqual(attempt["task_id"], "20260914_compact_experiment_001")
+        self.assertEqual(attempt["next_step"], "Review")
+
+    def test_concurrent_automatic_start_has_one_owner(self) -> None:
+        command = [sys.executable, "-m", "project_hooks", "start", "--kind", "docs",
+                   "--scope", "Concurrent start", "--acceptance", "Single task", "--git-commit", "never"]
+        processes = [subprocess.Popen(command, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(2)]
+        outputs = [process.communicate(timeout=30) for process in processes]
+        self.assertEqual(sum(process.returncode == 0 for process in processes), 1)
+        winner = next(json.loads(stdout) for process, (stdout, _) in zip(processes, outputs) if process.returncode == 0)
+        self.assertEqual(load_active_state(self.root / ".project_hooks")["record"]["task_id"], winner["task_id"])
+        starts = [event for event in load_events(self.root / "maintenance/events.jsonl") if event["event_type"] == "task.started"]
+        self.assertEqual(len(starts), 1)
 
     def test_install_rebuilds_database_and_context_is_available(self) -> None:
         database = self.root / ".project_hooks/maintenance.sqlite3"
@@ -313,7 +380,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         )
         self.end(setup_id)
         task_id = "20260811_stage_review_v4_001"
-        self.start(task_id)
+        self.start(task_id, "--stage", "schema-v4")
         self.update_state()
         missing = self.end(task_id, stage_review=None, check=False)
         self.assertIn("--stage-review", missing.stderr)
@@ -1119,11 +1186,11 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         rebuild = self.hooks("db", "rebuild", check=False)
         self.assertNotEqual(rebuild.returncode, 0)
         self.assertIn("活动任务期间不能", rebuild.stderr)
-        rejected = self.end(task_id, check=False)
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn("state update", rejected.stderr)
-        self.update_state()
+        preflight = json.loads(self.hooks("end", task_id, "--result", "completed", "--note", "done", "--check-only").stdout)
+        self.assertIn("CHECKPOINT_REQUIRED", [item["code"] for item in preflight["blockers"]])
         self.end(task_id)
+        self.assertEqual(len([event for event in load_events(self.root / "maintenance/events.jsonl")
+                              if event["event_type"] == "task.checkpointed"]), 1)
 
     def test_checkpoint_freshness_and_inferred_finish_fields(self) -> None:
         task_id = "20260811_checkpoint_freshness_001"
@@ -1132,9 +1199,9 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         (self.root / "notes.txt").write_text("changed after checkpoint\n", encoding="utf-8")
 
         stale = self.hooks(
-            "end", task_id, "--result", "completed", "--note", "done", check=False,
+            "end", task_id, "--result", "completed", "--note", "done", "--check-only",
         )
-        self.assertIn("CHECKPOINT_STALE", stale.stderr)
+        self.assertIn("CHECKPOINT_STALE", [item["code"] for item in json.loads(stale.stdout)["blockers"]])
 
         self.update_state("fresh checkpoint")
         finished = json.loads(self.hooks(
@@ -1990,7 +2057,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertNotIn("warnings", setup_result)
 
         task_id = "20260801_stage_reminder_001"
-        self.start(task_id)
+        self.start(task_id, "--stage", "validation")
         self.update_state()
         result = json.loads(self.end(task_id).stdout)
         self.assertEqual(result["stage_review"]["result"], "reviewed-no-change")
