@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from project_hooks.infrastructure.system.verification import iso_now, write_test_receipt, verification_identity
 MODULES = (
+    "tests.unit.test_privacy",
     "tests.unit.test_reviews",
     "tests.integration.persistence.test_reviews",
     "tests.unit.test_automation",
@@ -35,6 +36,7 @@ MODULES = (
     "tests.unit.test_research_attention",
 )
 FAST_CLASSES = (
+    "tests.unit.test_privacy.PrivacyTests",
     "tests.unit.test_reviews.ReviewTests",
     "tests.integration.persistence.test_reviews.ReviewIntegrationTests",
     "tests.unit.test_automation.AutomationTests",

@@ -64,6 +64,8 @@ Workflow Monitor 是面向 Windows 科研 Git 项目的本地单文件工作流�
 
 桌面界面不监听网络端口、不使用 CDN、没有遥测，也不会自动上传诊断或项目数据。只有用户明确检查更新或 Release 时才会联网。诊断包只在本地生成，必须由用户检查后手动附加到反馈中。
 
+跟踪的 `maintenance/events.jsonl` 随公开仓库推送后会对外可见。新事件文本会脱敏邮箱、绝对本机路径和疑似凭据；任务描述及科研结论仍可阅读，发布前应自行审阅。
+
 ## 许可证
 
 Workflow Monitor 使用 [MIT License](LICENSE)。

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 2.0.2 - 2026-09-19
+
+- Redact personal email addresses, absolute local paths, and likely credentials before recording new public workflow events.
+- Check newly staged lines and sensitive filenames before commits without blocking unchanged historical journal records.
+- Prepare a controlled privacy migration for historical Git metadata and journal paths.
+
 ## 2.0.1 - 2026-09-16
 
 - Reduced Codex workflow overhead with brief and verification context views, compact receipts, automatic task IDs, and fewer duplicate checkpoints.

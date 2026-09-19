@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from ...core.errors import StoreError
+from ...core.privacy import sanitize_public_payload
 from ...core.events import (
     SCHEMA_VERSION,
     SUPPORTED_EVENT_SCHEMA_VERSIONS,
@@ -86,6 +87,9 @@ def event_lock(state_dir: Path, timeout: float = 10.0) -> Iterator[None]:
 
 def append_events(path: Path, state_dir: Path, additions: Iterable[dict]) -> list[dict]:
     additions = [validate_event(event) for event in additions]
+    # Finalize mutable review/source references before redacting the durable copy.
+    for event in additions:
+        event["payload"] = sanitize_public_payload(event["payload"])
     with event_lock(state_dir):
         events = load_events(path)
         by_id = {event["event_id"]: canonical_json(event) for event in events}

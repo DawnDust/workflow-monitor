@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone as fixed_timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .errors import StoreError
+from .privacy import sanitize_public_payload
 
 
 SCHEMA_VERSION = 5
@@ -40,7 +41,7 @@ def new_event(event_type: str, *, branch: str, task_id: str | None, payload: dic
         "occurred_at": occurred_at or now.strftime(f"%Y-%m-%d %H:%M:%S（{timezone}）"),
         "branch": branch,
         "task_id": task_id,
-        "payload": payload,
+        "payload": sanitize_public_payload(payload),
     }
 
 

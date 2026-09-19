@@ -68,6 +68,8 @@ Please use [GitHub Discussions](https://github.com/DawnDust/workflow-monitor/dis
 
 The desktop UI binds no network port, uses no CDN, contains no telemetry, and does not automatically upload diagnostics or project data. Network access only occurs for explicit update/release checks. Diagnostic bundles are created locally and must be reviewed and attached manually.
 
+The tracked `maintenance/events.jsonl` becomes public when a project is pushed to a public repository. New event text redacts email addresses, absolute local paths, and likely credentials; task descriptions and research conclusions remain readable, so review them before publishing.
+
 ## License
 
 Workflow Monitor is available under the [MIT License](LICENSE).

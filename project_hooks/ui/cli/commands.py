@@ -92,6 +92,7 @@ from ...infrastructure.git.build_identity import build_identity
 from ...application.action_service import ActionProgress, WorkflowActionService, action_spec
 from ...composition import build_action_service
 from ...core.branches import classify_branch as classify_branch_with_policy
+from ...core.privacy import sensitive_categories
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -1181,8 +1182,29 @@ def attempt_update(args: argparse.Namespace) -> dict:
     return get_attempt(branch) or {}
 
 
+def check_staged_privacy() -> None:
+    """Check added lines only; historical journal content is handled by migration."""
+    diff = run_git(["diff", "--cached", "--no-ext-diff", "--no-color", "--unified=0", "--"]).stdout
+    current_path = "unknown"
+    findings: set[str] = set()
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            current_path = line[6:]
+        elif line.startswith("+") and not line.startswith("+++"):
+            categories = sensitive_categories(line[1:])
+            for category in categories:
+                findings.add(f"{current_path}: {category}")
+    added = run_git(["diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--"]).stdout
+    for path in added.split("\0"):
+        if re.search(r"(?i)(?:^|/)(?:\.env(?:\..*)?|id_rsa|id_ed25519|credentials(?:\..*)?|secrets(?:\..*)?)$|\.(?:pem|p12|pfx|key|sqlite3?|db)$", path):
+            findings.add(f"{path}: sensitive_filename")
+    if findings:
+        raise WorkflowError("暂存内容包含需要脱敏的信息:\n- " + "\n- ".join(sorted(findings)))
+
+
 def pre_commit_check() -> None:
     check_repository(raise_on_error=True)
+    check_staged_privacy()
     if active_row() is not None:
         record = read_active()
         assert_active_branch(record)
