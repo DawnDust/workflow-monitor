@@ -1,13 +1,13 @@
 {
   "format": 1,
-  "application_version": "2.0.2",
+  "application_version": "2.1.0",
   "build_identity": {
-    "build_id": "0717531f0ae9bcc7",
+    "build_id": "125687ff6ab92675",
     "source_commit": "1bf7616d83cb063e48cc794f210435ecfe41eb56",
-    "build_input_fingerprint": "caeb327b91cb8f5d1db436d3b18f5a05e585b79f5ed5b7a0ace951459d91c375",
-    "source_tree": "caeb327b91cb8f5d1db436d3b18f5a05e585b79f5ed5b7a0ace951459d91c375",
+    "build_input_fingerprint": "359075577c7a95a4154b27d8995a4e31acac53192fb1899d6d670b451a57d07c",
+    "source_tree": "359075577c7a95a4154b27d8995a4e31acac53192fb1899d6d670b451a57d07c",
     "source_tree_algorithm": "build-input-content-v3",
-    "built_at": "2026-09-30T09:09:37+00:00",
+    "built_at": "2026-09-30T13:25:24+00:00",
     "dirty": true,
     "mode": "frozen"
   },
@@ -18,64 +18,64 @@
       "customized": false
     },
     "maintenance/README.md": {
-      "hash": "1f511b304b79fec4e1a47bc8ca23409d0c88638eaf4f9ddf8aa60789e3eacae4",
+      "hash": "1a293a55a95b287d10553a860ed146f33f6acc2c2f5d53e3d57c63345b488796",
       "customized": true
     },
     "maintenance/CORE.md": {
-      "hash": "062111b4fb90a42ddcbc9fdbc82a982331f150af2596345865018e11b5fc5e2b",
+      "hash": "0194e8d73772d9e0b2ff05a7e2a0731fd73b32db2e0ea2bee18321b0abdab925",
       "customized": true
     },
     "maintenance/AUTOMATION.md": {
-      "hash": "bc0d22f0eaa58ab1539d3ad00c8909b41d868090289947d0afa3b58446a71d6e",
+      "hash": "198830b0a957255890c387170a4b50223c59e03196a1c41e141b4a6a8c950365",
       "customized": true
     },
     "maintenance/RESEARCH.md": {
-      "hash": "15e22cc9fcff5cf7ea5619e42aed7dc1a57781052d208e6b6f5caddd2026629d",
+      "hash": "93c485d59aa3012a327ebb30ffe7681d24d56bb26bd922a648770a5d24ab6ce4",
       "customized": true
     },
     "maintenance/OPERATIONS.md": {
-      "hash": "165cfb2f96b406e5f65a948bc294d5e2700811f67988bb2f98fb5ca3ec507452",
+      "hash": "aeb84ecec595e0edcfd338af4a4dc531986b49bf95926d4f315cb3ca8c5b9671",
       "customized": true
     },
     "resources/source/.gitkeep": {
-      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "customized": false
+      "hash": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+      "customized": true
     },
     "resources/data/.gitkeep": {
-      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "customized": false
+      "hash": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+      "customized": true
     },
     "resources/theory/.gitkeep": {
-      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "customized": false
+      "hash": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+      "customized": true
     },
     "resources/analysis/.gitkeep": {
-      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "customized": false
+      "hash": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+      "customized": true
     },
     "resources/others/.gitkeep": {
-      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "customized": false
+      "hash": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+      "customized": true
     },
     "resources/reports/.gitkeep": {
-      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "customized": false
+      "hash": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+      "customized": true
     },
     "resources/sparks/.gitkeep": {
-      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "customized": false
+      "hash": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+      "customized": true
     },
     "resources/tutorials/.gitkeep": {
-      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "customized": false
+      "hash": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+      "customized": true
     },
     "resources/translations/.gitkeep": {
-      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "customized": false
+      "hash": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+      "customized": true
     },
     "resources/plans/.gitkeep": {
-      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "customized": false
+      "hash": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+      "customized": true
     },
     "AGENTS.md:block": {
       "hash": "5dc0556b46c2e4b95de2fe422d2a5427542fae198ece4fee051e3c143339b11c",
