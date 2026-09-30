@@ -34,6 +34,7 @@
 - 任务结束时程序按实际门禁自动补齐同一软件输入指纹的测试回执：软件改动要求 fast/full，release profile 要求 fast/release；纯文档和治理改动由 `end` 内置检查验证。
 - 不得通过删除现有测试场景缩短耗时；使用 `python scripts/run_tests.py list` 查看场景清单。
 
+## 资料登记与目录用途
 
 - 资料路径失效先运行 `catalog reconcile` 搜索可能的移动位置；唯一内容哈希匹配可通过 `--apply` 修复原登记，保留资料身份和关系。歧义、无历史哈希或范围外位置需要用户选择新位置或确认归档，不自动删除或归档。
 - 文件夹导航登记使用 `catalog folder add/update/list/archive/restore`。教程、翻译用于文献加工，plans 用于 Sparks 的下一步；登记文件夹不替代内部文件登记。
