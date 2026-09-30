@@ -1,22 +1,40 @@
 {
   "format": 1,
-  "application_version": "2.0.0",
+  "application_version": "2.0.2",
   "build_identity": {
-    "build_id": "a97868de398c5b9a",
-    "source_commit": "f9632a2f4ee4b472da072e26eef369051946744f",
-    "source_tree": "d62a78c3de76a4eea43dc26a7d2c324b0d22eb496e9db2d6900aad5f69482744",
-    "built_at": "2026-08-02T11:16:12+00:00",
+    "build_id": "0717531f0ae9bcc7",
+    "source_commit": "1bf7616d83cb063e48cc794f210435ecfe41eb56",
+    "build_input_fingerprint": "caeb327b91cb8f5d1db436d3b18f5a05e585b79f5ed5b7a0ace951459d91c375",
+    "source_tree": "caeb327b91cb8f5d1db436d3b18f5a05e585b79f5ed5b7a0ace951459d91c375",
+    "source_tree_algorithm": "build-input-content-v3",
+    "built_at": "2026-09-30T09:09:37+00:00",
     "dirty": true,
     "mode": "frozen"
   },
-  "template_version": 7,
+  "template_version": 13,
   "managed_files": {
     ".githooks/pre-commit": {
-      "hash": "2d9776d503e44c6251de0b0d218f521ab85c5d21eb0a3cc2581a7f8d2c45989b",
+      "hash": "8af91d4fc439a2efb3797bbd138f1a185039dda73ee4369feed97fb30b1be5f1",
       "customized": false
     },
     "maintenance/README.md": {
-      "hash": "e81fb5c42b088b72ccb74a10f05ba3e00aae6e6948186caadd28bbdb65921505",
+      "hash": "1f511b304b79fec4e1a47bc8ca23409d0c88638eaf4f9ddf8aa60789e3eacae4",
+      "customized": true
+    },
+    "maintenance/CORE.md": {
+      "hash": "062111b4fb90a42ddcbc9fdbc82a982331f150af2596345865018e11b5fc5e2b",
+      "customized": true
+    },
+    "maintenance/AUTOMATION.md": {
+      "hash": "bc0d22f0eaa58ab1539d3ad00c8909b41d868090289947d0afa3b58446a71d6e",
+      "customized": true
+    },
+    "maintenance/RESEARCH.md": {
+      "hash": "15e22cc9fcff5cf7ea5619e42aed7dc1a57781052d208e6b6f5caddd2026629d",
+      "customized": true
+    },
+    "maintenance/OPERATIONS.md": {
+      "hash": "165cfb2f96b406e5f65a948bc294d5e2700811f67988bb2f98fb5ca3ec507452",
       "customized": true
     },
     "resources/source/.gitkeep": {
@@ -35,10 +53,6 @@
       "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
       "customized": false
     },
-    "resources/outputs/.gitkeep": {
-      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "customized": false
-    },
     "resources/others/.gitkeep": {
       "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
       "customized": false
@@ -47,13 +61,29 @@
       "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
       "customized": false
     },
+    "resources/sparks/.gitkeep": {
+      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "customized": false
+    },
+    "resources/tutorials/.gitkeep": {
+      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "customized": false
+    },
+    "resources/translations/.gitkeep": {
+      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "customized": false
+    },
+    "resources/plans/.gitkeep": {
+      "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "customized": false
+    },
     "AGENTS.md:block": {
-      "hash": "1521d83443395a166a59bbb262fc657674616c47331010a3c5d84dde5f0fe507",
+      "hash": "5dc0556b46c2e4b95de2fe422d2a5427542fae198ece4fee051e3c143339b11c",
       "customized": true
     },
     ".gitignore:block": {
-      "hash": "e9d3521aa479c86f800290703df447741e8eb221104c1ff70e0daf5ded333aef",
-      "customized": false
+      "hash": "89ad64c5f684cc2fdd2f11ee0f3964703e58b6d24b6ed7ae97beabbe7b0d8b89",
+      "customized": true
     },
     ".gitattributes:block": {
       "hash": "df7d84e65dda36940e02131bb80ff2761e096db2ec51474701c6a50be482c3fb",
