@@ -26,7 +26,7 @@ def verification_view(context: dict) -> dict:
         ]
     if active:
         result["checkpoint_status"] = context.get("checkpoint_status", active.get("checkpoint_status"))
-    result.update(pick(preflight, ("status", "blockers", "warnings")))
+    result.update(pick(preflight, ("status", "blockers", "warnings", "pending_resources")))
     if verification:
         result["verification_status"] = verification.get("status")
     result["next_actions"] = context.get("required_actions") or preflight.get("required_actions") or []
@@ -111,6 +111,7 @@ def compact_result(output: dict[str, Any], *, task_id: str | None = None) -> dic
     result = pick(output, (
         "task_id", "attempt_id", "result", "branch", "track", "state", "stage_review", "git",
         "warnings", "deprecation_warnings", "next_actions", "next_step", "changed_count", "logs", "review_summary",
+        "pending_resources", "resource_blockers", "verification_problems", "blocker", "recovery_conditions",
     ))
     result.setdefault("task_id", task_id)
     result.setdefault("result", "success")

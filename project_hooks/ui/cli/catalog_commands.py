@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ...infrastructure.persistence.database import ProjectDatabase
+from ...infrastructure.system.resource_reconciliation import file_sha256, reconcile_plan
+from ...infrastructure.system.folder_index import folder_index, render_folder_index
 
 from ...infrastructure.system.resource_layout import (
     LEGACY_BY_PATH,
@@ -27,6 +29,7 @@ from ...infrastructure.system.resource_layout import (
     is_indexable_resource_file,
     legacy_resource_for_path,
     resource_for_path,
+    resource_directory_snapshot,
     simulation_bundle_metadata,
 )
 from ...core.catalog import (
@@ -46,6 +49,9 @@ CATALOG_KIND_PREFIXES = {
     "other": "other",
     "report": "report",
     "spark": "spark",
+    "tutorial": "tutorial",
+    "translation": "translation",
+    "plan": "plan",
 }
 CATALOG_DIRECTORIES = {item.relative_path: item.kind for item in RESOURCE_DIRECTORIES}
 CATALOG_STATUSES = ("active", "missing", "archived")
@@ -106,10 +112,7 @@ def validate_resource_path(relative: str, kind: str) -> str:
             "资料文件必须位于 resources/source、resources/data、resources/theory、"
             "resources/analysis、resources/outputs、resources/others 或 resources/reports"
         )
-    if resource.kind != kind:
-        raise CatalogError(
-            f"文件所在目录对应 {resource.kind}，与 --kind {kind} 不一致"
-        )
+    # Directory kinds supply defaults; moving a material preserves its original kind.
     return relative
 
 
@@ -171,6 +174,7 @@ def file_metadata(path: Path) -> dict[str, str | int]:
         "file_size": stat.st_size,
         "file_mtime_ns": stat.st_mtime_ns,
         "extension": path.suffix.casefold(),
+        "sha256": file_sha256(path),
     }
 
 
@@ -311,6 +315,8 @@ def add_item(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     metadata = parse_metadata(args.meta)
     if absolute_path is not None and absolute_path.is_dir():
         metadata = _bundle_metadata(absolute_path, metadata, args.entrypoint)
+    elif absolute_path is not None:
+        metadata.update(file_metadata(absolute_path))
     payload = {
         "item_id": item_id,
         "kind": args.kind,
@@ -393,6 +399,8 @@ def update_item(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         )
     else:
         item["metadata"] = _without_bundle_metadata(item.get("metadata", {}))
+        if item.get("path") and (runtime.root / item["path"]).is_file():
+            item["metadata"].update(file_metadata(runtime.root / item["path"]))
     payload = catalog_item_payload(item)
     runtime.persist([runtime.emit(
         "catalog.item_upserted", branch=branch, task_id=record["task_id"], payload=payload
@@ -463,6 +471,112 @@ def unlink_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     return {"relation_id": relation_id, "removed": True}
 
 
+def _read_folders(runtime):
+    connection = runtime.database()
+    try:
+        return connection.catalog_folders()
+    finally:
+        connection.close()
+
+
+def reconcile_items(args: argparse.Namespace, runtime: CatalogRuntime, *, persist=True) -> dict:
+    connection = runtime.database()
+    try:
+        items = [decode_item(row) for row in connection.catalog_items()]
+    finally:
+        connection.close()
+    selected_id = getattr(args, "item_id", None)
+    selected_path = getattr(args, "path", None)
+    apply = bool(getattr(args, "apply", False))
+    if selected_id and not any(i["item_id"] == selected_id for i in items):
+        raise CatalogError(f"找不到科研资料条目: {selected_id}")
+    if selected_path and (not selected_id or not apply):
+        raise CatalogError("确认新路径必须同时提供 --item-id 和 --apply")
+    plan = reconcile_plan(runtime.root, items, item_id=selected_id)
+    if selected_path:
+        relative, absolute = _existing_catalog_path(runtime.root, selected_path)
+        item = next(i for i in items if i["item_id"] == selected_id)
+        if item.get("status") == "archived":
+            raise CatalogError("归档条目请先 restore，再确认新路径")
+        validate_resource_path(relative, item["kind"])
+        if bool(absolute.is_dir()) != is_simulation_bundle(item):
+            raise CatalogError("新路径与原资料的文件/资料包类型不一致")
+        plan["items"] = [{"item_id": selected_id, "old_path": item["path"], "new_path": relative,
+                          "action": "repair", "reason": "user_confirmed", "candidates": []}]
+    repairs, events = [], []
+    context = runtime.write_context() if apply else None
+    for candidate in plan["items"]:
+        if candidate["action"] != "repair":
+            continue
+        item = dict(next(i for i in items if i["item_id"] == candidate["item_id"]))
+        target = runtime.root / candidate["new_path"]
+        # Resolve again immediately before emitting the update.
+        relative, absolute = _existing_catalog_path(runtime.root, str(target))
+        validate_resource_path(relative, item["kind"])
+        _validate_catalog_path_overlap(items + repairs, relative, bundle=is_simulation_bundle(item), exclude_id=item["item_id"])
+        refreshed_metadata = (simulation_bundle_metadata(absolute, item.get("metadata", {}).get("entrypoint"))
+                              if is_simulation_bundle(item) else file_metadata(absolute))
+        if candidate["reason"] != "user_confirmed":
+            if (runtime.root / candidate["old_path"]).exists():
+                raise CatalogError("原路径在核对期间恢复，请重新核对")
+            actual = refreshed_metadata["tree_sha256" if is_simulation_bundle(item) else "sha256"]
+            if actual != candidate["expected_hash"]:
+                raise CatalogError("候选内容在核对期间变化，请重新核对")
+        item["path"], item["status"] = relative, "active"
+        item["metadata"] = dict(item.get("metadata") or {})
+        item["metadata"].update(refreshed_metadata)
+        if item["path"] == candidate["old_path"]:
+            continue
+        repairs.append(item)
+        if context:
+            record, branch = context
+            payload = catalog_item_payload(item)
+            payload["reconciliation"] = {"old_path": candidate["old_path"], "new_path": relative,
+                                         "basis": candidate["reason"], "sha256": candidate.get("expected_hash")}
+            events.append(runtime.emit("catalog.item_upserted", branch=branch, task_id=record["task_id"], payload=payload))
+    if events and persist:
+        runtime.persist(events)
+    return {**plan, "applied": apply, "repairs": repairs, "events": events}
+
+
+def folder_command(args: argparse.Namespace, runtime: CatalogRuntime):
+    connection = runtime.database()
+    try:
+        folders = connection.catalog_folders()
+        if args.folder_command == "index":
+            index = folder_index(runtime.root, [decode_item(row) for row in connection.catalog_items()], folders)
+            return index if args.format == "json" else render_folder_index(index)
+    finally:
+        connection.close()
+    if args.folder_command == "list":
+        return folders
+    record, branch = runtime.write_context()
+    folder_id = getattr(args, "folder_id", None) or getattr(args, "id", None)
+    current = next((f for f in folders if f["folder_id"] == folder_id), None)
+    if args.folder_command != "add" and current is None:
+        raise CatalogError(f"找不到资料文件夹: {folder_id}")
+    path = getattr(args, "path", None) or (current or {}).get("path")
+    relative = normalize_project_path(runtime.root, path)
+    if not relative.startswith("resources/"):
+        raise CatalogError("资料文件夹必须位于 resources 内")
+    if args.folder_command != "archive" and not (runtime.root / relative).is_dir():
+        raise CatalogError(f"资料文件夹不存在: {relative}")
+    folder_id = validate_identifier(folder_id or "folder-" + hashlib.sha256(relative.casefold().encode()).hexdigest()[:12])
+    if args.folder_command == "add" and any(f["folder_id"] == folder_id for f in folders):
+        raise CatalogError("资料文件夹已登记，请使用 folder update")
+    if any(f["path"].casefold() == relative.casefold() and f["folder_id"] != folder_id for f in folders):
+        raise CatalogError("文件夹路径已登记")
+    payload = {"folder_id": folder_id, "path": relative,
+               "name": getattr(args, "name", None) or (current or {}).get("name") or Path(relative).name,
+               "purpose": getattr(args, "purpose", None) if getattr(args, "purpose", None) is not None else (current or {}).get("purpose", ""),
+               "status": "archived" if args.folder_command == "archive" else "active",
+               "created_at": (current or {}).get("created_at", runtime.timestamp())}
+    if current and all(current.get(k) == v for k, v in payload.items()):
+        return payload
+    runtime.persist([runtime.emit("catalog.folder_upserted", branch=branch, task_id=record["task_id"], payload=payload)])
+    return payload
+
+
 def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     record, branch = runtime.write_context()
     if bool(args.root) != bool(args.kind):
@@ -476,17 +590,10 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         resource = resource_for_path(relative)
         if resource is None:
             raise CatalogError("扫描目录必须位于标准 resources 目录内")
-        if resource.kind != args.kind:
-            raise CatalogError(
-                f"扫描目录对应 {resource.kind}，与 --kind {args.kind} 不一致"
-            )
-        roots.append((scan_root, resource.kind))
+        roots.append((scan_root, args.kind))
     else:
-        roots.extend(
-            (runtime.root / directory, kind)
-            for directory, kind in CATALOG_DIRECTORIES.items()
-            if kind not in OPTIONAL_CATALOG_KINDS
-        )
+        roots.append((runtime.root / "resources", "other"))
+    reconciliation = reconcile_items(argparse.Namespace(apply=not args.dry_run), runtime, persist=False)
     connection = runtime.database()
     try:
         existing = {
@@ -496,6 +603,11 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         }
     finally:
         connection.close()
+    for item in reconciliation["repairs"]:
+        existing = {p: i for p, i in existing.items() if i["item_id"] != item["item_id"]}
+        existing[item["path"]] = item
+    reserved = {p.casefold() for p in reconciliation["reserved_paths"]}
+    reserved -= {i["path"].casefold() for i in reconciliation["repairs"]}
     discovered: dict[str, tuple[Path, str]] = {}
     scanned_prefixes: list[str] = []
     physical_file_count = 0
@@ -504,9 +616,9 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         if is_simulation_bundle(item) and item.get("status") != "archived"
     ]
     for scan_root, kind in roots:
+        scanned_prefixes.append(scan_root.relative_to(runtime.root).as_posix().rstrip("/") + "/")
         if not scan_root.exists():
             continue
-        scanned_prefixes.append(scan_root.relative_to(runtime.root).as_posix().rstrip("/") + "/")
         for path in scan_root.rglob("*"):
             if path.is_file() and is_indexable_resource_file(path, base=scan_root):
                 try:
@@ -514,12 +626,17 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
                 except ValueError:
                     continue
                 relative = path.relative_to(runtime.root).as_posix()
+                if relative.casefold() in reserved:
+                    continue
+                inferred = resource_for_path(relative).kind
+                if not args.root and inferred in OPTIONAL_CATALOG_KINDS:
+                    continue
                 physical_file_count += 1
                 if any(bundle_contains(str(item["path"]), relative) for item in bundle_items):
                     continue
-                discovered[relative] = (path, kind)
-    actions: list[dict] = []
-    events: list[dict] = []
+                discovered[relative] = (path, kind if args.root else inferred)
+    actions = [{"action": "reconcile", "item_id": i["item_id"], "path": i["path"]} for i in reconciliation["repairs"]]
+    events = list(reconciliation["events"])
     for item in bundle_items:
         relative = str(item["path"])
         in_scope = any(
@@ -583,7 +700,8 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         if is_simulation_bundle(item):
             continue
         in_scope = any(relative.startswith(prefix) for prefix in scanned_prefixes)
-        if in_scope and relative not in discovered_paths and item.get("status") not in {"missing", "archived"}:
+        if (in_scope and relative not in discovered_paths and not (runtime.root / relative).exists()
+                and item.get("status") not in {"missing", "archived"}):
             item["status"] = "missing"
             payload = catalog_item_payload(item)
             actions.append({"action": "missing", "item_id": item["item_id"], "path": relative})
@@ -594,6 +712,8 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         runtime.persist(events)
     return {
         "dry_run": args.dry_run,
+        "reconciliation": [{k: v for k, v in r.items() if k != "expected_hash"} for r in reconciliation["items"]],
+        "unregistered_folders": [f["path"] for f in resource_directory_snapshot(runtime.root, list(existing.values()), _read_folders(runtime)) if f["registration"] == "unregistered"],
         "scanned_files": physical_file_count,
         "scanned_items": len(discovered) + sum(
             any(str(item["path"]) == prefix.rstrip("/") or str(item["path"]).startswith(prefix)
@@ -671,19 +791,30 @@ def ingest_plan(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     if relative is not None:
         resource = resource_for_path(relative)
         if resource is None:
-            raise CatalogError("项目内文件必须位于七个标准 resources 目录之一")
+            raise CatalogError("项目内文件必须位于 resources/ 范围内")
         inferred = resource.kind
-        if args.kind and args.kind != resource.kind:
-            raise CatalogError(f"文件所在目录对应 {resource.kind}，与 --kind {args.kind} 不一致")
         if args.name and args.name != source.name:
             raise CatalogError("项目内文件不能通过 ingest 改名；请先在文件系统中改名")
-        kind, target, copied = inferred, source, False
+        if getattr(args, "folder", None) and normalize_project_path(root, args.folder) != source.parent.relative_to(root).as_posix():
+            raise CatalogError("项目内文件不能通过 ingest 移动；请先按文件夹索引移动并运行 catalog reconcile")
+        kind, target, copied = args.kind or inferred, source, False
     else:
         if not args.kind:
             raise CatalogError("项目外文件必须显式提供 --kind")
         kind = args.kind
         target_name = _validate_target_name(args.name or source.name)
-        target = (_directory_for_kind(root, kind) / target_name).resolve()
+        folder = getattr(args, "folder", None)
+        if kind == "output" and not folder:
+            raise CatalogError("输出资料需要先读取 catalog folder index，并通过 --folder 选择程序的输出目录")
+        if folder:
+            relative_folder = normalize_project_path(root, folder)
+            index = folder_index(root, [], _read_folders(runtime))
+            known = next((f for f in index["folders"] if f["path"] == relative_folder), None)
+            if not known or not known["exists"] or known["registration"] not in {"preset", "registered"}:
+                raise CatalogError("目标文件夹必须是已存在的预设或已登记目录；请先 catalog folder add")
+            target = (root / relative_folder / target_name).resolve()
+        else:
+            target = (_directory_for_kind(root, kind) / target_name).resolve()
         if target.exists():
             raise CatalogError(f"目标文件已存在，拒绝覆盖: {target.relative_to(root).as_posix()}")
         copied = True
@@ -692,6 +823,8 @@ def ingest_plan(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     try:
         row = connection.catalog_item_by_path(target_path)
         current = decode_item(row) if row else None
+        if current and not args.kind:
+            kind = current["kind"]
     finally:
         connection.close()
     return {
@@ -1019,6 +1152,27 @@ def add_catalog_filters(parser: argparse.ArgumentParser, *, include_ids: bool = 
 def configure_catalog_parser(subparsers) -> None:
     catalog = subparsers.add_parser("catalog", help="管理和查询科研资料索引")
     catalog_sub = catalog.add_subparsers(dest="catalog_command", required=True)
+    reconcile_parser = catalog_sub.add_parser("reconcile", help="核对手动移动的资料；默认只读")
+    reconcile_parser.add_argument("--apply", action="store_true")
+    reconcile_parser.add_argument("--item-id")
+    reconcile_parser.add_argument("--path", help="用户确认的新路径，必须同时提供 --item-id --apply")
+    folder = catalog_sub.add_parser("folder", help="登记用于导航的资料文件夹")
+    folder_sub = folder.add_subparsers(dest="folder_command", required=True)
+    folder_sub.add_parser("list")
+    index_parser = folder_sub.add_parser("index", help="读取预设、登记和待登记目录的统一用途索引")
+    index_parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    for operation in ("add", "update", "archive", "restore"):
+        command = folder_sub.add_parser(operation)
+        if operation == "add":
+            command.add_argument("--id")
+            command.add_argument("--path", required=True)
+        else:
+            command.add_argument("folder_id")
+            if operation == "update":
+                command.add_argument("--path")
+        if operation in {"add", "update"}:
+            command.add_argument("--name")
+            command.add_argument("--purpose")
     add_parser = catalog_sub.add_parser("add")
     add_parser.add_argument("--id")
     add_parser.add_argument("--kind", required=True, choices=CATALOG_KINDS)
@@ -1070,6 +1224,7 @@ def configure_catalog_parser(subparsers) -> None:
     ingest_parser = catalog_sub.add_parser("ingest")
     ingest_parser.add_argument("file")
     ingest_parser.add_argument("--kind", choices=CATALOG_KINDS)
+    ingest_parser.add_argument("--folder", help="从文件夹索引选择目标目录；输出资料必须指定")
     ingest_parser.add_argument("--name")
     ingest_parser.add_argument("--title")
     ingest_parser.add_argument("--summary")
@@ -1095,6 +1250,11 @@ def configure_catalog_parser(subparsers) -> None:
 
 
 def catalog_command(args: argparse.Namespace, runtime: CatalogRuntime) -> str | dict | list[dict]:
+    if args.catalog_command == "folder":
+        return folder_command(args, runtime)
+    if args.catalog_command == "reconcile":
+        result = reconcile_items(args, runtime)
+        return {key: value for key, value in result.items() if key not in {"events", "repairs", "reserved_paths"}}
     if args.catalog_command == "add":
         return add_item(args, runtime)
     if args.catalog_command == "update":

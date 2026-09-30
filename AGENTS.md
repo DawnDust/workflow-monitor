@@ -12,7 +12,7 @@
 - 无法可靠判断稳定维护还是探索时必须在对话中询问用户，不得静默选择轨道。
 - 已启动的任务通过 `report` 一次更新进度和科研证据，完成时运行 `end`。只有 `validated` 尝试可准备 Squash PR，合并必须等待用户明确确认。
 - 项目总目标使用 `project update`；科研进展、证据和关联篇章修订统一通过 `report` 填报，程序生成记录。新证据改变判断时必须提供修订说明、概况和证据；旧 `stage`、`attempt update` 继续兼容。
-- 科研资料文件只放在 `resources/` 的标准子目录，并通过 `catalog` 指令登记；`resources/sparks/` 中未登记的 Markdown 灵感除外。`check` 必须保持通过。
+- 科研资料文件放在 `resources/` 的预设或已登记自定义文件夹，并通过 `catalog` 指令登记；`resources/sparks/` 中未登记的 Markdown 灵感除外。`check` 必须保持通过。
 - 仅当用户明确要求纯 Git 发布，且 `main` 没有活动任务、不再编辑、改动已经结束并验证通过时，才可直接检查、暂存、提交和推送。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态、绕过 `end`、在 `main` 试改、自动合并。
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。

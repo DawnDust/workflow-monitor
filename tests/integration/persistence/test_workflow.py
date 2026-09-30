@@ -40,6 +40,30 @@ SOURCE_ROOT = Path(__file__).resolve().parents[3]
 
 
 class ProjectHooksSqliteTests(unittest.TestCase):
+    def test_folder_index_is_readonly_and_output_import_uses_explicit_registered_folder(self):
+        before = (self.root / "maintenance/events.jsonl").read_bytes()
+        index = json.loads(self.hooks("catalog", "folder", "index", "--format", "json").stdout)
+        self.assertIn("resources/plans", {f["path"] for f in index["folders"]})
+        self.assertIn("资料文件夹索引", self.hooks("catalog", "folder", "index").stdout)
+        self.assertEqual((self.root / "maintenance/events.jsonl").read_bytes(), before)
+        outside = Path(self.temp.name) / "result.csv"
+        outside.write_text("1,2")
+        rejected = self.hooks("catalog", "ingest", str(outside), "--kind", "output", "--dry-run", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("--folder", rejected.stderr)
+        started = self.start("20260930_folders_001", check=False)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        target = self.root / "resources/analysis/program/outputs"
+        target.mkdir(parents=True)
+        self.hooks("catalog", "folder", "add", "--path", "resources/analysis/program/outputs", "--name", "程序输出", "--purpose", "程序结果")
+        self.hooks("catalog", "folder", "index")
+        imported = json.loads(self.hooks("catalog", "ingest", str(outside), "--kind", "output", "--folder", "resources/analysis/program/outputs").stdout)
+        self.assertEqual(imported["item"]["path"], "resources/analysis/program/outputs/result.csv")
+        self.assertEqual(imported["item"]["kind"], "output")
+        journal = (self.root / "maintenance/events.jsonl").read_bytes()
+        self.assertEqual(json.loads(self.hooks("catalog", "folder", "list").stdout)[0]["name"], "程序输出")
+        self.assertEqual((self.root / "maintenance/events.jsonl").read_bytes(), journal)
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.seed_temp = tempfile.TemporaryDirectory()
@@ -52,7 +76,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             installed = json.loads(installation.read_text(encoding="utf-8"))
             installed["application_version"] = __version__
             installation.write_text(json.dumps(installed), encoding="utf-8")
-        for name in ("source", "data", "theory", "analysis", "outputs", "others", "reports", "sparks"):
+        for name in ("source", "data", "theory", "analysis", "outputs", "others", "reports", "sparks", "tutorials", "translations", "plans"):
             directory = cls.seed_root / "resources" / name
             directory.mkdir(parents=True)
             (directory / ".gitkeep").write_text("\n", encoding="utf-8")
@@ -1373,6 +1397,223 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         verified = json.loads(checked.stdout)
         self.assertEqual(verified["status"], "passed")
 
+    def events(self):
+        return load_events(self.root / "maintenance/events.jsonl")
+
+    def register_paper(self, item_id="paper", relative="resources/source/paper.pdf", content=b"unique paper evidence"):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        return json.loads(self.hooks("catalog", "add", "--id", item_id, "--kind", "literature",
+                                     "--title", "Original title", "--summary", "Original summary",
+                                     "--tag", "original", "--path", relative).stdout)
+
+    def test_reconcile_move_keeps_identity_metadata_relations_and_is_idempotent(self):
+        task = "20260930_reconcile_001"
+        self.start(task)
+        original = self.register_paper()
+        self.hooks("catalog", "add", "--id", "note", "--kind", "theory", "--title", "Logical note")
+        self.hooks("catalog", "link", "note", "uses", "paper")
+        target = self.root / "resources/translations/renamed.pdf"
+        (self.root / original["path"]).rename(target)
+        journal = (self.root / "maintenance/events.jsonl").read_bytes()
+        preview = json.loads(self.hooks("catalog", "reconcile").stdout)
+        self.assertEqual(preview["items"][0]["reason"], "unique_hash")
+        self.assertEqual((self.root / "maintenance/events.jsonl").read_bytes(), journal)
+        scanned = json.loads(self.hooks("catalog", "scan").stdout)
+        self.assertIn("reconcile", [a["action"] for a in scanned["changes"]])
+        updated = json.loads(self.hooks("catalog", "show", "paper", "--format", "json").stdout)["item"]
+        for field in ("item_id", "kind", "title", "summary", "tags", "created_at"):
+            self.assertEqual(updated[field], original[field])
+        self.assertEqual(updated["path"], "resources/translations/renamed.pdf")
+        self.assertEqual(updated["metadata"]["sha256"], original["metadata"]["sha256"])
+        context = json.loads(self.hooks("catalog", "context", "--format", "json").stdout)
+        self.assertEqual(context["relations"][0]["target_id"], "paper")
+        events = self.events()
+        self.assertTrue(any(e["payload"].get("reconciliation") for e in events))
+        self.assertEqual(json.loads(self.hooks("catalog", "scan").stdout)["changes"], [])
+
+    def test_reconcile_ambiguity_and_shared_candidates_never_reassign_identity(self):
+        self.start("20260930_ambiguous_001")
+        original = self.register_paper()
+        source = self.root / original["path"]
+        copy1, copy2 = self.root / "resources/source/a/paper.pdf", self.root / "resources/source/b/paper.pdf"
+        for path in (copy1, copy2):
+            path.parent.mkdir()
+            shutil.copy2(source, path)
+        source.unlink()
+        result = json.loads(self.hooks("catalog", "scan").stdout)
+        self.assertEqual(result["reconciliation"][0]["reason"], "ambiguous_hash")
+        self.assertFalse(any(a["action"] == "add" for a in result["changes"]))
+        copy2.unlink()
+        self.register_paper("second", "resources/source/second.pdf")
+        (self.root / "resources/source/second.pdf").unlink()
+        result = json.loads(self.hooks("catalog", "reconcile", "--apply").stdout)
+        self.assertEqual({r["reason"] for r in result["items"]}, {"shared_candidate"})
+        self.assertTrue(all(r["action"] == "needs_input" for r in result["items"]))
+        self.hooks("catalog", "reconcile", "--apply", "--item-id", "paper", "--path", str(copy1))
+        updated = json.loads(self.hooks("catalog", "show", "paper", "--format", "json").stdout)["item"]
+        self.assertEqual(updated["item_id"], "paper")
+
+    def test_reconcile_same_name_different_content_outside_and_unknown_locations(self):
+        self.start("20260930_unknown_001")
+        original = self.register_paper()
+        source = self.root / original["path"]
+        outside = self.root / "manual/paper.pdf"
+        outside.parent.mkdir()
+        source.rename(outside)
+        same_name = self.root / "resources/data/paper.pdf"
+        same_name.write_bytes(b"different content")
+        result = json.loads(self.hooks("catalog", "reconcile", "--apply").stdout)
+        self.assertEqual(result["items"][0]["reason"], "outside_resources")
+        self.assertEqual(result["items"][0]["action"], "needs_input")
+        outside.rename(Path(self.temp.name) / "moved-out.pdf")
+        result = json.loads(self.hooks("catalog", "reconcile", "--apply").stdout)
+        self.assertEqual(result["items"][0]["action"], "needs_input")
+        self.assertIn("不会自动删除或归档", result["items"][0]["next_action"])
+        item = json.loads(self.hooks("catalog", "show", "paper", "--format", "json").stdout)["item"]
+        self.assertEqual(item["path"], original["path"])
+        self.assertNotEqual(item["status"], "archived")
+
+    def test_old_missing_resource_does_not_block_document_finish_or_auto_commit(self):
+        previous = "20260930_seed_001"
+        self.start(previous)
+        self.register_paper()
+        self.end(previous)
+        self.commit_all("register input")
+        (self.root / "resources/source/paper.pdf").unlink()
+        current = "20260930_document_001"
+        self.start(current, "--kind", "docs", commit="always")
+        (self.root / "README.md").write_text("# Updated documentation\n", encoding="utf-8")
+        finished = json.loads(self.end(current).stdout)
+        self.assertEqual(finished["result"], "completed")
+        self.assertTrue(finished["pending_resources"])
+        self.assertEqual(finished["git"]["status"], "committed")
+        self.assertNotEqual(self.hooks("check", check=False).returncode, 0)
+        self.assertFalse(any(e["event_type"] == "task.finished" and e["payload"]["result"] == "abandoned" for e in self.events()))
+
+    def test_missing_direct_dependency_blocks_completed_and_allows_explicit_blocked(self):
+        previous = "20260930_dependencies_001"
+        self.start(previous)
+        self.register_paper("input")
+        self.hooks("catalog", "add", "--id", "logical", "--kind", "theory", "--title", "Logical")
+        self.hooks("catalog", "link", "logical", "uses", "input")
+        self.end(previous)
+        (self.root / "resources/source/paper.pdf").unlink()
+        current = "20260930_blocked_001"
+        self.start(current, "--kind", "docs", "--depends-on", "catalog:logical")
+        failed = self.end(current, check=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("直接依赖缺失", failed.stderr)
+        self.assertTrue(json.loads(self.hooks("status").stdout)["active"])
+        result = json.loads(self.hooks("end", "--result", "blocked", "--note", "Waiting for input",
+            "--blocker", "Missing paper", "--evidence", "resources/source/paper.pdf is absent",
+            "--next", "Restore the input and restart work", "--compact").stdout)
+        self.assertEqual(result["result"], "blocked")
+        self.assertTrue(result["resource_blockers"])
+        self.assertFalse(json.loads(self.hooks("status").stdout)["active"])
+
+    def test_new_relation_to_baseline_missing_input_blocks_task_finish(self):
+        previous = "20260930_relation_seed_001"
+        self.start(previous)
+        self.register_paper("input")
+        self.hooks("catalog", "add", "--id", "logical", "--kind", "theory", "--title", "Logical")
+        self.end(previous)
+        self.commit_all("register relation input")
+        (self.root / "resources/source/paper.pdf").unlink()
+        current = "20260930_relation_001"
+        self.start(current, "--kind", "docs")
+        self.hooks("catalog", "link", "logical", "uses", "input")
+        failed = self.end(current, check=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("直接依赖缺失", failed.stderr)
+        self.assertTrue(json.loads(self.hooks("status").stdout)["active"])
+
+    def test_scan_keeps_existing_optionally_registered_spark_active(self):
+        self.start("20260930_scan_spark_001")
+        spark = self.root / "resources/sparks/idea.md"
+        spark.write_text("# Idea\n", encoding="utf-8")
+        self.hooks("catalog", "add", "--id", "idea", "--kind", "spark", "--title", "Idea",
+                   "--path", "resources/sparks/idea.md")
+        scanned = json.loads(self.hooks("catalog", "scan").stdout)
+        self.assertFalse(any(change["action"] == "missing" for change in scanned["changes"]))
+        item = json.loads(self.hooks("catalog", "show", "idea", "--format", "json").stdout)["item"]
+        self.assertEqual(item["status"], "active")
+
+    def test_delivery_missing_is_not_hidden_by_archive_and_new_missing_is_not_baseline(self):
+        self.start("20260930_delivery_001", "--deliverable", "path:resources/source/paper.pdf")
+        self.register_paper()
+        self.hooks("catalog", "archive", "paper")
+        (self.root / "resources/source/paper.pdf").unlink()
+        failed = self.end("20260930_delivery_001", check=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("交付物", failed.stderr)
+        self.assertTrue(json.loads(self.hooks("status").stdout)["active"])
+
+    def test_legacy_hashless_move_requires_input_then_explicit_repair(self):
+        self.start("20260930_legacyhash_001")
+        original = self.register_paper()
+        legacy = dict(original)
+        legacy["metadata"] = {k: v for k, v in original["metadata"].items() if k != "sha256"}
+        event = new_event("catalog.item_upserted", branch="main", task_id="20260930_legacyhash_001",
+                          payload=legacy, timezone="Asia/Shanghai")
+        append_events(self.root / "maintenance/events.jsonl", self.root / ".project_hooks", [event])
+        moved = self.root / "resources/source/renamed.pdf"
+        (self.root / original["path"]).rename(moved)
+        result = json.loads(self.hooks("catalog", "reconcile", "--apply").stdout)
+        self.assertTrue(all(r["action"] == "needs_input" for r in result["items"]))
+        self.hooks("catalog", "reconcile", "--apply", "--item-id", "paper", "--path", str(moved))
+        item = json.loads(self.hooks("catalog", "show", "paper", "--format", "json").stdout)["item"]
+        self.assertEqual(item["item_id"], "paper")
+        self.assertIn("sha256", item["metadata"])
+
+    def test_blocked_never_bypasses_journal_integrity_or_changes_abandoned_history(self):
+        self.start("20260930_abandoned_001")
+        self.hooks("task", "abandon", "--reason", "Explicitly abandoned fixture")
+        journal = self.root / "maintenance/events.jsonl"
+        history = journal.read_bytes()
+        self.start("20260930_integrity_001")
+        self.assertTrue(journal.read_bytes().startswith(history))
+        with journal.open("a", encoding="utf-8") as stream:
+            stream.write("invalid event\n")
+        failed = self.hooks("end", "--result", "blocked", "--note", "Blocked",
+                            "--blocker", "Corruption", "--evidence", "Invalid appended event",
+                            "--next", "Recover journal integrity", check=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertTrue((self.root / ".project_hooks/active-task.json").exists())
+        self.assertTrue(journal.read_bytes().startswith(history))
+
+    def test_folder_navigation_presets_optional_outputs_and_event_rebuild(self):
+        directory = self.root / "resources/outputs"
+        (directory / ".gitkeep").unlink()
+        directory.rmdir()
+        self.hooks("install")
+        self.assertFalse(directory.exists())
+        for name in ("tutorials", "translations", "plans"):
+            self.assertTrue((self.root / "resources" / name).is_dir())
+        self.start("20260930_folders_001")
+        nested = self.root / "resources/analysis/program/outputs"
+        nested.mkdir(parents=True)
+        parent = json.loads(self.hooks("catalog", "folder", "add", "--path", "resources/analysis/program", "--name", "Program", "--purpose", "Program materials").stdout)
+        child = json.loads(self.hooks("catalog", "folder", "add", "--path", "resources/analysis/program/outputs").stdout)
+        self.assertNotEqual(parent["folder_id"], child["folder_id"])
+        listed = json.loads(self.hooks("catalog", "folder", "list").stdout)
+        self.assertEqual(len(listed), 2)
+        moved = self.root / "resources/analysis/renamed"
+        nested.parent.rename(moved)
+        self.hooks("catalog", "folder", "update", parent["folder_id"], "--path", "resources/analysis/renamed")
+        self.hooks("catalog", "folder", "update", child["folder_id"], "--path", "resources/analysis/renamed/outputs")
+        connection = rebuild(self.root / ".project_hooks/maintenance.sqlite3", self.root / "maintenance/events.jsonl")
+        connection.close()
+        listed = json.loads(self.hooks("catalog", "folder", "list").stdout)
+        self.assertEqual({f["folder_id"] for f in listed}, {parent["folder_id"], child["folder_id"]})
+        self.hooks("catalog", "folder", "archive", child["folder_id"])
+        self.hooks("catalog", "folder", "restore", child["folder_id"])
+        self.assertEqual(self.hooks("catalog", "folder", "add", "--path", "maintenance", check=False).returncode, 1)
+        (moved / "result.txt").write_text("independent material", encoding="utf-8")
+        scanned = json.loads(self.hooks("catalog", "scan").stdout)
+        self.assertEqual(len(scanned["changes"]), 1)
+
     def test_catalog_cli_scan_relations_context_and_rebuild(self) -> None:
         task_id = "20260726_catalog_001"
         self.start(task_id)
@@ -1472,7 +1713,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         )
         dashboard = model.dashboard_snapshot()
         self.assertEqual(len(dashboard["catalog_items"]), 3)
-        self.assertEqual(len(dashboard["resource_directories"]), 8)
+        self.assertEqual(len(dashboard["resource_directories"]), 11)
         data_directory = next(
             item for item in dashboard["resource_directories"] if item["name"] == "data"
         )
@@ -1522,7 +1763,8 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             next(item["item_id"] for item in items if item["kind"] == "report"),
             "--kind", "other", check=False,
         )
-        self.assertIn("与 --kind other 不一致", mismatch.stderr)
+        self.assertEqual(mismatch.returncode, 0)
+        self.assertEqual(json.loads(mismatch.stdout)["kind"], "other")
 
     def test_simulation_directory_bundle_is_atomic_and_refreshes_digest(self) -> None:
         task_id = "20260809_simulation_bundle_001"
@@ -1797,7 +2039,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             "--dry-run", check=False,
         )
         self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn("必须位于七个标准 resources 目录之一", rejected.stderr)
+        self.assertIn("必须位于 resources/ 范围内", rejected.stderr)
 
     def test_catalog_ingest_reuses_active_task_and_bulk_update_is_safe(self) -> None:
         task_id = "20260726_catalogbulk_001"

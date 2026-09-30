@@ -23,3 +23,5 @@ The preference is stored in the local WebView2 profile. Storage failures fall ba
 ## Reporting a bug
 
 Export a diagnostic ZIP from **Settings → Advanced view → Diagnostics**, inspect and redact it, then use the Bug Report form. Include the application version, incident ID when available, reproduction steps, expected behavior, and actual behavior.
+
+Run catalog reconcile before treating a missing path as lost. Ask for a confirmed location or explicit archive decision when identity is uncertain. Record genuine blockers with end --result blocked, including reason, evidence and recovery conditions. Existing abandoned history is unchanged.

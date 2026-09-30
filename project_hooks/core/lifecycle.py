@@ -33,8 +33,16 @@ def finish_preflight(state: dict) -> dict:
         ))
     for error in state.get("health_errors") or []:
         blockers.append(_preflight_item("HEALTH_CHECK_FAILED", str(error), "health.check"))
+    for issue in state.get("resource_blockers") or []:
+        item = _preflight_item(issue["code"], issue["message"], "catalog reconcile")
+        if state.get("result") == "blocked" and not issue.get("hard"):
+            warnings.append(item)
+        else:
+            blockers.append(item)
+    warnings.extend(_preflight_item("RESOURCE_PENDING", issue["message"], "catalog reconcile")
+                    for issue in state.get("pending_resources") or [])
     verification = state.get("verification") or {}
-    for problem in verification.get("problems") or []:
+    for problem in ([] if state.get("result") == "blocked" else verification.get("problems") or []):
         blockers.append(_preflight_item(
             f"VERIFICATION_{str(problem.get('reason') or 'missing').upper().replace('-', '_')}",
             f"{problem.get('suite')} 测试回执：{problem.get('reason')}",

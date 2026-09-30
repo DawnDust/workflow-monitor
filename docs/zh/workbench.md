@@ -32,3 +32,17 @@
 ## 诊断
 
 内部故障可能生成本地轮转、脱敏的诊断记录。导出只会在本机生成 ZIP。附加到 Issue 前必须逐项检查；程序不会自动上传任何内容。
+
+## 资料路径与文件夹
+
+资料页是轻量目录用途索引和登记清单：左侧目录树只显示名称、非零数量和异常提醒；右侧集中显示当前目录的用途、位置和打开操作，只列直属子目录和文件。正常登记不重复显示状态，待登记和缺失资料保留标记，详情按需查看。空目录保留，模拟资料包内文件显示为包内内容，不重复登记；全局搜索仍查找跨目录的登记资料。目录展开、选择和键盘焦点在刷新时保留，窄窗口可收起目录面板。自定义目录通过 `catalog folder add --path <目录> --name <名称> --purpose <用途>` 登记，update/list/archive/restore 保持兼容。
+
+每次资料文件操作前，AI 重新运行只读 `catalog folder index`（结构化动作 `catalog.folder.index`，JSON 使用 `--format json`），读取预设、已登记、待登记和缺失目录的用途、层级及数量。新目录先创建并登记名称和用途，再刷新索引；无法判断位置时询问用户。资料管理约束存放和登记，不代替文件系统。输出导入使用 `catalog ingest <来源> --kind output --folder resources/analysis/程序名/outputs`，目标必须是索引中已存在的预设或已登记文件夹；未指定时提示选择，不重建顶层 outputs。代码文件按代码仓库结构管理。
+
+默认目录新增 `resources/tutorials/`（文献教程）、`resources/translations/`（文献翻译）和 `resources/plans/`（灵感下一步）。统一 `resources/outputs/` 不再默认创建或要求存在；既有登记保留，程序输出可放在 `resources/analysis/程序名/outputs/`。目录提供默认分类，移动修复保留资料原类型。
+
+发现登记路径失效时，AI 先运行 `catalog reconcile`，只读搜索项目内候选。唯一 SHA-256 匹配可使用 `catalog reconcile --apply` 修复原登记，保留 ID、资料元信息和关系。`catalog scan` 先执行同一核对；无法确认的候选不重复登记。同名或大小相同不等于同一资料；没有历史哈希、多个内容相同候选或去向未知时，需要用户选择位置或明确确认归档。确认新位置使用 `catalog reconcile --apply --item-id <ID> --path <路径>`；范围外位置须先移回 resources。不自动移动、删除或归档文件。
+
+任务开始时保存既有资料问题。`start/report/end` 的 `--depends-on catalog:<ID>` 或 `--depends-on path:<相对路径>` 登记直接依赖，`--deliverable` 使用同样格式声明交付物，均可重复提供或通过结构化输入填报。无关且未恶化的既有资料问题不阻止 completed，在回执中保留待处理；新问题、交付物和直接依赖缺失仍阻止完成。全局 check 继续报告全部问题，事件和数据库完整性门禁不关闭。
+
+确实受阻时，使用 `end --result blocked --note <说明> --blocker <原因> --evidence <证据> --next <恢复条件>`；未完成的验证如实保存。命令失败保留活动任务，只在用户明确放弃时使用 task abandon。修复均通过命令或结构化服务追加事件，历史 abandoned 及既有日志行不改写。

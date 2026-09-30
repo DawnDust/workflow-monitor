@@ -56,3 +56,5 @@ gh attestation verify .\workflow-monitor.spdx.json --repo DawnDust/workflow-moni
 ```
 
 将 SHA-256 与 `release-manifest.json` 对照。Manifest 也会明确说明 EXE 是否经过 Authenticode 签名；未签名构建仍受支持，但会被清楚标记。
+
+资料核对及文件夹命令、依赖声明和 blocked 流程见 [资料页面说明](workbench.md)。

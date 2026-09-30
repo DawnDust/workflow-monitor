@@ -14,6 +14,9 @@ CATALOG_KIND_LABELS = {
     "other": "其他",
     "report": "报告",
     "spark": "灵感",
+    "tutorial": "教程",
+    "translation": "翻译",
+    "plan": "计划",
 }
 
 

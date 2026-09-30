@@ -14,7 +14,8 @@ from ...core.catalog import decode_item
 from ...core.research_attention import research_attention
 from ..git import client as git_client
 from ..system.finish_preflight import assemble_finish_preflight
-from ..system.resource_layout import resource_directory_snapshot
+from ..system.resource_layout import resource_directory_snapshot, catalog_consistency_issues
+from ..system.folder_index import folder_index
 from .store import SCHEMA_VERSION, ensure_database, journal_hash, rows
 from ..system.verification import changed_paths_from_baseline
 
@@ -1159,12 +1160,16 @@ class MaintenanceReadModel:
                 connection,
                 "SELECT * FROM catalog_relations ORDER BY updated_at DESC, relation_id",
             )
+            folders = rows(connection, "SELECT * FROM catalog_folders ORDER BY path, folder_id")
+            resource_index = folder_index(self.repo_path, catalog_items, folders)
+            resource_issues = catalog_consistency_issues(self.repo_path, catalog_items, folders)
             context["research_attention"] = research_attention(context, catalog_items, catalog_relations)
             self._review_context(connection, context, catalog_items, catalog_relations)
             return {
                 "branch": branch,
                 "health": {
-                    "status": "passed" if integrity == "ok" else integrity,
+                    "status": ("attention" if resource_issues else "passed") if integrity == "ok" else integrity,
+                    "resource_issues": resource_issues,
                     "schema_version": SCHEMA_VERSION,
                     "events": connection.execute("SELECT COUNT(*) FROM events").fetchone()[0],
                     "journal_hash": journal_hash(self.journal_path),
@@ -1180,9 +1185,9 @@ class MaintenanceReadModel:
                 "task_details": task_details,
                 "catalog_items": catalog_items,
                 "catalog_relations": catalog_relations,
-                "resource_directories": resource_directory_snapshot(
-                    self.database_path.parent.parent, catalog_items
-                ),
+                "catalog_folders": folders,
+                "resource_directories": [folder for folder in resource_index["folders"] if folder["path"] != "resources"],
+                "resource_index": resource_index,
             }
         finally:
             connection.close()

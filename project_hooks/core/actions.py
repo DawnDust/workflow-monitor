@@ -149,6 +149,8 @@ ACTION_SPECS: dict[str, ActionSpec] = {
             _f("scope", "任务目标", "multiline", required=True, natural=True, maximum=2000),
             _f("out_of_scope", "不包含内容", "multiline", natural=True, maximum=2000),
             _f("acceptance", "验收条件（每行一项）", "list", required=True, natural=True, maximum=1000),
+            _f("depends_on", "资料直接依赖", "list", maximum=1000),
+            _f("deliverable", "交付物", "list", maximum=1000),
             _f("task_size", "任务规模", "choice", choices=("small", "large"), default="small"),
             _f("git_commit", "自动提交", "choice", choices=("auto", "always", "never"), default="auto"),
             _f("track", "工作轨道", "choice", choices=("stable", "research", "experiment", "sandbox"), default="stable"),
@@ -194,6 +196,8 @@ ACTION_SPECS: dict[str, ActionSpec] = {
             _f("main_goal", "主目标（兼容参数）", "choice",
                choices=("", "unchanged", "changed"), default=""),
             _f("note", "完成说明", "multiline", required=True, natural=True),
+            _f("depends_on", "资料直接依赖", "list", maximum=1000),
+            _f("deliverable", "交付物", "list", maximum=1000),
             _f("evidence", "完成证据（每行一项）", "list", natural=True, maximum=1000),
             _f("attempt_state", "探索结论状态", "choice",
                choices=("", "active", "validated", "negative", "inconclusive", "paused"), default=""),
@@ -278,7 +282,7 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         "catalog.add", "添加资料记录", "科研资料",
         (
             _f("kind", "资料类型", "choice", required=True,
-               choices=("literature", "data", "theory", "simulation", "output", "other", "report", "spark")),
+               choices=("literature", "data", "theory", "simulation", "output", "other", "report", "spark", "tutorial", "translation", "plan")),
             _f("title", "标题", required=True, natural=True, maximum=500),
             _f("summary", "摘要", "multiline", natural=True),
             _f("path", "项目相对路径", maximum=500),
@@ -328,7 +332,7 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         (
             _f("root", "扫描子目录", maximum=500),
             _f("kind", "限定类型", "choice",
-               choices=("", "literature", "data", "theory", "simulation", "output", "other", "report", "spark"), default=""),
+               choices=("", "literature", "data", "theory", "simulation", "output", "other", "report", "spark", "tutorial", "translation", "plan"), default=""),
             _f("dry_run", "仅预览", "bool", default=True),
         ), confirmation_level="preview", requires_active=True,
     ),
@@ -336,8 +340,9 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         "catalog.ingest", "导入外部资料", "科研资料",
         (
             _f("file", "文件路径", required=True, maximum=1000),
+            _f("folder", "索引中的目标文件夹", maximum=1000),
             _f("kind", "资料类型", "choice",
-               choices=("", "literature", "data", "theory", "simulation", "output", "other", "report", "spark"), default=""),
+               choices=("", "literature", "data", "theory", "simulation", "output", "other", "report", "spark", "tutorial", "translation", "plan"), default=""),
             _f("title", "标题", natural=True, maximum=500),
             _f("summary", "摘要", "multiline", natural=True),
             _f("source", "来源", "multiline", natural=True),
@@ -350,7 +355,7 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         (
             _f("id", "资料 ID（每行一项）", "list", maximum=100),
             _f("kind", "筛选类型", "choice",
-               choices=("", "literature", "data", "theory", "simulation", "output", "other", "report", "spark"), default=""),
+               choices=("", "literature", "data", "theory", "simulation", "output", "other", "report", "spark", "tutorial", "translation", "plan"), default=""),
             _f("status", "筛选状态", "choice", choices=("", "active", "missing", "archived"), default=""),
             _f("query", "关键词", natural=True, maximum=500),
             _f("all", "更新全部匹配项", "bool"),
@@ -393,6 +398,32 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         requires_idle=True, requires_stable=True, requires_frozen=True,
     ),
 }
+
+
+ACTION_SPECS["catalog.reconcile"] = ActionSpec(
+    "catalog.reconcile", "核对资料路径", "科研资料",
+    (_f("apply", "应用唯一确认的修复", "bool", default=False),
+     _f("item_id", "资料 ID", maximum=100), _f("path", "用户确认的新路径", maximum=1000)),
+    description="默认只读；歧义需用户确认，不自动归档。",
+)
+ACTION_SPECS["catalog.folder.index"] = ActionSpec(
+    "catalog.folder.index", "读取资料目录用途索引", "科研资料",
+    (_f("format", "输出格式", "choice", choices=("json", "markdown"), default="json"),), read_only=True,
+)
+
+for _operation in ("add", "update", "list", "archive", "restore"):
+    _fields = () if _operation == "list" else (
+        (_f("id", "文件夹 ID", maximum=100), _f("path", "文件夹路径", required=True, maximum=1000))
+        if _operation == "add" else (_f("folder_id", "文件夹 ID", required=True, maximum=100),)
+    )
+    if _operation in {"add", "update"}:
+        _fields += (_f("name", "名称", maximum=500), _f("purpose", "用途", "multiline", natural=True))
+    if _operation == "update":
+        _fields += (_f("path", "新路径", maximum=1000),)
+    ACTION_SPECS["catalog.folder." + _operation] = ActionSpec(
+        "catalog.folder." + _operation, "资料文件夹 " + _operation, "科研资料", _fields,
+        requires_active=_operation != "list", read_only=_operation == "list",
+    )
 
 
 def action_specs() -> list[ActionSpec]:

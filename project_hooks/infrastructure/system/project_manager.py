@@ -25,7 +25,7 @@ from ..persistence.store import (
 from ..persistence.database import integrity_check, latest_active_task_id
 
 
-TEMPLATE_VERSION = 12
+TEMPLATE_VERSION = 13
 INSTALLATION_PATH = Path(".codex/project-maintenance-installation.json")
 CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
 AGENTS_BEGIN = "<!-- project-maintenance-hooks:begin -->"
@@ -59,12 +59,19 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - 完成一批相关代码修改后运行 fast；结束时程序按实际门禁自动补齐同一软件输入指纹的回执：软件改动要求 fast/full，release profile 要求 fast/release；纯文档和治理改动由 `end` 内置检查验证。
 - 探索启动前必须有关联研究篇章或记录明确的无篇章理由；有关联篇章的任务结束时必须显式审阅篇章。
 - 项目资料和研究篇章只通过 `project update` 与内部 `stage` 指令记录；新证据改变判断时用 `stage update --revision ... --summary ... --evidence ...` 追加修订；探索进度使用 `attempt update` 的结构化步骤字段。
-- 科研资料文件只放在 `resources/` 的八个标准子目录；`resources/sparks/` 可自由保存，其他资料通过 `catalog` 登记。
+- 科研资料放在 `resources/` 预设或已登记的自定义文件夹；文件夹通过 `catalog folder` 登记，内部资料独立登记，模拟资料包除外。`resources/sparks/` 可自由保存 Markdown。
 - 只有 `validated` 尝试可准备 Squash PR；推送和合并必须由用户明确确认。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态或绕过 `end`。
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
 - 遇到故障时使用 `diagnostics status/export` 生成脱敏本地诊断；程序不自动上传数据。
 - Dashboard 只读展示任务、研究篇章、动作可用性和阻塞原因；生命周期写入由 AI 调用结构化服务，高风险动作必须在对话中取得用户确认。
+
+
+- 资料路径失效先运行 `catalog reconcile` 搜索可能的移动位置；唯一内容哈希匹配可通过 `--apply` 修复原登记，保留资料身份和关系。歧义、无历史哈希或范围外位置需要用户选择新位置或确认归档，不自动删除或归档。
+- 文件夹导航登记使用 `catalog folder add/update/list/archive/restore`。教程、翻译用于文献加工，plans 用于 Sparks 的下一步；登记文件夹不替代内部文件登记。
+- 每次资料创建、编辑、导入、移动、重命名或删除前，重新读取 `catalog folder index`，按目录用途选择位置；代码文件按仓库结构处理。新目录先创建并用 `catalog folder add` 登记名称和用途，再刷新索引；归属不明确时询问用户。输出导入显式指定 `--folder`，不自动重建顶层 outputs。
+- `start` 保存既有资料问题；AI 在 start/report/end 用 depends_on、deliverable 登记直接依赖和交付物（catalog:ID 或 path:相对路径）。无关且未恶化的既有资料问题保留待处理，不阻止 completed；任务交付物和直接依赖缺失仍阻止完成。全局 check 继续报告全部问题。
+- 确实受阻时使用 `end --result blocked --blocker <原因> --evidence <证据> --next <恢复条件>`。检查失败保留活动任务，不默认 abandon；只有用户明确放弃才运行 task abandon。所有修复通过工作流命令或结构化服务追加事件，不直接编辑 SQLite 或既有事件，历史 abandoned 不改写。
 
 ## Codex 简短调用
 
@@ -132,7 +139,7 @@ MAINTENANCE_RESEARCH = """# 科研与研究篇章规范
 
 探索启动使用 `--stage auto|new|none|篇章ID`；新篇章通过 `--new-stage` 同次创建，无需额外维护周期。已有活动篇章时必须明确暂停原因，不自动替换。维护默认不关联篇章，探索不关联时须填写 `--without-stage-reason`。
 
-科研资料放在 `resources/source|data|theory|analysis|outputs|others|reports|sparks/`。Sparks 可自由保存 Markdown，登记到 `catalog` 是可选的；其他资料通过 `catalog` 登记。Markdown 公式使用 Markdown/LaTeX 语法。
+科研资料放在 `resources/source|data|theory|analysis|others|reports|sparks|tutorials|translations|plans/` 或已登记的 resources 自定义文件夹。outputs 仅兼容保留，不默认创建。Sparks 可自由保存 Markdown，登记到 `catalog` 是可选的；其他资料通过 `catalog` 登记。Markdown 公式使用 Markdown/LaTeX 语法。
 
 只有证据完整且状态为 `validated` 的探索可准备 Squash PR；合并等待用户明确确认。
 """
@@ -181,13 +188,16 @@ Squash PR，合并必须等待用户明确确认。分支名是稳定的探索�
 | `resources/data/` | 原始、过程和处理后数据 |
 | `resources/theory/` | 理论、假设、定义和推导 |
 | `resources/analysis/` | 分析代码、Notebook 和实验 |
-| `resources/outputs/` | 图表、模型和其他成果 |
+| `resources/outputs/` | 兼容旧登记，不默认创建；程序输出使用其子目录 |
 | `resources/others/` | 暂时无法可靠分类的资料 |
 | `resources/reports/` | 面向外部受众的项目总结与报告 |
 | `resources/sparks/` | 自由 Markdown 灵感；可选择性登记 |
+| `resources/tutorials/` | 文献教程、解读和学习材料 |
+| `resources/translations/` | 文献翻译及对照材料 |
+| `resources/plans/` | 灵感的下一步行动计划 |
 
 原始资料不覆盖；过程与成果分开。Markdown 文件中的公式使用 Markdown/LaTeX 语法。
-`catalog scan` 固定扫描以上七个目录；`add`、`update` 和 `ingest` 拒绝目录与资料类型不一致。
+`catalog scan` 扫描 resources 内的预设和自定义目录，Sparks 默认不强制登记。目录用于默认分类，移动修复保留资料原类型。统一 outputs 为兼容目录，不默认创建；程序输出放在各自程序子目录。
 `check` 会报告缺失目录、错位条目和未索引文件。旧项目先运行
 `.\\workflow-monitor.exe catalog migrate-layout --dry-run`，确认无冲突后再执行实际迁移。
 事件日志只追加，不得手工修改既有行；SQLite 不纳入 Git，也不是唯一备份。
@@ -253,7 +263,14 @@ def default_config() -> dict:
     }
 
 
-MAINTENANCE_CORE += "\n自动填报、组合篇章启动及本地执行器配置见 [AUTOMATION.md](AUTOMATION.md)，使用这些功能或排查失败时按需读取。\n"
+MAINTENANCE_CORE += """\n
+- 资料路径失效先运行 `catalog reconcile` 搜索可能的移动位置；唯一内容哈希匹配可通过 `--apply` 修复原登记，保留资料身份和关系。歧义、无历史哈希或范围外位置需要用户选择新位置或确认归档，不自动删除或归档。
+- 文件夹导航登记使用 `catalog folder add/update/list/archive/restore`。教程、翻译用于文献加工，plans 用于 Sparks 的下一步；登记文件夹不替代内部文件登记。
+- 每次资料创建、编辑、导入、移动、重命名或删除前，重新读取 `catalog folder index`，按目录用途选择位置；代码文件按仓库结构处理。新目录先创建并用 `catalog folder add` 登记名称和用途，再刷新索引；归属不明确时询问用户。输出导入显式指定 `--folder`，不自动重建顶层 outputs。
+- `start` 保存既有资料问题；AI 在 start/report/end 用 depends_on、deliverable 登记直接依赖和交付物（catalog:ID 或 path:相对路径）。无关且未恶化的既有资料问题保留待处理，不阻止 completed；任务交付物和直接依赖缺失仍阻止完成。全局 check 继续报告全部问题。
+- 确实受阻时使用 `end --result blocked --blocker <原因> --evidence <证据> --next <恢复条件>`。检查失败保留活动任务，不默认 abandon；只有用户明确放弃才运行 task abandon。所有修复通过工作流命令或结构化服务追加事件，不直接编辑 SQLite 或既有事件，历史 abandoned 不改写。
+
+自动填报、组合篇章启动及本地执行器配置见 [AUTOMATION.md](AUTOMATION.md)，使用这些功能或排查失败时按需读取。\n"""
 
 MAINTENANCE_CORE += '\n9. 科研审阅按篇章、探索、资料分类；review show 默认返回精简变化，--full 按需展开。正式研究使用变化触发和 14 天提醒，稳定参考不作周期提醒，示例只提示完整性问题。\n'
 MAINTENANCE_CORE += '10. 审阅状态与完整覆盖由程序自动判定和记录；延期与完整性问题不算完成，新变化不清除旧整体审阅记录。\n'
@@ -277,7 +294,7 @@ def template_files() -> dict[str, str]:
         "maintenance/RESEARCH.md": MAINTENANCE_RESEARCH,
         "maintenance/OPERATIONS.md": MAINTENANCE_OPERATIONS,
     }
-    files.update({f"{item.relative_path}/.gitkeep": "\n" for item in RESOURCE_DIRECTORIES})
+    files.update({f"{item.relative_path}/.gitkeep": "\n" for item in RESOURCE_DIRECTORIES if item.required})
     return files
 
 
@@ -495,7 +512,7 @@ def validate_project(root: Path) -> None:
         if not (root / relative).is_file():
             raise ProjectManagerError(f"升级后缺少文件: {relative.as_posix()}")
     for item in RESOURCE_DIRECTORIES:
-        if not (root / item.relative_path).is_dir():
+        if item.required and not (root / item.relative_path).is_dir():
             raise ProjectManagerError(f"升级后缺少资源目录: {item.relative_path}")
     load_events(root / "maintenance/events.jsonl")
     configured = git(root, "config", "--local", "--get", "core.hooksPath").stdout.strip()
