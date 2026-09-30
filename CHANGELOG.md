@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 2.1.0 - 2026-09-30
+
+- Reconcile moved resources by unique SHA-256 matches while preserving catalog identity, metadata and relationships; ambiguous or unknown locations require explicit user action.
+- Separate pre-existing unrelated catalog issues from task completion gates, with declared dependencies and deliverables, durable pending receipts and explicit blocked results.
+- Add stable folder registration and a shared read-only folder index for AI placement rules and human navigation.
+- Simplify Resources into a directory tree and direct-content list with optional details, bilingual labels and keyboard navigation.
+- Add tutorials, translations and plans presets; retire the required top-level outputs directory while retaining nested outputs and legacy registrations.
+- Preserve historical events and abandoned results; rebuild folder projections through existing database recovery and upgrade flows.
+
 ## 2.0.2 - 2026-09-19
 
 - Redact personal email addresses, absolute local paths, and likely credentials before recording new public workflow events.

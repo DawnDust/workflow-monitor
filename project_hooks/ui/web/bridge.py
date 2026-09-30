@@ -210,12 +210,19 @@ class WebDashboardBridge:
             return self._error(exc, code="report_bug_failed")
 
     def open_resource_directory(self, relative: str) -> dict:
-        allowed = {item.relative_path for item in RESOURCE_DIRECTORIES}
+        allowed = {"resources", *(item.relative_path for item in RESOURCE_DIRECTORIES)}
+        snapshot = self._last_snapshot or web_snapshot(self.provider.load())
+        allowed.update(folder["path"] for folder in snapshot.get("catalog_folders") or []
+                       if folder.get("status") != "archived")
+        allowed.update(item["path"] for item in snapshot.get("catalog_items") or []
+                       if item.get("status") != "archived" and item.get("path")
+                       and (item.get("metadata") or {}).get("entry_type") == "bundle")
         if relative not in allowed:
             return self._error("unknown standard resource directory", code="invalid_path")
         candidate = (self.project_root / relative).resolve()
         try:
             rel = candidate.relative_to(self.project_root)
+            candidate.relative_to(self.project_root / "resources")
         except ValueError:
             return self._error("path is outside the project", code="invalid_path")
         if not candidate.is_dir():

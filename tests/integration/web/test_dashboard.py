@@ -291,6 +291,19 @@ class WebDashboardBridgeTests(unittest.TestCase):
             self.assertEqual(runner.call_count, 2)
         self.assertEqual(bridge.reveal_resource_file("fake")["error"]["code"], "not_found")
 
+    def test_registered_nested_folder_open_is_allowed_but_unregistered_is_rejected(self):
+        folder = self.root / "resources/theory/nested"
+        folder.mkdir()
+        source = sample_snapshot()
+        source["catalog_folders"] = [{"folder_id": "nested", "path": "resources/theory/nested", "status": "active"}]
+        provider = FakeProvider(self.root)
+        with patch.object(provider, "load", return_value=source), patch("project_hooks.ui.web.bridge.open_directory") as opener:
+            bridge = WebDashboardBridge(provider)
+            bridge.bootstrap()
+            self.assertTrue(bridge.open_resource_directory("resources/theory/nested")["ok"])
+            self.assertEqual(bridge.open_resource_directory("resources/theory/unknown")["error"]["code"], "invalid_path")
+            opener.assert_called_once()
+
     def test_resource_reveal_opens_simulation_bundle_directory(self) -> None:
         bundle = self.root / "resources" / "analysis" / "simulation-project"
         bundle.mkdir(parents=True)
@@ -436,7 +449,13 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('verification:new Set(["context"])', script)
         self.assertIn('"field-sources":new Set(["context"])', script)
         self.assertIn('settings:new Set(["status_glossary","context"', script)
-        self.assertIn("selectedResourceKind", script)
+        self.assertIn("selectedResourcePath", script)
+        resource_script = (asset_root() / "resource-view.js").read_text(encoding="utf-8")
+        self.assertIn("folder-list", resource_script)
+        self.assertIn("resource-breadcrumbs", resource_script)
+        self.assertIn("resourceDetails", script)
+        self.assertIn("resource_index", script)
+        self.assertIn("data-folder-path", script)
         self.assertIn("data-open-resource", script)
         self.assertIn("x.work_summary", script)
         self.assertIn("x.material_count", script)

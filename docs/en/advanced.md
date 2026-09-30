@@ -56,3 +56,5 @@ gh attestation verify .\workflow-monitor.spdx.json --repo DawnDust/workflow-moni
 ```
 
 Compare the SHA-256 value with `release-manifest.json`. The manifest also states whether the executable was Authenticode-signed; unsigned builds remain supported and are disclosed explicitly.
+
+See [resource paths and folders](workbench.md#resource-paths-and-folders) for reconciliation, folder commands, dependencies and blocked completion.

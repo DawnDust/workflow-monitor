@@ -53,6 +53,25 @@ def stable_state(**updates):
 
 
 class WorkflowActionTests(unittest.TestCase):
+    def test_folder_index_structured_action_remains_readonly_without_active_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            calls = []
+            service = action_service(Path(directory), state_provider=lambda: stable_state(),
+                                     executor=lambda action, fields: calls.append((action, fields)) or {"folders": [], "entries": {}})
+            self.assertTrue(service.availability("catalog.folder.index", {}).enabled)
+            self.assertFalse(service.availability("catalog.folder.add", {"path": "resources/theory/new", "name": "New", "purpose": "Test"}).enabled)
+    def test_blocked_result_keeps_hard_gates_and_reconcile_apply_requires_active_task(self):
+        facts = {"checkpoint_status": "fresh", "result": "blocked",
+                 "resource_blockers": [{"code": "RESOURCE_MISSING", "message": "missing file", "hard": False}],
+                 "verification": {"problems": [{"suite": "full", "reason": "missing"}]}}
+        self.assertEqual(finish_preflight(facts)["status"], "ready")
+        facts["health_errors"] = ["database inconsistent"]
+        self.assertEqual(finish_preflight(facts)["status"], "blocked")
+        with tempfile.TemporaryDirectory() as directory:
+            service = action_service(Path(directory), state_provider=lambda: stable_state(), executor=lambda *_args: {})
+            self.assertTrue(service.availability("catalog.reconcile", {"apply": False}).enabled)
+            self.assertFalse(service.availability("catalog.reconcile", {"apply": True}).enabled)
+
     def test_slow_snapshot_cache_starts_after_provider_finishes(self) -> None:
         calls = []
 

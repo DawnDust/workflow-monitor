@@ -198,16 +198,22 @@ CREATE TABLE IF NOT EXISTS catalog_relations (
 CREATE INDEX IF NOT EXISTS catalog_items_kind_status ON catalog_items(kind, status);
 CREATE INDEX IF NOT EXISTS catalog_relations_source ON catalog_relations(source_id);
 CREATE INDEX IF NOT EXISTS catalog_relations_target ON catalog_relations(target_id);
+CREATE TABLE IF NOT EXISTS catalog_folders (
+  folder_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+  purpose TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL, event_id TEXT NOT NULL
+);
 """
 
 
 PROJECTION_TABLES = (
     "events", "project_state", "project_profile", "stages", "handoffs", "task_archive",
     "attempts", "attempt_evidence", "explorations", "catalog_relations", "catalog_items",
-    "task_checkpoints", "test_receipts", "stage_reviews",
+    "task_checkpoints", "test_receipts", "stage_reviews", "catalog_folders",
 )
 
 REQUIRED_SCHEMA_COLUMNS = {
+    "catalog_folders": {"folder_id", "path", "name", "purpose", "status", "event_id"},
     "meta": {"key", "value"},
     "events": {"event_id", "schema_version", "event_type", "payload_json"},
     "project_profile": {"branch", "description", "big_goal", "main_goal_version", "event_id"},
@@ -277,7 +283,17 @@ def apply_event(connection: sqlite3.Connection, event: dict) -> None:
          event["branch"], event["task_id"], canonical_json(payload)),
     )
     kind = event["event_type"]
-    if kind in {"project_state.updated", "legacy.project_state_imported"}:
+    if kind == "catalog.folder_upserted":
+        connection.execute(
+            """INSERT INTO catalog_folders VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(folder_id) DO UPDATE SET path=excluded.path, name=excluded.name,
+               purpose=excluded.purpose, status=excluded.status, updated_at=excluded.updated_at,
+               event_id=excluded.event_id""",
+            (payload["folder_id"], payload["path"], payload["name"], payload.get("purpose", ""),
+             payload.get("status", "active"), payload.get("created_at", event["occurred_at"]),
+             event["occurred_at"], event["event_id"]),
+        )
+    elif kind in {"project_state.updated", "legacy.project_state_imported"}:
         connection.execute(
             """INSERT INTO project_state VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(branch) DO UPDATE SET status=excluded.status,

@@ -78,7 +78,8 @@ from ...infrastructure.system.project_manager import (
     installation_record,
     write_json,
 )
-from ...infrastructure.system.resource_layout import catalog_consistency_errors, ensure_resource_directories
+from ...infrastructure.system.resource_layout import catalog_consistency_errors, catalog_consistency_issues, ensure_resource_directories
+from ...core.resource_gate import normalize_references
 from ...infrastructure.system.updater import UpdateError, check_latest_update, run_update, version_report
 from ...infrastructure.persistence.transaction import MutationLockError, mutation_lock, read_writer_lock
 from ...infrastructure.system.runtime import is_frozen
@@ -245,6 +246,8 @@ def command_is_read_only(args: argparse.Namespace) -> bool:
         return True
     if args.command == "catalog" and (
         args.catalog_command in {"list", "show", "context"}
+        or (args.catalog_command == "reconcile" and not args.apply)
+        or (args.catalog_command == "folder" and args.folder_command in {"list", "index"})
         or (args.catalog_command == "migrate-layout" and args.dry_run)
     ):
         return True
@@ -375,7 +378,7 @@ def assert_main_matches_origin() -> None:
             raise WorkflowError(f"本地 {default} 与已知 origin/{default} 不一致；请先同步后重试")
 
 
-def markdown_link_errors() -> list[str]:
+def markdown_link_errors(*, ignore_resources: bool = False) -> list[str]:
     errors: list[str] = []
     folder = ROOT / "maintenance"
     for path in folder.rglob("*.md") if folder.is_dir() else []:
@@ -385,6 +388,13 @@ def markdown_link_errors() -> list[str]:
             if not clean or clean.startswith(("#", "http://", "https://", "mailto:")):
                 continue
             resolved = (path.parent / unquote(clean.split("#", 1)[0])).resolve()
+            if ignore_resources:
+                try:
+                    resolved.relative_to((ROOT / "resources").resolve())
+                except ValueError:
+                    pass
+                else:
+                    continue
             if not resolved.exists():
                 errors.append(f"Markdown 断链: {path.relative_to(ROOT).as_posix()} -> {clean}")
     return errors
@@ -416,7 +426,7 @@ def check_repository(
     for rel in ("maintenance/current_task.md", "maintenance/change_archive.md", "maintenance/decision_log.md", "maintenance/exploration_log.md"):
         if (ROOT / rel).exists():
             errors.append(f"旧动态维护文件仍存在: {rel}")
-    errors.extend(markdown_link_errors())
+    errors.extend(markdown_link_errors(ignore_resources=not include_catalog_consistency))
     connection = None
     try:
         connection = database()
@@ -428,7 +438,7 @@ def check_repository(
         if integrity != "ok":
             errors.append(f"SQLite integrity_check: {integrity}")
         if include_catalog_consistency:
-            errors.extend(catalog_consistency_errors(ROOT, catalog_items))
+            errors.extend(issue["message"] for issue in catalog_consistency_issues(ROOT, catalog_items, connection.catalog_folders()))
     except (WorkflowError, DatabaseError) as exc:
         errors.append(f"维护数据库检查失败: {exc}")
     finally:
@@ -863,15 +873,20 @@ def start_task(args: argparse.Namespace) -> dict:
             f"研究篇章草案：{json.dumps(draft, ensure_ascii=False)}\n"
             "请使用 --stage new --new-stage 填写篇章，或 --stage none --without-stage-reason <理由>。"
         )
-    # A stable repair task must be able to start while legacy or unindexed resources exist;
-    # the normal check and task end still require the inconsistency to be repaired.
-    repairing_on_main = (
-        classification["kind"] == "stable" and (requested_track or "stable") == "stable"
-    )
-    check_repository(
-        raise_on_error=True,
-        include_catalog_consistency=not repairing_on_main,
-    )
+    check_repository(raise_on_error=True, include_catalog_consistency=False)
+    connection = database()
+    try:
+        resource_baseline = catalog_consistency_issues(ROOT, [decode_item(i) for i in connection.catalog_items()], connection.catalog_folders())
+    finally:
+        connection.close()
+    hard = [i["message"] for i in resource_baseline if i["hard"]]
+    if hard:
+        raise WorkflowError("资料完整性检查失败：" + "；".join(hard))
+    try:
+        depends_on = normalize_references(getattr(args, "depends_on", None))
+        deliverable = normalize_references(getattr(args, "deliverable", None))
+    except ValueError as exc:
+        raise WorkflowError(str(exc)) from exc
     created_branch = False
     head_result = run_git(["rev-parse", "--verify", "HEAD"], check=False)
     base_head = head_result.stdout.strip() if head_result.returncode == 0 else None
@@ -910,7 +925,9 @@ def start_task(args: argparse.Namespace) -> dict:
         "started_at": timestamp(),
         "declaration": {"kind": args.kind, "scope": args.scope, "out_of_scope": args.out_of_scope,
                         "acceptance": args.acceptance, "task_size": args.task_size, "git_commit": args.git_commit,
-                        "verification_profile": args.verification_profile},
+                        "verification_profile": args.verification_profile,
+                        "depends_on": depends_on, "deliverable": deliverable},
+        "resource_baseline": resource_baseline,
         "baseline": snapshot(),
         "git": {"is_repo": True, "dirty_paths": git_dirty_paths(), "head": base_head,
                 "branch": branch, "base_branch": branch_policy()["default_branch"], "base_head": base_head,
@@ -920,7 +937,8 @@ def start_task(args: argparse.Namespace) -> dict:
             "baseline_updated_at": linked_stage.get("updated_at") if linked_stage else None,
         },
     }
-    events = [emit("task.started", branch=branch, task_id=args.task_id, payload=record["declaration"])]
+    events = [emit("task.started", branch=branch, task_id=args.task_id,
+                   payload={**record["declaration"], "resource_baseline": resource_baseline})]
     events.extend(emit(kind, branch=branch, task_id=args.task_id, payload=payload)
                   for kind, payload in stage_events_payloads)
     if classification["kind"] == "exploration" and created_branch:
@@ -1121,6 +1139,7 @@ def task_finish_preflight(
     stage_review_result: str | None = None,
     checkpoint_override: str | None = None,
     current_snapshot: dict | None = None,
+    result: str = "completed",
 ) -> dict:
     branch = record["git"]["branch"]
     task_id = record["task_id"]
@@ -1137,9 +1156,10 @@ def task_finish_preflight(
         task_events,
         linked_stage_id=linked_stage_id,
         changed_paths=paths,
-        health_errors=health_errors,
+        health_errors=check_repository(include_catalog_consistency=False) if health_errors is None else health_errors,
         stage_review_result=stage_review_result,
         checkpoint_override=checkpoint_override,
+        result=result,
     )
 
 
@@ -1202,8 +1222,19 @@ def check_staged_privacy() -> None:
         raise WorkflowError("暂存内容包含需要脱敏的信息:\n- " + "\n- ".join(sorted(findings)))
 
 
-def pre_commit_check() -> None:
-    check_repository(raise_on_error=True)
+def pre_commit_check(finish_record: dict | None = None) -> None:
+    if finish_record is None:
+        check_repository(raise_on_error=True)
+    else:
+        durable = read_active()
+        finish = durable.get("finish") or {}
+        if (durable.get("recovery_phase") != "finishing" or durable["task_id"] != finish_record["task_id"]
+                or finish.get("workspace_fingerprint") != work_content_fingerprint(ROOT)):
+            raise WorkflowError("自动提交的任务收尾凭据缺失或工作内容已变化；请检查后恢复")
+        assert_active_branch(durable)
+        gate = task_finish_preflight(durable, result=finish["values"]["result"])
+        if gate["blockers"]:
+            raise WorkflowError("自动提交门禁失败：" + "；".join(i["message"] for i in gate["blockers"]))
     check_staged_privacy()
     if active_row() is not None:
         record = read_active()
@@ -1282,7 +1313,8 @@ def auto_commit(record: dict, paths: list[str], result: str, message: str | None
         if not staged:
             return {"status": "skipped", "reason": "任务路径没有可提交差异"}
         commit_message = message or f"maint({declaration['kind']}): {record['task_id']}"
-        pre_commit_check()
+        durable = read_active()
+        pre_commit_check(record if (durable.get("finish") or {}).get("workspace_fingerprint") else None)
         completed = run_git(
             ["-c", "core.hooksPath=.git/no-hooks", "commit", "-m", commit_message],
             env=env, check=False,
@@ -1309,7 +1341,7 @@ def _finish_signature(args: argparse.Namespace) -> str:
         for name in (
             "task_id", "result", "methods_action", "main_goal", "note",
             "evidence", "commit_message", "attempt_state", *STATE_ARGUMENTS, "next",
-            "stage_review", "hypothesis", "progress", "conclusion", "clear", "stage_update", "reviews",
+            "stage_review", "hypothesis", "progress", "conclusion", "clear", "stage_update", "reviews", "depends_on", "deliverable",
         )
     }
     return hashlib.sha256(canonical_json(values).encode("utf-8")).hexdigest()
@@ -1359,7 +1391,8 @@ def finish_task(args: argparse.Namespace) -> dict:
         raise WorkflowError(f"活动任务是 {record['task_id']}，不是 {args.task_id}")
     branch = assert_active_branch(record)
     if getattr(args, "check_only", False):
-        result = task_finish_preflight(record, health_errors=check_repository(), stage_review_result=args.stage_review)
+        result = task_finish_preflight(record, stage_review_result=args.stage_review,
+                                       result=getattr(args, "result", None) or "completed")
         result["review_summary"] = context_data().get("review_summary")
         return result
     signature = _finish_signature(args)
@@ -1387,6 +1420,8 @@ def finish_task(args: argparse.Namespace) -> dict:
         return report
     if not getattr(args, "result", None) or not getattr(args, "note", None):
         raise WorkflowError("结束任务必须填写 --result 和 --note；只检查使用 end --check-only")
+    if args.result == "blocked" and (not getattr(args, "blocker", None) or not args.evidence or not args.next):
+        raise WorkflowError("blocked 必须填写 --blocker 原因、--evidence 阻塞证据和 --next 恢复条件")
     from . import commands as runtime
     from .reporting import report
     from ...infrastructure.system.automatic_verification import run_missing
@@ -1404,7 +1439,7 @@ def finish_task(args: argparse.Namespace) -> dict:
     except WorkflowError as exc:
         stage_error = str(exc)
         checked_review = args.stage_review
-    inspection = task_finish_preflight(record, health_errors=check_repository(), stage_review_result=checked_review)
+    inspection = task_finish_preflight(record, stage_review_result=checked_review, result=args.result)
     non_test = [item for item in inspection["blockers"] if not item["code"].startswith("VERIFICATION_")]
     attempt = get_attempt(branch) if record["git"]["track"] != "stable" else None
     if attempt:
@@ -1426,10 +1461,11 @@ def finish_task(args: argparse.Namespace) -> dict:
     if non_test:
         raise WorkflowError("；".join(item["message"] + ("；" + item["next_action"] if item.get("next_action") else "") for item in non_test))
     try:
-        run_missing(ROOT, record["task_id"], config(), inspection["verification"])
+        if args.result != "blocked":
+            run_missing(ROOT, record["task_id"], config(), inspection["verification"])
     except RuntimeError as exc:
         raise WorkflowError(str(exc)) from exc
-    check_repository(raise_on_error=True)
+    check_repository(raise_on_error=True, include_catalog_consistency=False)
     final_state_requested = False
     attempt = get_attempt(branch) if record["git"]["track"] != "stable" else None
     events: list[dict] = []
@@ -1442,6 +1478,7 @@ def finish_task(args: argparse.Namespace) -> dict:
         record,
         stage_review_result=review["result"],
         checkpoint_override="fresh" if final_state_requested and checkpoint else None,
+        result=args.result,
     )
     if preflight["blockers"]:
         details = "；".join(
@@ -1483,6 +1520,10 @@ def finish_task(args: argparse.Namespace) -> dict:
         "evidence": evidence, "result": args.result,
         "note": args.note,
         "verification": verification["accepted"], "stage_review": review,
+        "pending_resources": preflight["pending_resources"],
+        "verification_problems": verification["problems"],
+        "resource_blockers": preflight["facts"]["resource_blockers"] if args.result == "blocked" else [],
+        "blocker": getattr(args, "blocker", None), "recovery_conditions": args.next or [],
     }))
     _fixed_finish_event_ids(args.task_id, events)
     acknowledgement = None
@@ -1519,6 +1560,10 @@ def finish_task(args: argparse.Namespace) -> dict:
         "note": args.note,
         "attempt_state": args.attempt_state,
         "verification": verification["accepted"], "stage_review": review,
+        "pending_resources": preflight["pending_resources"],
+        "verification_problems": verification["problems"],
+        "resource_blockers": preflight["facts"]["resource_blockers"] if args.result == "blocked" else [],
+        "blocker": getattr(args, "blocker", None), "recovery_conditions": args.next or [],
     }
     if compatibility_warnings:
         finish_values["deprecation_warnings"] = compatibility_warnings
@@ -1527,6 +1572,7 @@ def finish_task(args: argparse.Namespace) -> dict:
         "events": events,
         "values": finish_values,
         "finished_at": finished_at,
+        "workspace_fingerprint": work_content_fingerprint(ROOT),
     }
     save_active(
         _base_active_record(record),
@@ -2277,6 +2323,7 @@ def dashboard_execute_action(
     if action_id == "exploration.import":
         return exploration_import(_action_namespace(fields))
     catalog_defaults = {
+        "apply": False, "item_id": None, "purpose": None,
         "id": None, "kind": None, "title": None, "summary": None, "path": None,
         "entrypoint": None, "source": None, "tag": None, "meta": None, "status": None,
         "clear_path": False, "clear_summary": False, "clear_source": False,
@@ -2285,11 +2332,15 @@ def dashboard_execute_action(
         "related_to": None, "all": False, "add_tag": None, "remove_tag": None,
     }
     catalog_names = {
+        "catalog.reconcile": "reconcile",
         "catalog.add": "add", "catalog.update": "update", "catalog.archive": "archive",
         "catalog.restore": "restore", "catalog.link": "link", "catalog.unlink": "unlink",
         "catalog.scan": "scan", "catalog.ingest": "ingest",
         "catalog.bulk_update": "bulk-update", "catalog.migrate": "migrate-layout",
     }
+    if action_id.startswith("catalog.folder."):
+        values = {**catalog_defaults, **fields, "catalog_command": "folder", "folder_command": action_id.rsplit(".", 1)[1]}
+        return catalog_command(argparse.Namespace(**values), catalog_runtime())
     if action_id in catalog_names:
         values = {**catalog_defaults, **fields, "catalog_command": catalog_names[action_id]}
         if action_id == "catalog.update":

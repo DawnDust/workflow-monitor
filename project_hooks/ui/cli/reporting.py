@@ -32,6 +32,11 @@ def report(c, args):
             raise c.WorkflowError(f"不能同时设置和清空 {name}")
         fields[name] = ""
     fields = {name: value for name, value in fields.items() if value is not None}
+    try:
+        references = {name: c.normalize_references(getattr(args, name))
+                      for name in ("depends_on", "deliverable") if getattr(args, name, None) is not None}
+    except ValueError as exc:
+        raise c.WorkflowError(str(exc)) from exc
     evidence = getattr(args, "evidence", None) or []
     next_steps = getattr(args, "next", None)
     stage = getattr(args, "stage_update", None)
@@ -40,14 +45,14 @@ def report(c, args):
         raise c.WorkflowError("假设、探索进展和结论仅用于探索任务")
     if attempt and next_steps is not None and len(next_steps) > 1:
         raise c.WorkflowError("探索汇报仅支持一个下一步")
-    semantic = {"fields": fields, "evidence": evidence, "next": next_steps, "stage": stage, "reviews": reviews}
+    semantic = {"fields": fields, "evidence": evidence, "next": next_steps, "stage": stage, "reviews": reviews, "references": references}
     signature = hashlib.sha256(json.dumps(semantic, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     fingerprint = c.work_content_fingerprint(c.ROOT)
     task_events = [e for e in c.load_events(c.journal_path()) if e.get("task_id") == record["task_id"]]
     prior = next((e for e in reversed(task_events) if e["event_type"] == "task.checkpointed"), None)
     if not reviews and prior and prior["payload"].get("report_signature") == signature and prior["payload"].get("workspace_fingerprint") == fingerprint:
         return {"task_id": record["task_id"], "result": "unchanged", "changed_count": 0}
-    if not fields and not evidence and next_steps is None and not stage and not reviews:
+    if not fields and not evidence and next_steps is None and not stage and not reviews and not references:
         if prior and prior["payload"].get("workspace_fingerprint") == fingerprint:
             return {"task_id": record["task_id"], "result": "unchanged", "changed_count": 0}
         raise c.WorkflowError("report 需要实际进展；请填写 current_step 或科研记录")
@@ -71,6 +76,7 @@ def report(c, args):
             previous_values.update(event["payload"])
             previous_evidence.update(event["payload"].get("evidence", []))
     checkpoint = {name: value for name, value in checkpoint.items() if previous_values.get(name) != value}
+    checkpoint.update(references)
     attempt_changed = False
     if attempt:
         payload = {"attempt_id": attempt["attempt_id"]}

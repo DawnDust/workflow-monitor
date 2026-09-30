@@ -82,6 +82,11 @@ class ProjectDatabase:
             "SELECT * FROM catalog_items ORDER BY updated_at DESC, item_id"
         ).fetchall()]
 
+    def catalog_folders(self) -> list[dict]:
+        return [dict(row) for row in self._connection.execute(
+            "SELECT * FROM catalog_folders ORDER BY path, folder_id"
+        ).fetchall()]
+
     def catalog_relations(self) -> list[dict]:
         return [dict(row) for row in self._connection.execute(
             "SELECT * FROM catalog_relations ORDER BY updated_at DESC, relation_id"

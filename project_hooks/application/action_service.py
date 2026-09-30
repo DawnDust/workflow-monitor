@@ -144,6 +144,8 @@ class WorkflowActionService:
             ))
         if action_id == "task.start" and active:
             blockers.append(_block("ACTIVE_TASK_EXISTS", "已有活动工作周期", str(active.get("task_id")), "task.finish"))
+        if action_id == "catalog.reconcile" and fields and fields.get("apply") and not active:
+            blockers.append(_block("ACTIVE_TASK_REQUIRED", "应用资料修复前必须 start", next_action="task.start"))
         if action_id == "task.recover" and not active and not sidecar:
             blockers.append(_block(
                 "NO_RECOVERABLE_TASK", "当前没有可恢复的工作周期",
@@ -165,6 +167,7 @@ class WorkflowActionService:
             preflight = state.get("finish_preflight")
             if fields and preflight and preflight.get("facts"):
                 facts = deepcopy(preflight["facts"])
+                facts["result"] = fields.get("result") or "completed"
                 if fields.get("current_step") or fields.get("note"):
                     facts["checkpoint_status"] = "fresh"
                 facts["stage_review"] = fields.get("stage_review") or facts.get("stage_review")

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import re
+from urllib.parse import unquote
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +16,7 @@ class ResourceDirectory:
     label: str
     description: str
     legacy_name: str | None = None
+    required: bool = True
 
     @property
     def relative_path(self) -> str:
@@ -24,11 +27,14 @@ RESOURCE_DIRECTORIES = (
     ResourceDirectory("source", "literature", "文献", "外部原始资料与来源证据", "source"),
     ResourceDirectory("data", "data", "数据", "原始、过程和处理后数据", "data"),
     ResourceDirectory("theory", "theory", "理论", "理论、假设、定义和推导", "theory"),
-    ResourceDirectory("analysis", "simulation", "模拟", "分析代码、Notebook、实验与过程记录", "analysis"),
-    ResourceDirectory("outputs", "output", "输出", "图表、模型和其他可交付成果", "outputs"),
+    ResourceDirectory("analysis", "simulation", "分析与程序", "分析代码、Notebook、实验与过程记录", "analysis"),
+    ResourceDirectory("outputs", "output", "输出", "兼容既有输出；新程序使用各自的输出子目录", "outputs", False),
     ResourceDirectory("others", "other", "其他", "暂时无法可靠分类的资料"),
     ResourceDirectory("reports", "report", "报告", "面向外部受众的项目总结与报告"),
     ResourceDirectory("sparks", "spark", "灵感", "自由记录点子、问题、猜想和偶然发现"),
+    ResourceDirectory("tutorials", "tutorial", "教程", "文献的教程、解读和学习材料"),
+    ResourceDirectory("translations", "translation", "翻译", "文献翻译及对照材料"),
+    ResourceDirectory("plans", "plan", "计划", "灵感的下一步行动与实施计划"),
 )
 
 OPTIONAL_CATALOG_KINDS = {"spark"}
@@ -55,6 +61,8 @@ def ensure_resource_directories(root: Path) -> list[str]:
     """Create the fixed layout and tracked placeholders without touching existing files."""
     created: list[str] = []
     for item in RESOURCE_DIRECTORIES:
+        if not item.required:
+            continue
         directory = root / item.relative_path
         if not directory.is_dir():
             directory.mkdir(parents=True, exist_ok=True)
@@ -72,6 +80,9 @@ def resource_for_path(relative: str | Path) -> ResourceDirectory | None:
     for prefix, item in RESOURCE_BY_PATH.items():
         if folded == prefix or folded.startswith(prefix + "/"):
             return item
+    parts = Path(value).parts
+    if len(parts) >= 2 and parts[0].casefold() == "resources":
+        return ResourceDirectory(parts[1], "other", parts[1], "自定义资料目录", required=False)
     return None
 
 
@@ -171,153 +182,149 @@ def simulation_bundle_metadata(directory: Path, entrypoint: str | None = None) -
     return result
 
 
-def resource_directory_snapshot(root: Path, items: list[dict]) -> list[dict]:
-    indexed_by_path = {
-        str(item.get("path") or "").casefold(): item for item in items if item.get("path")
-    }
-    result: list[dict] = []
-    for resource in RESOURCE_DIRECTORIES:
-        files = files_under(root, resource.relative_path)
-        paths = [path.relative_to(root).as_posix() for path in files]
-        bundles = [
-            item for item in items
-            if item.get("status") != "archived" and is_simulation_bundle(item)
-            and resource_for_path(str(item.get("path"))) == resource
-        ]
-        covered = {
-            path for path in paths
-            if any(bundle_contains(str(bundle["path"]), path) for bundle in bundles)
-        }
-        indexed = [
-            indexed_by_path[path.casefold()] for path in paths
-            if path.casefold() in indexed_by_path
-        ]
-        unindexed = [
-            path for path in paths
-            if path.casefold() not in indexed_by_path and path not in covered
-        ]
-        mismatched = [
-            item["path"] for item in indexed
-            if item.get("kind") != resource.kind or item.get("status") == "missing"
-        ]
-        directory = root / resource.relative_path
-        if not directory.is_dir():
-            status = "missing"
-        elif (unindexed and resource.kind not in OPTIONAL_CATALOG_KINDS) or mismatched:
-            status = "attention"
-        else:
-            status = "ok"
-        result.append({
-            "name": resource.name,
-            "kind": resource.kind,
-            "label": resource.label,
-            "description": resource.description,
-            "path": resource.relative_path,
-            "exists": directory.is_dir(),
-            "actual_files": len(paths),
-            "indexed_files": len(indexed) + len(covered),
-            "logical_items": len(paths) - len(covered) + len(bundles),
-            "indexed_items": sum(
-                item.get("kind") == resource.kind and item.get("status") != "archived"
-                for item in items
-            ),
-            "bundle_count": len(bundles),
-            "contained_files": len(covered),
-            "unindexed_files": unindexed,
-            "mismatched_files": mismatched,
-            "status": status,
-        })
+def resource_directory_snapshot(root: Path, items: list[dict], folders: list[dict] | None = None) -> list[dict]:
+    presets = {d.relative_path: d for d in RESOURCE_DIRECTORIES if d.required or (root / d.relative_path).is_dir()}
+    registered = {f["path"]: f for f in folders or [] if f["status"] != "archived"}
+    bundles = [i for i in items if is_simulation_bundle(i) and i.get("status") != "archived"]
+    paths = set(presets) | set(registered)
+    base = root / "resources"
+    if base.is_dir():
+        import os
+        for current, names, _files in os.walk(base, followlinks=False):
+            directory = Path(current)
+            names[:] = [name for name in names if name.casefold() not in IGNORED_DIRECTORY_NAMES
+                        and not (directory / name).is_symlink() and not (directory / name).is_junction()]
+            for name in names:
+                relative = (directory / name).relative_to(root).as_posix()
+                if not any(bundle_contains(b["path"], relative) for b in bundles):
+                    paths.add(relative)
+    result = []
+    for relative in sorted(paths, key=str.casefold):
+        preset, folder = presets.get(relative), registered.get(relative)
+        directory = root / relative
+        selected = [i for i in items if i.get("path") and i.get("status") != "archived"
+                    and bundle_contains(relative, i["path"])]
+        files = files_under(root, relative)
+        indexed = {str(i.get("path")).casefold() for i in selected}
+        covered = [b for b in bundles if b["path"] == relative or bundle_contains(relative, b["path"])]
+        unindexed = [f.relative_to(root).as_posix() for f in files
+                     if f.relative_to(root).as_posix().casefold() not in indexed
+                     and not any(bundle_contains(b["path"], f.relative_to(root).as_posix()) for b in covered)]
+        kind = preset.kind if preset else resource_for_path(relative).kind
+        status = "missing" if not directory.is_dir() else "attention" if (unindexed and kind not in OPTIONAL_CATALOG_KINDS) else "ok"
+        result.append({"name": Path(relative).name, "path": relative, "kind": kind,
+                       "folder_id": folder.get("folder_id") if folder else None,
+                       "label": folder["name"] if folder else preset.label if preset else Path(relative).name,
+                       "description": folder["purpose"] if folder else preset.description if preset else "待登记用途",
+                       "registration": "registered" if folder else "preset" if preset else "unregistered",
+                       "depth": len(Path(relative).parts) - 2, "exists": directory.is_dir(),
+                       "actual_files": len(files), "indexed_files": len(files) - len(unindexed),
+                       "logical_items": len(selected), "indexed_items": len(selected),
+                       "bundle_count": len(covered), "contained_files": sum(b.get("metadata", {}).get("file_count", 0) for b in covered),
+                       "unindexed_files": unindexed, "mismatched_files": [], "status": status})
     return result
 
 
-def catalog_consistency_errors(root: Path, items: list[dict]) -> list[str]:
-    errors: list[str] = []
-    indexed_by_path: dict[str, dict] = {}
-    bundles = [item for item in items if item.get("status") != "archived" and is_simulation_bundle(item)]
+def catalog_consistency_issues(root: Path, items: list[dict], folders: list[dict] | None = None) -> list[dict]:
+    issues = []
+    def add(code, message, path, item=None, *, hard=False, evidence=None):
+        issues.append({"code": code, "message": message, "path": path,
+                       "item_id": item.get("item_id") if item else None, "hard": hard,
+                       "evidence": evidence or {"status": "unavailable"}})
+    try:
+        (root / "resources").resolve().relative_to(root.resolve())
+    except ValueError:
+        add("RESOURCE_ROOT_ESCAPE", "资料根目录指向项目外: resources", "resources", hard=True)
+        return issues
+    indexed = {}
+    bundles = [i for i in items if i.get("status") != "archived" and is_simulation_bundle(i)]
     for index, bundle in enumerate(bundles):
         for other in bundles[index + 1:]:
-            if (bundle_contains(str(bundle["path"]), str(other["path"]))
-                    or bundle_contains(str(other["path"]), str(bundle["path"]))):
-                errors.append(
-                    f"模拟资料包不能嵌套: {bundle['path']} 与 {other['path']}"
-                )
+            if bundle_contains(bundle["path"], other["path"]) or bundle_contains(other["path"], bundle["path"]):
+                add("BUNDLE_OVERLAP", f"模拟资料包不能嵌套: {bundle['path']} 与 {other['path']}", bundle["path"], bundle, hard=True)
     for item in items:
         relative = item.get("path")
         if not relative:
             continue
-        folded = str(relative).casefold()
-        if folded in indexed_by_path:
-            errors.append(f"资料路径大小写冲突或重复登记: {relative}")
-        indexed_by_path[folded] = item
-        resource = resource_for_path(relative)
-        if resource is None:
-            hint = (
-                "；请运行 `.\\workflow-monitor.exe catalog migrate-layout --dry-run`"
-                if legacy_resource_for_path(relative) else ""
-            )
-            errors.append(f"资料条目路径不在标准 resources 目录: {item['item_id']} -> {relative}{hint}")
-        elif item.get("kind") != resource.kind:
-            errors.append(
-                f"资料类型与目录不一致: {item['item_id']} 为 {item.get('kind')}，"
-                f"但 {relative} 必须为 {resource.kind}"
-            )
-        else:
-            target = root / relative
-            if target.is_dir():
-                if not is_simulation_bundle(item):
-                    errors.append(f"只有 simulation 资料包可以登记目录路径: {relative}")
-                elif item.get("status") == "missing":
-                    errors.append(f"模拟资料包已恢复但索引仍为 missing: {relative}；请运行 catalog scan")
-                else:
-                    try:
-                        current = simulation_bundle_metadata(
-                            target, (item.get("metadata") or {}).get("entrypoint"),
-                        )
-                    except ValueError as exc:
-                        errors.append(str(exc))
-                    else:
-                        stored = item.get("metadata") or {}
-                        if any(stored.get(key) != value for key, value in current.items()):
-                            errors.append(f"模拟资料包内容已变化: {relative}；请运行 catalog scan")
-            elif target.is_file() and item.get("status") == "missing":
-                errors.append(f"资料文件已恢复但索引仍为 missing: {relative}；请运行 catalog scan")
-            elif not target.exists() and item.get("status") not in {"missing", "archived"}:
-                label = "模拟资料包" if is_simulation_bundle(item) else "资料文件"
-                errors.append(f"{label}不存在: {relative}；请运行 catalog scan")
-
-        if item.get("status") != "archived" and not is_simulation_bundle(item):
-            containing = next(
-                (bundle for bundle in bundles if bundle_contains(str(bundle["path"]), str(relative))),
-                None,
-            )
-            if containing is not None:
-                errors.append(
-                    f"模拟资料包内文件不得重复登记: {relative}（资料包 {containing['path']}）"
-                )
-
-    for resource in RESOURCE_DIRECTORIES:
-        directory = root / resource.relative_path
-        if not directory.is_dir():
-            errors.append(
-                f"缺少标准资源目录: {resource.relative_path}；请运行 `.\\workflow-monitor.exe install`"
-            )
+        folded = relative.casefold()
+        if folded in indexed:
+            add("DUPLICATE_RESOURCE_PATH", f"资料路径大小写冲突或重复登记: {relative}", relative, item, hard=True)
+        indexed[folded] = item
+        if item.get("status") == "archived":
             continue
-        for path in files_under(root, resource.relative_path):
-            relative = path.relative_to(root).as_posix()
-            covered = any(bundle_contains(str(bundle["path"]), relative) for bundle in bundles)
-            if (resource.kind not in OPTIONAL_CATALOG_KINDS
-                    and relative.casefold() not in indexed_by_path and not covered):
-                errors.append(f"标准资源目录存在未索引文件: {relative}；请运行 catalog scan")
-
-    legacy_files: list[str] = []
+        if resource_for_path(relative) is None:
+            add("RESOURCE_OUTSIDE_LAYOUT", f"资料条目路径不在标准 resources 目录: {item['item_id']} -> {relative}", relative, item)
+        target = root / relative
+        try:
+            target.resolve().relative_to(root.resolve())
+        except ValueError:
+            add("RESOURCE_PATH_ESCAPE", f"资料路径指向项目外: {relative}", relative, item, hard=True)
+            continue
+        if not target.exists():
+            label = "模拟资料包" if is_simulation_bundle(item) else "资料文件"
+            add("RESOURCE_MISSING", f"{label}不存在: {relative}；请先运行 catalog reconcile", relative, item)
+        elif target.is_dir():
+            if not is_simulation_bundle(item):
+                add("INVALID_RESOURCE_DIRECTORY", f"只有 simulation 资料包可以登记目录路径: {relative}", relative, item, hard=True)
+            else:
+                try:
+                    current = simulation_bundle_metadata(target, item.get("metadata", {}).get("entrypoint"))
+                except (ValueError, OSError) as exc:
+                    add("BUNDLE_ENTRY_MISSING", str(exc), relative, item)
+                else:
+                    stored = item.get("metadata") or {}
+                    if any(stored.get(key) != value for key, value in current.items()):
+                        add("BUNDLE_CHANGED", f"模拟资料包内容已变化: {relative}；请运行 catalog scan", relative, item, evidence=current)
+        if target.exists() and item.get("status") == "missing":
+            add("RESOURCE_RESTORED", f"资料文件已恢复但索引仍为 missing: {relative}；请运行 catalog scan", relative, item,
+                evidence={"status": "exists"})
+        if not is_simulation_bundle(item) and any(bundle_contains(b["path"], relative) for b in bundles):
+            add("BUNDLE_DUPLICATE_ITEM", f"模拟资料包内文件不得重复登记: {relative}", relative, item, hard=True)
+    for folder in folders or []:
+        if folder["status"] == "archived":
+            continue
+        target = root / folder["path"]
+        try:
+            target.resolve().relative_to(root.resolve())
+            target.resolve().relative_to((root / "resources").resolve())
+        except ValueError:
+            add("FOLDER_PATH_ESCAPE", f"资料目录路径超出 resources/: {folder['path']}", folder["path"], hard=True)
+            continue
+        if not target.is_dir():
+            add("FOLDER_MISSING", f"已登记资料目录不存在: {folder['path']}；请核对目录位置", folder["path"])
+    for resource in RESOURCE_DIRECTORIES:
+        if resource.required and not (root / resource.relative_path).is_dir():
+            add("PRESET_DIRECTORY_MISSING", f"缺少标准资源目录: {resource.relative_path}；请运行 `./workflow-monitor.exe install`", resource.relative_path)
+    for path in files_under(root, "resources"):
+        relative = path.relative_to(root).as_posix()
+        resource = resource_for_path(relative)
+        if (resource.kind not in OPTIONAL_CATALOG_KINDS and relative.casefold() not in indexed
+                and not any(bundle_contains(b["path"], relative) for b in bundles)):
+            stat = path.stat()
+            add("RESOURCE_UNINDEXED", f"标准资源目录存在未索引文件: {relative}；请运行 catalog scan", relative,
+                evidence={"size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
     for legacy_name in LEGACY_BY_PATH:
-        legacy_files.extend(
-            path.relative_to(root).as_posix() for path in files_under(root, legacy_name)
-        )
-    if legacy_files:
-        errors.append(
-            "发现旧版根目录资料: " + ", ".join(legacy_files[:5])
-            + (" 等" if len(legacy_files) > 5 else "")
-            + "；请运行 `.\\workflow-monitor.exe catalog migrate-layout --dry-run`"
-        )
-    return errors
+        for path in files_under(root, legacy_name):
+            relative = path.relative_to(root).as_posix()
+            add("LEGACY_RESOURCE_LAYOUT", f"发现旧版根目录资料: {relative}；请运行 catalog migrate-layout --dry-run", relative)
+    maintenance = root / "maintenance"
+    for document in maintenance.rglob("*.md") if maintenance.is_dir() else []:
+        for target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", document.read_text(encoding="utf-8")):
+            clean = target.strip().strip("<>")
+            if not clean or clean.startswith(("#", "http://", "https://", "mailto:")):
+                continue
+            resolved = (document.parent / unquote(clean.split("#", 1)[0])).resolve()
+            try:
+                relative = resolved.relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
+            if relative.startswith("resources/") and not resolved.exists():
+                source = document.relative_to(root).as_posix()
+                add("RESOURCE_LINK_MISSING", f"Markdown 断链: {source} -> {clean}", relative,
+                    evidence={"source_path": source, "target": clean})
+                issues[-1]["source_path"] = source
+    return issues
+
+
+def catalog_consistency_errors(root: Path, items: list[dict]) -> list[str]:
+    return [issue["message"] for issue in catalog_consistency_issues(root, items)]

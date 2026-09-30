@@ -6,6 +6,10 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from ...core.lifecycle import finish_preflight
+from ...core.catalog import decode_item
+from ..persistence.database import repository
+from ..persistence.store import ensure_database
+from .task_resources import inspect_task_resources
 from .verification import verify_receipts, work_content_fingerprint
 
 
@@ -19,9 +23,17 @@ def assemble_finish_preflight(
     health_errors: list[str] | None = None,
     stage_review_result: str | None = None,
     checkpoint_override: str | None = None,
+    result: str = "completed",
 ) -> dict:
     """Return the canonical finish preflight plus its verification and input facts."""
     events = list(task_events)
+    connection = repository(ensure_database(root / ".project_hooks" / "maintenance.sqlite3", root / "maintenance" / "events.jsonl"))
+    try:
+        resources = inspect_task_resources(root, record, events,
+            [decode_item(i) for i in connection.catalog_items()], connection.catalog_relations(),
+            connection.catalog_folders(), changed_paths)
+    finally:
+        connection.close()
     checkpoints = [event for event in events if event["event_type"] == "task.checkpointed"]
     checkpoint_status = checkpoint_override or "missing"
     if checkpoint_override is None and checkpoints:
@@ -61,8 +73,12 @@ def assemble_finish_preflight(
         "project_updated": any(
             event["event_type"] == "project.profile_updated" for event in events
         ),
+        "result": result,
+        "resource_blockers": resources["blockers"],
+        "pending_resources": resources["pending"],
     }
     result = finish_preflight(facts)
     result["verification"] = verification
     result["facts"] = facts
+    result["pending_resources"] = resources["pending"]
     return result

@@ -97,7 +97,7 @@ class DistributionTests(unittest.TestCase):
         for name in ("README.md", "CORE.md", "RESEARCH.md", "OPERATIONS.md"):
             self.assertTrue((self.root / "maintenance" / name).is_file())
         self.assertIn("workflow.initialized", (self.root / "maintenance/events.jsonl").read_text(encoding="utf-8"))
-        for name in ("source", "data", "theory", "analysis", "outputs", "others", "reports"):
+        for name in ("source", "data", "theory", "analysis", "others", "reports", "sparks", "tutorials", "translations", "plans"):
             self.assertTrue((self.root / "resources" / name / ".gitkeep").is_file())
         self.assertEqual(
             self.git("config", "--local", "--get", "core.hooksPath").stdout.strip(),
