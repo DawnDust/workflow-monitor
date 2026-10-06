@@ -136,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command in {"history", "explorations"}:
             output = render_records(query_output(args.command, args.limit), args.format)
         elif args.command == "exploration": output = exploration_import(args)
+        elif args.command == "privacy" and args.privacy_command == "sanitize-events":
+            output = sanitize_uncommitted_events(args.base_ref, apply=args.apply)
         elif args.command == "catalog": output = catalog_command(args, catalog_runtime())
         elif args.command == "db": output = db_command(args)
         else: output = finish_task(args)

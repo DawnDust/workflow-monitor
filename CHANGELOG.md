@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a supported, audited workflow for redacting privacy-sensitive values from event additions after a trusted Git baseline, while preserving event IDs, unrelated evidence, and the append-only baseline.
+
 ## 2.1.0 - 2026-09-30
 
 - Reconcile moved resources by unique SHA-256 matches while preserving catalog identity, metadata and relationships; ambiguous or unknown locations require explicit user action.

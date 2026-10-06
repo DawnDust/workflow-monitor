@@ -66,6 +66,8 @@ Workflow Monitor 是面向 Windows 科研 Git 项目的本地单文件工作流�
 
 跟踪的 `maintenance/events.jsonl` 随公开仓库推送后会对外可见。新事件文本会脱敏邮箱、绝对本机路径和疑似凭据；任务描述及科研结论仍可阅读，发布前应自行审阅。
 
+从旧版本探索分支导入含隐私值的事件时，先运行 `workflow-monitor privacy sanitize-events --base-ref main` 预览，再加 `--apply` 执行。命令只迁移基线之后的事件，保留事件 ID 和非敏感内容，并追加迁移审计事件；审阅并确认隐私检查通过后，使用 squash 集成。不要推送仍含原始隐私值的分支提交历史。
+
 ## 许可证
 
 Workflow Monitor 使用 [MIT License](LICENSE)。

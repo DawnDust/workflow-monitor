@@ -93,7 +93,7 @@ from ...infrastructure.git.build_identity import build_identity
 from ...application.action_service import ActionProgress, WorkflowActionService, action_spec
 from ...composition import build_action_service
 from ...core.branches import classify_branch as classify_branch_with_policy
-from ...core.privacy import added_json_findings, added_line_categories
+from ...core.privacy import added_json_findings, added_line_categories, sanitize_public_payload
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -125,7 +125,7 @@ STATE_ARGUMENTS = (
     "goal", "current_step", "judgment", "breakpoint", "blocker", "status", "main_goal_version",
 )
 DAILY_HELP = """\
-usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,report,end,diagnostics} ...
+usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,report,end,diagnostics,privacy} ...
 
 项目内维护入口。冻结 EXE 无参数启动桌面界面；Codex 使用显式子命令。
 
@@ -135,6 +135,7 @@ usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,report
   report      按需填报进展、证据与审阅结果
   end         完成任务生命周期
   diagnostics 查看或导出本地脱敏诊断
+  privacy     安全脱敏基线之后的事件差量
 
 Codex 常用:
   context --view brief --format markdown
@@ -164,7 +165,7 @@ usage: workflow-monitor [-h] [--help-all] [--project PATH] <command> ...
   attempt, exploration, prepare-pr, archive-attempt
 
 数据维护:
-  db, diagnostics
+  db, diagnostics, privacy
 
 内部 Git Hook 命令不显示。
 使用 <命令> --help 查看详细参数。
@@ -1274,6 +1275,105 @@ def check_staged_privacy() -> None:
                 )
     if findings:
         raise WorkflowError("暂存内容包含需要脱敏的信息:\n- " + "\n- ".join(sorted(findings)))
+
+
+def sanitize_uncommitted_events(base_ref: str | None = None, *, apply: bool = False) -> dict:
+    """Redact event additions relative to a trusted ref without touching its history."""
+    ref = clean_text(base_ref or branch_policy()["default_branch"], "基线分支", 300)
+    assert ref is not None
+    verified_ref = run_git(["rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"], check=False)
+    if verified_ref.returncode != 0:
+        raise WorkflowError("找不到指定的已提交基线分支或提交")
+
+    relative_journal = journal_path().relative_to(ROOT).as_posix()
+    base_result = run_git(["show", f"{verified_ref.stdout.strip()}:{relative_journal}"], check=False)
+    if base_result.returncode != 0:
+        raise WorkflowError("指定基线中没有维护事件账本")
+
+    def parse_journal(document: str) -> list[dict]:
+        result = []
+        try:
+            for line_number, line in enumerate(document.splitlines(), 1):
+                if line.strip():
+                    result.append(validate_event(json.loads(line), line=line_number))
+        except (ValueError, StoreError) as exc:
+            raise WorkflowError("事件账本无法解析；未执行脱敏迁移") from exc
+        return result
+
+    baseline = parse_journal(base_result.stdout)
+    head_result = run_git(["show", f"HEAD:{relative_journal}"], check=False)
+    if head_result.returncode != 0:
+        raise WorkflowError("当前 HEAD 中没有维护事件账本")
+    committed = parse_journal(head_result.stdout)
+    current = load_events(journal_path())
+    baseline_by_id = {event["event_id"]: event for event in baseline}
+    committed_by_id = {event["event_id"]: event for event in committed}
+    current_by_id = {event["event_id"]: event for event in current}
+    for event_id, event in baseline_by_id.items():
+        existing = current_by_id.get(event_id)
+        if existing is None or canonical_json(existing) != canonical_json(event):
+            raise WorkflowError("当前账本缺少或修改了基线事件；拒绝覆盖历史记录")
+
+    sanitized_ids: list[str] = []
+    output_events: list[dict] = []
+    for event in current:
+        candidate = json.loads(canonical_json(event))
+        if event["event_id"] not in baseline_by_id:
+            if event["event_id"] in committed_by_id:
+                if added_line_categories(canonical_json(event), relative_journal):
+                    raise WorkflowError("已提交的分支事件包含隐私值；拒绝改写历史事件，请使用专门的历史迁移流程")
+            else:
+                candidate["payload"] = sanitize_public_payload(candidate["payload"])
+                if canonical_json(candidate) != canonical_json(event):
+                    sanitized_ids.append(event["event_id"])
+        output_events.append(candidate)
+
+    if not sanitized_ids:
+        return {"sanitized": False, "base_ref": ref,
+                "message": "基线之后的事件无需脱敏；账本和暂存区未更改。"}
+
+    task_id = None
+    try:
+        task_id = read_active()["task_id"]
+    except Exception:
+        pass
+    output_events.append(emit(
+        "privacy.events_sanitized", branch=current_branch(), task_id=task_id,
+        payload={"base_ref": ref, "event_ids": sorted(sanitized_ids),
+                 "event_count": len(sanitized_ids),
+                 "note": "已脱敏基线之后的未发布事件内容；事件标识和非敏感证据保持不变。"},
+    ))
+
+    # Validate every rewritten addition before writing anything; errors never echo values.
+    for event in output_events:
+        if event["event_id"] in baseline_by_id:
+            continue
+        line = canonical_json(event)
+        if added_line_categories(line, relative_journal):
+            raise WorkflowError("脱敏后的新增事件仍触发隐私扫描；未更改账本")
+
+    if not apply:
+        return {"sanitized": False, "preview": True, "base_ref": ref,
+                "event_count": len(sanitized_ids), "event_ids": sorted(sanitized_ids),
+                "next": "审阅受影响事件后，使用相同基线并添加 --apply 执行迁移。"}
+
+    path = journal_path()
+    descriptor, temp_name = tempfile.mkstemp(prefix="events-sanitized-", suffix=".jsonl", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            for event in output_events:
+                handle.write(canonical_json(event) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+    run_git(["add", "--", relative_journal])
+    return {"sanitized": True, "base_ref": ref, "event_count": len(sanitized_ids),
+            "event_ids": sorted(sanitized_ids), "audit_event_added": True,
+            "staged_path": relative_journal,
+            "next": "审阅脱敏差异并运行 pre-commit 隐私检查；仅用 squash 集成，避免带入旧分支提交对象。"}
 
 
 def pre_commit_check(finish_record: dict | None = None) -> None:

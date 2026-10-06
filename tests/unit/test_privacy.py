@@ -10,12 +10,88 @@ from project_hooks.core.events import new_event
 from project_hooks.core.privacy import (
     added_json_findings, added_line_categories, sanitize_public_text, sensitive_categories,
 )
-from project_hooks.infrastructure.persistence.store import append_events, load_events
+from project_hooks.infrastructure.persistence.store import append_events, canonical_json, load_events
 from project_hooks.ui.cli import commands
 from project_hooks.ui.cli.errors import WorkflowError
 
 
 class PrivacyTests(unittest.TestCase):
+    def test_sanitize_events_preserves_baseline_and_event_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+            (root / ".codex").mkdir()
+            (root / ".codex/project-maintenance-workflow.json").write_text(
+                '{"timezone":"Asia/Shanghai","maintenance_store":{"journal":"maintenance/events.jsonl"},'
+                '"branch_policy":{"default_branch":"main"}}\n', encoding="utf-8",
+            )
+            journal = root / "maintenance/events.jsonl"
+            baseline_event = new_event(
+                "privacy.baseline", branch="main", task_id=None, payload={"evidence": "stable"},
+                timezone="Asia/Shanghai", event_id="baseline-event",
+            )
+            append_events(journal, root / ".project_hooks", [baseline_event])
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "baseline"], check=True)
+            subprocess.run(["git", "-C", str(root), "branch", "research/privacy-fix"], check=True)
+            subprocess.run(["git", "-C", str(root), "checkout", "-q", "research/privacy-fix"], check=True)
+
+            private_path = "C:" + chr(92).join(("", "Users", "researcher", "paper.tex"))
+            legacy_event = new_event(
+                "task.checkpointed", branch="research/privacy-fix", task_id="task-1",
+                payload={"current_step": "已整理推导", "evidence": [f"备份位置 {private_path}", "推导核验通过"]},
+                timezone="Asia/Shanghai", event_id="legacy-event",
+            )
+            legacy_event["payload"]["evidence"][0] = f"备份位置 {private_path}"
+            journal.write_text(journal.read_text(encoding="utf-8") + canonical_json(legacy_event) + "\n",
+                               encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", str(journal)], check=True)
+
+            with patch.object(commands, "ROOT", root), patch.object(commands, "MARKER", root / ".codex/project-maintenance-workflow.json"):
+                preview = commands.sanitize_uncommitted_events("main")
+                self.assertTrue(preview["preview"])
+                result = commands.sanitize_uncommitted_events("main", apply=True)
+                events = load_events(journal)
+                commands.check_staged_privacy()
+
+            baseline_after = next(event for event in events if event["event_id"] == "baseline-event")
+            migrated = next(event for event in events if event["event_id"] == "legacy-event")
+            audit = next(event for event in events if event["event_type"] == "privacy.events_sanitized")
+            self.assertEqual(baseline_after, baseline_event)
+            self.assertEqual(migrated["event_id"], "legacy-event")
+            self.assertIn("已整理推导", migrated["payload"]["current_step"])
+            self.assertIn("推导核验通过", " ".join(migrated["payload"]["evidence"]))
+            self.assertNotIn("researcher", str(migrated))
+            self.assertEqual(audit["payload"]["event_ids"], ["legacy-event"])
+            self.assertEqual(result["event_count"], 1)
+
+    def test_sanitize_events_is_noop_when_delta_is_already_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+            (root / ".codex").mkdir()
+            (root / ".codex/project-maintenance-workflow.json").write_text(
+                '{"timezone":"Asia/Shanghai","maintenance_store":{"journal":"maintenance/events.jsonl"},'
+                '"branch_policy":{"default_branch":"main"}}\n', encoding="utf-8",
+            )
+            journal = root / "maintenance/events.jsonl"
+            clean = new_event("privacy.baseline", branch="main", task_id=None,
+                              payload={"evidence": "clean"}, timezone="Asia/Shanghai")
+            append_events(journal, root / ".project_hooks", [clean])
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "baseline"], check=True)
+            before = journal.read_bytes()
+
+            with patch.object(commands, "ROOT", root), patch.object(commands, "MARKER", root / ".codex/project-maintenance-workflow.json"):
+                result = commands.sanitize_uncommitted_events("main", apply=True)
+
+            self.assertFalse(result["sanitized"])
+            self.assertEqual(journal.read_bytes(), before)
+
     def test_event_payload_redacts_private_values_without_losing_research_text(self) -> None:
         private_path = "C:" + chr(92).join(("", "Users", "researcher", "private", "report.md"))
         private_email = "me" + "@" + "qq.com"
