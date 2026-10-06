@@ -15,7 +15,16 @@ from typing import Iterator
 
 
 class MutationLockError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, owner: dict | None = None, retry_after_seconds: int = 1):
+        super().__init__(message)
+        self.lock_owner = None
+        if owner and owner.get("status") == "active":
+            self.lock_owner = {
+                key: owner.get(key)
+                for key in ("pid", "command", "task_id", "acquired_at")
+                if owner.get(key) is not None
+            }
+        self.retry_after_seconds = max(1, int(retry_after_seconds))
 
 
 _LOCAL = threading.local()
@@ -145,7 +154,10 @@ def mutation_lock(
                 f"PID={owner.get('pid')} command={owner.get('command')} "
                 f"task={owner.get('task_id') or 'none'} acquired={owner.get('acquired_at')}"
             )
-            raise MutationLockError(f"项目正被另一个写命令占用：{detail}；请稍后重试或运行 task recover")
+            raise MutationLockError(
+                f"项目正被另一个写命令占用：{detail}；请在持锁写入结束后重试。",
+                owner=owner,
+            )
         time.sleep(0.05)
     held[key] = 1
     try:

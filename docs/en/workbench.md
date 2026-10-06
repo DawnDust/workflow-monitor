@@ -5,7 +5,7 @@ The Dashboard is an observation and navigation surface. Lifecycle writes are per
 ## Main views
 
 - **Workflow:** active and historical tasks, action availability, Research Chapters, and research attempts.
-- **Overview:** project description, current Research Chapter, judgment, breakpoint, blockers, next steps, delivery state, and resource summary.
+- **Overview:** project description, current Research Chapter, judgment, breakpoint, blockers, next steps, delivery state, and resource summary; it also offers an on-demand roadmap link when the maintenance guide is present.
 - **Search:** searches tasks, attempts, and registered resources without translating their content.
 - **Resources:** navigates the standard resource directories and lazily loads registered entries.
 - **Research Chapters:** groups chapter goals, completed work, related attempts, and resources.
@@ -28,6 +28,8 @@ Resources live under the standard `resources/` directories and can be registered
 ## Research attention
 
 The Overview shows at most three deterministic research-attention signals derived from existing structured facts, such as missing registered resources, explicit contradictory evidence, a blocked chapter, or an active exploration without continuity steps. The same sourced signals enter the AI Context and link only to existing read-only pages. They are not scientific conclusions and never trigger automatic repairs. Unregistered Sparks remain free-form and are not historically tracked.
+
+When `maintenance/PHYSICS_RESEARCH_ROADMAP.md` is present, the Overview offers a “Theoretical Physics Research Roadmap” link that opens it with the system's default Markdown application. The roadmap is guidance, not a required sequence or completion gate; AI reads it only for relevant theoretical-physics research tasks.
 
 ## Diagnostics
 

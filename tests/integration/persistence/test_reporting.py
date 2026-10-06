@@ -77,6 +77,69 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(self.events(), [])
         self.assertEqual(self.git("branch", "--show-current").stdout.strip(), "main")
 
+    def test_manual_research_branch_bootstraps_attempt_and_new_stage(self):
+        self.hooks("install")
+        self.git("-c", "core.hooksPath=.git/no-hooks", "commit", "--allow-empty", "-m", "installed")
+        self.git("switch", "-c", "research/manual-bootstrap")
+
+        invalid = self.submit("start", dict(
+            kind="analysis", scope="learn the topic", acceptance=["explain the evidence"],
+            track="research", topic="manual-bootstrap", stage="new",
+            new_stage={"title": "missing fields"}, git_commit="never",
+        ), check=False)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertEqual(self.events(), [])
+
+        mismatch = self.submit("start", dict(
+            kind="analysis", scope="mismatch", acceptance=["reject mismatch"],
+            track="research", topic="different-topic", stage="none",
+            without_stage_reason="testing branch validation", git_commit="never",
+        ), check=False)
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("与当前探索分支", mismatch.stderr)
+        self.assertEqual(self.events(), [])
+
+        self.begin(track="research", topic="manual-bootstrap", stage="new",
+                   new_stage=dict(title="Manual bootstrap", goal="Learn the topic",
+                                  acceptance=["Explain the evidence"]))
+        events = self.events()
+        self.assertEqual([event["event_type"] for event in events],
+                         ["task.started", "stage.started", "attempt.started"])
+        attempt = events[-1]["payload"]
+        self.assertEqual(attempt["attempt_id"], events[0]["task_id"])
+        self.assertEqual(attempt["stage_id"], "manual-bootstrap")
+        self.assertEqual(attempt["topic"], "manual-bootstrap")
+        self.assertEqual(len([event for event in self.events()
+                              if event["event_type"] == "attempt.started"]), 1)
+
+    def test_manual_research_branch_start_recovers_pending_events(self):
+        from project_hooks.ui.cli import commands as cli
+        from project_hooks.ui.cli.parser import build_parser
+
+        self.hooks("install")
+        self.git("-c", "core.hooksPath=.git/no-hooks", "commit", "--allow-empty", "-m", "installed")
+        self.git("switch", "-c", "research/manual-recovery")
+        args = build_parser().parse_args([
+            "start", "20260915_manual_recovery_001", "--kind", "analysis", "--scope", "recover",
+            "--acceptance", "safe", "--track", "research", "--topic", "manual-recovery",
+            "--stage", "new", "--new-stage",
+            json.dumps(dict(title="Recover", goal="Recover", acceptance=["safe"])),
+            "--git-commit", "never",
+        ])
+        original = cli.ROOT
+        try:
+            cli.set_project_root(self.root)
+            with patch.object(cli, "persist", side_effect=RuntimeError("interrupted")):
+                with self.assertRaises(cli.WorkflowError):
+                    cli.start_task(args)
+            self.hooks("task", "recover")
+            self.hooks("task", "recover")
+            types = [event["event_type"] for event in self.events()]
+            for kind in ("task.started", "stage.started", "attempt.started"):
+                self.assertEqual(types.count(kind), 1)
+        finally:
+            cli.set_project_root(original)
+
     def test_json_conflict_fails_before_start(self):
         result = subprocess.run([sys.executable, "-m", "project_hooks", "start", "--scope", "other", "--input-json", "-"],
                                 cwd=self.root, input=json.dumps(dict(scope="test")), encoding="utf-8", capture_output=True)

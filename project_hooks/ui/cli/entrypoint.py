@@ -11,6 +11,9 @@ from ... import __version__
 from .commands import *
 from .parser import build_parser
 from .agent_output import brief_context, verification_view, markdown_view, compact_result
+from ...infrastructure.system.diagnostics import create_failure_record
+from ...infrastructure.system.runtime import UPDATE_CHILD_ENV
+from ...infrastructure.system.updater import validate_project_event_schema
 
 def main(argv: list[str] | None = None) -> int:
     raw_args = list(os.sys.argv[1:] if argv is None else argv)
@@ -35,16 +38,19 @@ def main(argv: list[str] | None = None) -> int:
             set_project_root(root)
             assert_project_version_compatible(args)
             shared_action = cli_shared_action(args)
-            if not command_is_read_only(args):
+            if command_requires_project_lock(args):
                 lock_state_dir = root / ".project_hooks" if args.command == "init" else state_dir()
-                writer_context = mutation_lock(
+                pending_writer_context = mutation_lock(
                     lock_state_dir,
                     command=".".join(filter(None, [args.command, getattr(args, f"{args.command}_command", None)])),
                     task_id=getattr(args, "task_id", None),
                     timeout=0.25,
                 )
-                writer_context.__enter__()
+                pending_writer_context.__enter__()
+                writer_context = pending_writer_context
                 before_events = set() if args.command == "init" else {e["event_id"] for e in load_events(journal_path())}
+            elif args.command == "update" and not args.check:
+                before_events = {e["event_id"] for e in load_events(journal_path())}
         if args.basic_help:
             output = DAILY_HELP
         elif args.help_all:
@@ -76,7 +82,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise WorkflowError(
                     f"核心版本 {__version__} 与迁移目标 {args.target_version} 不一致"
                 )
-            output = apply_project_update(ROOT, args.target_version)
+            minimum_schema = args.minimum_event_schema if args.minimum_event_schema is not None else 1
+            maximum_schema = args.maximum_event_schema if args.maximum_event_schema is not None else SCHEMA_VERSION
+            validate_project_event_schema(ROOT, minimum_schema, maximum_schema)
+            output = apply_project_update(
+                ROOT, args.target_version, executable_path=args.executable_path,
+            )
         elif args.command is None:
             configured = run_git(["config", "--local", "--get", "core.hooksPath"], check=False).stdout.strip()
             if configured != TRACKED_HOOKS_DIR:
@@ -161,6 +172,16 @@ def main(argv: list[str] | None = None) -> int:
             }
         except Exception:
             pass
+        if os.environ.get(UPDATE_CHILD_ENV) and args is not None and args.command == "_apply-update":
+            try:
+                child_record = create_failure_record((root or ROOT).resolve(), exc, **metadata)
+                print(json.dumps({
+                    "format": "workflow-monitor-update-error",
+                    "diagnostic": child_record,
+                }, ensure_ascii=False), file=os.sys.stderr)
+            except Exception:
+                print(str(exc), file=os.sys.stderr)
+            return 1
         try:
             record = record_failure((root or ROOT).resolve(), exc, **metadata)
             message = format_failure(record)

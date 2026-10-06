@@ -69,6 +69,7 @@ def main() -> int:
     icon_png = root / "project_hooks" / "ui" / "windows" / "assets" / "workflow_monitor_icon.png"
     icon_ico = root / "project_hooks" / "ui" / "windows" / "assets" / "workflow_monitor_icon.ico"
     web_assets = root / "project_hooks" / "ui" / "web" / "assets"
+    physics_roadmap = root / "maintenance" / "PHYSICS_RESEARCH_ROADMAP.md"
     PyInstaller.__main__.run([
         str(root / "project_hooks" / "windows_entry.py"),
         "--name", "workflow-monitor",
@@ -86,6 +87,7 @@ def main() -> int:
         "--add-data", f"{build_info}{os.pathsep}.",
         "--add-data", f"{icon_png}{os.pathsep}project_hooks/ui/windows/assets",
         "--add-data", f"{web_assets}{os.pathsep}project_hooks/ui/web/assets",
+        "--add-data", f"{physics_roadmap}{os.pathsep}maintenance",
         "--hidden-import", "webview",
         "--hidden-import", "webview.platforms.edgechromium",
         "--hidden-import", "clr",

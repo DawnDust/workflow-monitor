@@ -22,7 +22,9 @@ from project_hooks.infrastructure.system.verification import iso_now, write_test
 MODULES = (
     "tests.unit.test_resource_gate",
     "tests.unit.test_folder_index",
+    "tests.unit.test_project_templates",
     "tests.unit.test_privacy",
+    "tests.unit.test_transaction",
     "tests.unit.test_reviews",
     "tests.integration.persistence.test_reviews",
     "tests.unit.test_automation",
@@ -40,7 +42,9 @@ MODULES = (
 FAST_CLASSES = (
     "tests.unit.test_resource_gate.ResourceGateTests",
     "tests.unit.test_folder_index.FolderIndexTests",
+    "tests.unit.test_project_templates.ProjectTemplateTests",
     "tests.unit.test_privacy.PrivacyTests",
+    "tests.unit.test_transaction.MutationLockTests",
     "tests.unit.test_reviews.ReviewTests",
     "tests.integration.persistence.test_reviews.ReviewIntegrationTests",
     "tests.unit.test_automation.AutomationTests",

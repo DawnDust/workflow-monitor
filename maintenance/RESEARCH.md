@@ -8,7 +8,7 @@
 
 探索启动使用 `--stage auto|new|none|篇章ID`；新篇章通过 `--new-stage` 同次创建，无需额外维护周期。已有活动篇章时必须明确暂停原因，不自动替换。维护默认不关联篇章，探索不关联时须填写 `--without-stage-reason`。
 
-科研资料放在 `resources/` 的预设或已登记自定义文件夹，并通过 `catalog` 登记。每次资料文件操作前重新读取 `catalog folder index`，按目录用途选择位置。`resources/sparks/` 保存自由 Markdown 灵感，未登记内容不触发 `check` 警告；需要检索时可选择性登记。Markdown 公式使用 Markdown/LaTeX 语法。
+科研资料放在 `resources/` 的预设或已登记自定义文件夹，并通过 `catalog` 登记。灵感和未成形的问题放入 `sparks`，形成行动的计划放入 `plans`，成型的来源讲解与学习材料放入 `tutorials`；实验代码及依赖按项目放入 `analysis/<项目>/`，生成结果放在项目内的 `output/`。移动已登记资料时保留 catalog ID 并更新路径。每次资料操作前重新读取 `catalog folder index`；归属不明确时先询问用户。`resources/sparks/` 保存自由 Markdown 灵感，未登记内容不触发 `check` 警告；需要检索时可选择性登记。Markdown 公式使用 Markdown/LaTeX 语法。
 
 只有证据完整且状态为 `validated` 的探索可准备 Squash PR；合并等待用户明确确认。
 

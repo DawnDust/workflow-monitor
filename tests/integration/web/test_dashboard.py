@@ -129,6 +129,13 @@ class WebProjectionTests(unittest.TestCase):
         self.assertIn('Research attention', script)
         self.assertIn('MAX 3 · READ ONLY', script)
 
+    def test_dashboard_assets_show_optional_physics_roadmap_entry(self) -> None:
+        script = (Path(__file__).parents[3] / "project_hooks" / "ui" / "web" / "assets" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('state.runtime.physics_roadmap_available?panel', script)
+        self.assertIn('id="open-physics-research-roadmap"', script)
+        self.assertIn('invoke("open_physics_research_roadmap")', script)
+        self.assertIn("不构成必经阶段或完成门禁", script)
+
     def test_research_stages_preserve_revision_and_pause_projection(self) -> None:
         source = sample_snapshot()
         source["context"]["stages"][0]["revisions"] = [{
@@ -290,6 +297,31 @@ class WebDashboardBridgeTests(unittest.TestCase):
             self.assertTrue(bridge.reveal_resource_file("t1")["ok"])
             self.assertEqual(runner.call_count, 2)
         self.assertEqual(bridge.reveal_resource_file("fake")["error"]["code"], "not_found")
+
+    def test_physics_roadmap_open_uses_only_fixed_maintenance_path(self) -> None:
+        roadmap = self.root / "maintenance/PHYSICS_RESEARCH_ROADMAP.md"
+        roadmap.parent.mkdir(parents=True)
+        roadmap.write_text("# Research roadmap\n", encoding="utf-8")
+        bridge = WebDashboardBridge(FakeProvider(self.root))
+
+        self.assertTrue(bridge.ready()["data"]["physics_roadmap_available"])
+        with patch("project_hooks.ui.web.bridge.open_file_default") as opener:
+            result = bridge.open_physics_research_roadmap()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["path"], "maintenance/PHYSICS_RESEARCH_ROADMAP.md")
+        opener.assert_called_once_with(roadmap.resolve())
+
+        with patch("project_hooks.ui.web.bridge.open_file_default", side_effect=OSError("no default app")):
+            failed = bridge.open_physics_research_roadmap()
+        self.assertFalse(failed["ok"])
+        self.assertEqual(failed["error"]["code"], "open_failed")
+
+    def test_physics_roadmap_is_hidden_and_open_rejected_when_missing(self) -> None:
+        bridge = WebDashboardBridge(FakeProvider(self.root))
+        self.assertFalse(bridge.ready()["data"]["physics_roadmap_available"])
+        result = bridge.open_physics_research_roadmap()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "missing_path")
 
     def test_registered_nested_folder_open_is_allowed_but_unregistered_is_rejected(self):
         folder = self.root / "resources/theory/nested"

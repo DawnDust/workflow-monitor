@@ -93,7 +93,7 @@ from ...infrastructure.git.build_identity import build_identity
 from ...application.action_service import ActionProgress, WorkflowActionService, action_spec
 from ...composition import build_action_service
 from ...core.branches import classify_branch as classify_branch_with_policy
-from ...core.privacy import sensitive_categories
+from ...core.privacy import added_json_findings, added_line_categories
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -254,9 +254,14 @@ def command_is_read_only(args: argparse.Namespace) -> bool:
     return False
 
 
+def command_requires_project_lock(args: argparse.Namespace) -> bool:
+    """The update parent stages a verified EXE; its migration child owns writes."""
+    return not command_is_read_only(args) and args.command != "update"
+
+
 def assert_project_version_compatible(args: argparse.Namespace) -> None:
     installed = installed_project_version()
-    if (installed and installed != __version__ and args.command != "_apply-update"
+    if (installed and installed != __version__ and args.command not in {"_apply-update", "update"}
             and not command_is_read_only(args)):
         raise WorkflowError(
             f"项目模板版本为 {installed}，当前 EXE 为 {__version__}；"
@@ -888,6 +893,7 @@ def start_task(args: argparse.Namespace) -> dict:
     except ValueError as exc:
         raise WorkflowError(str(exc)) from exc
     created_branch = False
+    initialize_attempt = False
     head_result = run_git(["rev-parse", "--verify", "HEAD"], check=False)
     base_head = head_result.stdout.strip() if head_result.returncode == 0 else None
     if classification["kind"] == "stable":
@@ -914,8 +920,8 @@ def start_task(args: argparse.Namespace) -> dict:
         requested_track = requested_track or classification["track"]
         if requested_track != classification["track"] or (requested_topic and requested_topic != classification["topic"]):
             raise WorkflowError(f"start 参数与当前探索分支 {original_branch} 不一致")
-        if not get_attempt(original_branch):
-            raise WorkflowError(f"当前探索分支缺少数据库尝试记录: {original_branch}")
+        attempt = get_attempt(original_branch)
+        initialize_attempt = attempt is None
     else:
         raise WorkflowError(f"不支持在分支 {original_branch} 启动任务")
     branch = current_branch()
@@ -941,7 +947,7 @@ def start_task(args: argparse.Namespace) -> dict:
                    payload={**record["declaration"], "resource_baseline": resource_baseline})]
     events.extend(emit(kind, branch=branch, task_id=args.task_id, payload=payload)
                   for kind, payload in stage_events_payloads)
-    if classification["kind"] == "exploration" and created_branch:
+    if classification["kind"] == "exploration" and (created_branch or initialize_attempt):
         events.append(emit("attempt.started", branch=branch, task_id=args.task_id, payload={
             "attempt_id": args.task_id, "track": classification["track"], "topic": classification["topic"],
             "base_commit": base_head, "source_task_id": args.task_id,
@@ -1202,22 +1208,70 @@ def attempt_update(args: argparse.Namespace) -> dict:
     return get_attempt(branch) or {}
 
 
-def check_staged_privacy() -> None:
-    """Check added lines only; historical journal content is handled by migration."""
-    diff = run_git(["diff", "--cached", "--no-ext-diff", "--no-color", "--unified=0", "--"]).stdout
-    current_path = "unknown"
-    findings: set[str] = set()
+def _staged_changed_paths() -> list[str]:
+    fields = run_git(["diff", "--cached", "--name-status", "-z", "--"]).stdout.split("\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if not status:
+            continue
+        count = 2 if status.startswith(("R", "C")) else 1
+        changed = fields[index:index + count]
+        index += count
+        if status[0] in {"A", "M", "R", "C", "T"} and changed:
+            paths.append(changed[-1])
+    return paths
+
+
+_DIFF_HUNK_START = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _added_diff_lines(diff: str):
+    """Yield destination line numbers and content from a zero-context diff."""
+    destination_line: int | None = None
     for line in diff.splitlines():
-        if line.startswith("+++ b/"):
-            current_path = line[6:]
-        elif line.startswith("+") and not line.startswith("+++"):
-            categories = sensitive_categories(line[1:])
-            for category in categories:
-                findings.add(f"{current_path}: {category}")
-    added = run_git(["diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--"]).stdout
-    for path in added.split("\0"):
+        hunk = _DIFF_HUNK_START.match(line)
+        if hunk:
+            destination_line = int(hunk.group(1))
+        elif destination_line is None:
+            continue
+        elif line.startswith("+"):
+            yield destination_line, line[1:]
+            destination_line += 1
+        elif line.startswith("-"):
+            continue
+        elif line.startswith(" "):
+            destination_line += 1
+        else:
+            destination_line = None
+
+
+def check_staged_privacy() -> None:
+    """Check added lines with NUL-safe paths and report their destination lines."""
+    findings: set[str] = set()
+    paths = _staged_changed_paths()
+    for path in paths:
         if re.search(r"(?i)(?:^|/)(?:\.env(?:\..*)?|id_rsa|id_ed25519|credentials(?:\..*)?|secrets(?:\..*)?)$|\.(?:pem|p12|pfx|key|sqlite3?|db)$", path):
             findings.add(f"{path}: sensitive_filename")
+        pathspec = ":(literal)" + path
+        diff = run_git([
+            "diff", "--cached", "--no-ext-diff", "--no-color", "--unified=0",
+            "--", pathspec,
+        ]).stdout
+        changed_lines: dict[int, str] = {}
+        for line_number, added in _added_diff_lines(diff):
+            changed_lines[line_number] = added
+            for category in added_line_categories(added, path):
+                findings.add(f"{path}:{line_number}: {category}")
+        if path.lower().endswith(".json") and changed_lines:
+            staged = run_git(["show", f":./{path}"], check=False)
+            if staged.returncode == 0:
+                findings.update(
+                    f"{path}:{line_number}: {category}"
+                    for line_number, category in added_json_findings(staged.stdout, changed_lines)
+                )
     if findings:
         raise WorkflowError("暂存内容包含需要脱敏的信息:\n- " + "\n- ".join(sorted(findings)))
 

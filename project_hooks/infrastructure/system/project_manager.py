@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from ... import EXECUTABLE_NAME
 from ..git.build_identity import build_identity
 from ..git import client as git_client
 from .resource_layout import RESOURCE_DIRECTORIES, ensure_resource_directories
@@ -23,9 +24,10 @@ from ..persistence.store import (
     validate_projection,
 )
 from ..persistence.database import integrity_check, latest_active_task_id
+from .runtime import runtime_root, write_pointer
 
 
-TEMPLATE_VERSION = 13
+TEMPLATE_VERSION = 15
 INSTALLATION_PATH = Path(".codex/project-maintenance-installation.json")
 CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
 AGENTS_BEGIN = "<!-- project-maintenance-hooks:begin -->"
@@ -60,6 +62,9 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - 探索启动前必须有关联研究篇章或记录明确的无篇章理由；有关联篇章的任务结束时必须显式审阅篇章。
 - 项目资料和研究篇章只通过 `project update` 与内部 `stage` 指令记录；新证据改变判断时用 `stage update --revision ... --summary ... --evidence ...` 追加修订；探索进度使用 `attempt update` 的结构化步骤字段。
 - 科研资料放在 `resources/` 预设或已登记的自定义文件夹；文件夹通过 `catalog folder` 登记，内部资料独立登记，模拟资料包除外。`resources/sparks/` 可自由保存 Markdown。
+- 理论物理任务涉及研究方向与问题收窄、模型分析、理论推导、数值验证、反例压力测试或文献查新时，按需阅读 `maintenance/PHYSICS_RESEARCH_ROADMAP.md`。它只提供研究思路，不是强制阶段、验收项或门禁。
+- 灵感和未成形问题归入 `sparks`，可执行的下一步或研究方案归入 `plans`，成型的来源解读和学习材料归入 `tutorials`。实验代码及依赖按项目放入 `analysis/<项目>/`，生成结果放在同一项目目录的 `output/` 子目录。
+- 移动已登记资料时保留原 catalog ID 并更新路径；资料操作前刷新 `catalog folder index`，分类无法可靠判断时先询问用户。
 - 只有 `validated` 尝试可准备 Squash PR；推送和合并必须由用户明确确认。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态或绕过 `end`。
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
@@ -110,8 +115,8 @@ MAINTENANCE_README = """# Workflow Monitor 项目维护索引
 
 - [CORE.md](CORE.md)：新会话、上下文丢失或规范变更时读取的生命周期、轨道、安全、测试和篇章契约。
 - [RESEARCH.md](RESEARCH.md)：研究篇章、探索、Catalog 与 Sparks。
+- [PHYSICS_RESEARCH_ROADMAP.md](PHYSICS_RESEARCH_ROADMAP.md)：理论物理研究路线参考；相关研究任务按需阅读，不作为门禁。
 - [OPERATIONS.md](OPERATIONS.md)：安装、升级、恢复、诊断、交付与发布。
-- `ARCHITECTURE.md`：代码边界和读写模型架构。
 
 `maintenance/events.jsonl` 只追加且不得改写历史行；`.project_hooks/maintenance.sqlite3` 和测试回执均为本地生成物。
 """
@@ -139,7 +144,7 @@ MAINTENANCE_RESEARCH = """# 科研与研究篇章规范
 
 探索启动使用 `--stage auto|new|none|篇章ID`；新篇章通过 `--new-stage` 同次创建，无需额外维护周期。已有活动篇章时必须明确暂停原因，不自动替换。维护默认不关联篇章，探索不关联时须填写 `--without-stage-reason`。
 
-科研资料放在 `resources/source|data|theory|analysis|others|reports|sparks|tutorials|translations|plans/` 或已登记的 resources 自定义文件夹。outputs 仅兼容保留，不默认创建。Sparks 可自由保存 Markdown，登记到 `catalog` 是可选的；其他资料通过 `catalog` 登记。Markdown 公式使用 Markdown/LaTeX 语法。
+科研资料放在 `resources/source|data|theory|analysis|others|reports|sparks|tutorials|translations|plans/` 或已登记的 resources 自定义文件夹。灵感和未成形问题放入 `sparks`，形成下一步行动或研究方案后放入 `plans`，成型的来源解读和学习材料放入 `tutorials`。实验代码及依赖按项目聚集在 `analysis/<项目>/`，生成结果放在该项目的 `output/` 子目录；顶层 `outputs` 仅兼容保留，不默认创建。移动已登记资料时保留 catalog ID 并更新路径；操作前刷新 `catalog folder index`，分类不明确时先询问用户。Sparks 可自由保存 Markdown，登记到 `catalog` 是可选的；其他资料通过 `catalog` 登记。Markdown 公式使用 Markdown/LaTeX 语法。
 
 只有证据完整且状态为 `validated` 的探索可准备 Squash PR；合并等待用户明确确认。
 """
@@ -286,12 +291,16 @@ MAINTENANCE_AUTOMATION += ('\nDashboard 固定展示「当前正常／建议审�
 
 
 def template_files() -> dict[str, str]:
+    template_root = Path(__file__).resolve().parents[3]
+    roadmap_source = template_root / "maintenance" / "PHYSICS_RESEARCH_ROADMAP.md"
+    physics_roadmap = roadmap_source.read_text(encoding="utf-8")
     files = {
         ".githooks/pre-commit": HOOK_TEMPLATE,
         "maintenance/README.md": MAINTENANCE_README,
         "maintenance/CORE.md": MAINTENANCE_CORE,
         "maintenance/AUTOMATION.md": MAINTENANCE_AUTOMATION,
         "maintenance/RESEARCH.md": MAINTENANCE_RESEARCH,
+        "maintenance/PHYSICS_RESEARCH_ROADMAP.md": physics_roadmap,
         "maintenance/OPERATIONS.md": MAINTENANCE_OPERATIONS,
     }
     files.update({f"{item.relative_path}/.gitkeep": "\n" for item in RESOURCE_DIRECTORIES if item.required})
@@ -506,6 +515,7 @@ def validate_project(root: Path) -> None:
         Path("maintenance/README.md"),
         Path("maintenance/CORE.md"),
         Path("maintenance/RESEARCH.md"),
+        Path("maintenance/PHYSICS_RESEARCH_ROADMAP.md"),
         Path("maintenance/OPERATIONS.md"),
         Path("maintenance/events.jsonl"),
     ):
@@ -568,9 +578,25 @@ def profile_authority_migration(events: list[dict], timezone: str) -> dict | Non
     )
 
 
-def apply_project_update(root: Path, target_version: str) -> dict:
+def apply_project_update(
+    root: Path, target_version: str, *, executable_path: Path | None = None,
+) -> dict:
     root = root.resolve()
     preflight_update(root)
+    if executable_path is not None:
+        expected_executable = (
+            runtime_root(root) / "executables" / target_version / EXECUTABLE_NAME
+        ).resolve()
+        executable_path = Path(executable_path).resolve()
+        if executable_path != expected_executable or not executable_path.is_file():
+            raise ProjectManagerError("迁移 EXE 不在目标版本的本地缓存位置")
+        digest_file = executable_path.parent / ".exe-sha256"
+        try:
+            expected_digest = digest_file.read_text(encoding="ascii").strip()
+        except OSError as exc:
+            raise ProjectManagerError("迁移 EXE 缺少本地验签摘要") from exc
+        if not expected_digest or sha256_bytes(executable_path.read_bytes()) != expected_digest:
+            raise ProjectManagerError("迁移 EXE 与本地验签摘要不匹配")
     install_path = root / INSTALLATION_PATH
     installation = json.loads(install_path.read_text(encoding="utf-8"))
     old_version = installation.get("application_version", installation.get("core_version"))
@@ -578,6 +604,7 @@ def apply_project_update(root: Path, target_version: str) -> dict:
     database = root / ".project_hooks/maintenance.sqlite3"
     paths = [root / CONFIG_PATH, install_path, root / "maintenance/events.jsonl",
              database, Path(str(database) + "-wal"), Path(str(database) + "-shm")]
+    paths.append(runtime_root(root) / "current.json")
     paths.extend(root / item for item in template_files())
     paths.extend((root / "AGENTS.md", root / ".gitignore", root / ".gitattributes"))
     backup, existed = _backup(paths, root)
@@ -660,6 +687,8 @@ def apply_project_update(root: Path, target_version: str) -> dict:
         if integrity != "ok":
             raise ProjectManagerError(f"SQLite integrity_check: {integrity}")
         validate_project(root)
+        if executable_path is not None:
+            write_pointer(target_version, root, executable_path)
         try:
             from .diagnostics import cleanup_after_update
             diagnostic_cleanup = cleanup_after_update(

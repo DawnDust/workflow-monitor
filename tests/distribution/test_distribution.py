@@ -28,6 +28,8 @@ from project_hooks.infrastructure.system.updater import (
     software_changes_since_release,
     verify_digest,
 )
+from project_hooks.ui.cli import commands as cli_commands
+from project_hooks.ui.cli.parser import build_parser
 from project_hooks.ui.windows.main import PortableBootstrapError, prepare_portable_project
 from scripts.run_tests import validate_release_tag
 
@@ -66,6 +68,11 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(PNG_ICON.is_file())
         self.assertTrue(PNG_ICON.with_suffix(".ico").is_file())
 
+    def test_frozen_builder_embeds_physics_roadmap_template(self) -> None:
+        build_script = (SOURCE_ROOT / "scripts/build_windows_exe.py").read_text(encoding="utf-8")
+        self.assertIn('root / "maintenance" / "PHYSICS_RESEARCH_ROADMAP.md"', build_script)
+        self.assertIn('f"{physics_roadmap}{os.pathsep}maintenance"', build_script)
+
     def exe_release(self, *, digest_override: str | None = None, build_id: str | None = None) -> Path:
         release = Path(self.temp.name) / "release"
         release.mkdir(exist_ok=True)
@@ -94,7 +101,7 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue((self.root / ".codex/project-maintenance-installation.json").is_file())
         config = json.loads((self.root / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
         self.assertEqual(config["core_read_order"], ["maintenance/CORE.md"])
-        for name in ("README.md", "CORE.md", "RESEARCH.md", "OPERATIONS.md"):
+        for name in ("README.md", "CORE.md", "RESEARCH.md", "PHYSICS_RESEARCH_ROADMAP.md", "OPERATIONS.md"):
             self.assertTrue((self.root / "maintenance" / name).is_file())
         self.assertIn("workflow.initialized", (self.root / "maintenance/events.jsonl").read_text(encoding="utf-8"))
         for name in ("source", "data", "theory", "analysis", "others", "reports", "sparks", "tutorials", "translations", "plans"):
@@ -105,6 +112,13 @@ class DistributionTests(unittest.TestCase):
         )
         with self.assertRaises(ProjectManagerError):
             initialize_project(self.root, CURRENT_VERSION)
+
+    def test_generated_maintenance_index_only_lists_installed_guides(self) -> None:
+        self.init()
+        readme = (self.root / "maintenance/README.md").read_text(encoding="utf-8")
+        self.assertNotIn("ARCHITECTURE.md", readme)
+        for name in ("CORE.md", "RESEARCH.md", "PHYSICS_RESEARCH_ROADMAP.md", "OPERATIONS.md"):
+            self.assertTrue((self.root / "maintenance" / name).is_file())
 
     def test_release_manifest_contains_only_executable_asset(self) -> None:
         dist = Path(self.temp.name) / "dist"
@@ -439,17 +453,74 @@ class DistributionTests(unittest.TestCase):
         readme = self.root / "maintenance/README.md"
         readme.write_text(readme.read_text(encoding="utf-8") + "\n项目自定义内容。\n", encoding="utf-8")
         customized = readme.read_bytes()
+        roadmap = self.root / "maintenance/PHYSICS_RESEARCH_ROADMAP.md"
+        roadmap.write_text(roadmap.read_text(encoding="utf-8") + "\n项目自定义路线图说明。\n", encoding="utf-8")
+        customized_roadmap = roadmap.read_bytes()
         self.commit()
         result = apply_project_update(self.root, CURRENT_VERSION)
         self.assertEqual(readme.read_bytes(), customized)
+        self.assertEqual(roadmap.read_bytes(), customized_roadmap)
         self.assertIn("maintenance/README.md", result["conflicts"])
+        self.assertIn("maintenance/PHYSICS_RESEARCH_ROADMAP.md", result["conflicts"])
         self.assertTrue(
             (self.root / f".project_hooks/update-conflicts/{CURRENT_VERSION}/maintenance/README.md").is_file()
+        )
+        self.assertTrue(
+            (self.root / f".project_hooks/update-conflicts/{CURRENT_VERSION}/maintenance/PHYSICS_RESEARCH_ROADMAP.md").is_file()
         )
         self.commit("record customized template")
         repeated = apply_project_update(self.root, CURRENT_VERSION)
         self.assertEqual(readme.read_bytes(), customized)
+        self.assertEqual(roadmap.read_bytes(), customized_roadmap)
         self.assertIn("maintenance/README.md", repeated["conflicts"])
+        self.assertIn("maintenance/PHYSICS_RESEARCH_ROADMAP.md", repeated["conflicts"])
+
+    def test_update_installs_and_records_new_physics_roadmap_template(self) -> None:
+        self.init("2.0.0")
+        roadmap = self.root / "maintenance/PHYSICS_RESEARCH_ROADMAP.md"
+        roadmap.unlink()
+        installation_path = self.root / ".codex/project-maintenance-installation.json"
+        installation = json.loads(installation_path.read_text(encoding="utf-8"))
+        installation["template_version"] = 13
+        installation["managed_files"].pop("maintenance/PHYSICS_RESEARCH_ROADMAP.md")
+        installation_path.write_text(json.dumps(installation, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.commit()
+
+        result = apply_project_update(self.root, CURRENT_VERSION)
+
+        installation = json.loads((self.root / ".codex/project-maintenance-installation.json").read_text(encoding="utf-8"))
+        self.assertIn("maintenance/PHYSICS_RESEARCH_ROADMAP.md", result["changed"])
+        self.assertTrue(roadmap.is_file())
+        self.assertEqual(
+            installation["managed_files"]["maintenance/PHYSICS_RESEARCH_ROADMAP.md"]["hash"],
+            hashlib.sha256(roadmap.read_bytes()).hexdigest(),
+        )
+
+    def test_update_removes_source_only_architecture_entry_from_default_index(self) -> None:
+        self.init("2.0.0")
+        readme = self.root / "maintenance/README.md"
+        previous = readme.read_text(encoding="utf-8").replace(
+            "- [OPERATIONS.md](OPERATIONS.md)：安装、升级、恢复、诊断、交付与发布。\n",
+            "- [OPERATIONS.md](OPERATIONS.md)：安装、升级、恢复、诊断、交付与发布。\n"
+            "- `ARCHITECTURE.md`：代码边界和读写模型架构。\n",
+        )
+        readme.write_text(previous, encoding="utf-8", newline="\n")
+        installation_path = self.root / ".codex/project-maintenance-installation.json"
+        installation = json.loads(installation_path.read_text(encoding="utf-8"))
+        installation["template_version"] = 14
+        installation["managed_files"]["maintenance/README.md"] = {
+            "hash": hashlib.sha256(previous.encode("utf-8")).hexdigest(),
+            "customized": False,
+        }
+        installation_path.write_text(json.dumps(installation, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.commit()
+
+        result = apply_project_update(self.root, CURRENT_VERSION)
+
+        updated = json.loads(installation_path.read_text(encoding="utf-8"))
+        self.assertIn("maintenance/README.md", result["changed"])
+        self.assertEqual(updated["template_version"], 15)
+        self.assertNotIn("ARCHITECTURE.md", readme.read_text(encoding="utf-8"))
 
     def test_update_migrates_default_and_preserves_custom_core_read_order(self) -> None:
         self.init("1.6.1")
@@ -524,24 +595,43 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(result["status"], "current")
         self.assertEqual((self.root / "maintenance/events.jsonl").read_bytes(), before)
 
+    def test_update_is_the_only_write_command_allowed_across_template_versions(self) -> None:
+        update = build_parser().parse_args(["update"])
+        check = build_parser().parse_args(["update", "--check"])
+        start = build_parser().parse_args([
+            "start", "--kind", "code", "--scope", "test", "--acceptance", "works",
+        ])
+        with patch.object(cli_commands, "ROOT", self.root):
+            with patch.object(cli_commands, "installed_project_version", return_value="2.0.0"):
+                cli_commands.assert_project_version_compatible(update)
+                cli_commands.assert_project_version_compatible(check)
+                self.assertFalse(cli_commands.command_requires_project_lock(update))
+                self.assertFalse(cli_commands.command_requires_project_lock(check))
+                self.assertTrue(cli_commands.command_requires_project_lock(start))
+                with self.assertRaisesRegex(cli_commands.WorkflowError, "模板版本为 2.0.0"):
+                    cli_commands.assert_project_version_compatible(start)
+
     def test_frozen_update_caches_versioned_executable_and_writes_pointer(self) -> None:
         self.init("0.9.0")
         self.commit()
         manifest = self.exe_release()
-        migration = subprocess.CompletedProcess(
-            args=[], returncode=0,
-            stdout=json.dumps({"status": "updated", "changed": [], "conflicts": []}),
-            stderr="",
-        )
         real_run = subprocess.run
 
         def run_portable(command, *args, **kwargs):
             if str(command[0]).endswith(EXECUTABLE_NAME):
-                return migration
+                self.assertEqual(kwargs["env"].get("PROJECT_HOOKS_UPDATE_CHILD"), "1")
+                self.assertIn("--minimum-event-schema", command)
+                child_commands.append(command)
+                selected = Path(command[command.index("--executable-path") + 1])
+                result = apply_project_update(self.root, CURRENT_VERSION, executable_path=selected)
+                return subprocess.CompletedProcess(
+                    args=command, returncode=0, stdout=json.dumps(result), stderr="",
+                )
             return real_run(command, *args, **kwargs)
 
+        child_commands = []
         with patch("project_hooks.infrastructure.system.updater.is_frozen", return_value=True):
-            with patch("project_hooks.infrastructure.system.updater.subprocess.run", side_effect=run_portable) as run:
+            with patch("project_hooks.infrastructure.system.updater.subprocess.run", side_effect=run_portable):
                 result = run_update(self.root, manifest_url=manifest.as_uri())
 
         pointer = json.loads((
@@ -552,22 +642,22 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(selected.is_file())
         self.assertEqual(selected.read_bytes(), b"test executable")
         self.assertTrue(selected.is_relative_to((self.root / ".project_hooks/runtime").resolve()))
-        self.assertEqual(run.call_args.args[0][0], str(selected))
+        self.assertEqual(child_commands[0][0], str(selected))
+        self.assertIn("--executable-path", child_commands[0])
 
     def test_same_version_different_build_is_reinstalled(self) -> None:
         self.init()
         self.commit()
         manifest = self.exe_release(build_id="release-build")
-        migration = subprocess.CompletedProcess(
-            args=[], returncode=0,
-            stdout=json.dumps({"status": "updated", "changed": [], "conflicts": []}),
-            stderr="",
-        )
         real_run = subprocess.run
 
         def run_portable(command, *args, **kwargs):
             if str(command[0]).endswith(EXECUTABLE_NAME):
-                return migration
+                selected = Path(command[command.index("--executable-path") + 1])
+                result = apply_project_update(self.root, CURRENT_VERSION, executable_path=selected)
+                return subprocess.CompletedProcess(
+                    args=command, returncode=0, stdout=json.dumps(result), stderr="",
+                )
             return real_run(command, *args, **kwargs)
 
         with patch("project_hooks.infrastructure.system.updater.build_identity", return_value={"build_id": "local-build"}):

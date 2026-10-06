@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from ... import EXECUTABLE_NAME, __version__
@@ -13,6 +14,7 @@ from ... import EXECUTABLE_NAME, __version__
 
 ACTIVE_ENV = "PROJECT_HOOKS_EXE_ACTIVE"
 PORTABLE_ROOT_ENV = "PROJECT_HOOKS_PORTABLE_ROOT"
+UPDATE_CHILD_ENV = "PROJECT_HOOKS_UPDATE_CHILD"
 
 
 def is_frozen() -> bool:
@@ -28,6 +30,31 @@ def configure_utf8_stdio() -> None:
 
 def runtime_root(project_root: Path) -> Path:
     return project_root.resolve() / ".project_hooks" / "runtime"
+
+
+def write_pointer(version: str, project_root: Path, executable: Path) -> None:
+    runtime = runtime_root(project_root)
+    target_dir = (runtime / "executables" / version).resolve()
+    pointer_executable = Path(executable).resolve()
+    expected = (target_dir / EXECUTABLE_NAME).resolve()
+    if pointer_executable != expected or not pointer_executable.is_file():
+        raise ValueError("更新版本指针只能指向已缓存并校验的版本化 EXE")
+    runtime.mkdir(parents=True, exist_ok=True)
+    pointer = runtime / "current.json"
+    descriptor, name = tempfile.mkstemp(prefix="current-", suffix=".json", dir=runtime)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(
+                {"version": version, "executable": str(pointer_executable)},
+                handle, ensure_ascii=False, indent=2,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, pointer)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
 
 def selected_executable(project_root: Path) -> Path | None:

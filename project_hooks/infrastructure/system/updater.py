@@ -19,8 +19,8 @@ from ..git.build_identity import (
     build_warning,
     exe_matches_repository,
 )
-from .runtime import ACTIVE_ENV, is_frozen, runtime_root
-from .project_manager import INSTALLATION_PATH, apply_project_update, preflight_update
+from .runtime import ACTIVE_ENV, UPDATE_CHILD_ENV, is_frozen, runtime_root
+from .project_manager import INSTALLATION_PATH, TEMPLATE_VERSION, apply_project_update, preflight_update
 from ..persistence.store import SCHEMA_VERSION, load_events
 
 
@@ -40,6 +40,16 @@ LAUNCHER_VERSION = "1.0.0"
 
 class UpdateError(RuntimeError):
     pass
+
+
+class UpdateCompatibilityError(ValueError):
+    pass
+
+
+class UpdateApplyError(RuntimeError):
+    def __init__(self, diagnostic_record: dict):
+        self.diagnostic_record = diagnostic_record
+        super().__init__(str(diagnostic_record.get("summary") or "新版 EXE 迁移失败"))
 
 
 def version_key(value: str) -> tuple[int, int, int]:
@@ -115,26 +125,6 @@ def cache_executable(content: bytes, version: str, project_root: Path) -> Path:
     return target
 
 
-def write_pointer(version: str, project_root: Path, executable: Path) -> None:
-    runtime = runtime_root(project_root)
-    runtime.mkdir(parents=True, exist_ok=True)
-    pointer = runtime / "current.json"
-    descriptor, name = tempfile.mkstemp(prefix="current-", suffix=".json", dir=runtime)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(
-                {"version": version, "executable": str(executable.resolve())},
-                handle, ensure_ascii=False, indent=2,
-            )
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(name, pointer)
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
-
-
 def project_version(root: Path) -> str | None:
     path = root / INSTALLATION_PATH
     if not path.is_file():
@@ -145,6 +135,23 @@ def project_version(root: Path) -> str | None:
         return str(value) if value else None
     except (OSError, ValueError):
         return None
+
+
+def project_template_version(root: Path) -> int | None:
+    path = root / INSTALLATION_PATH
+    try:
+        return int(json.loads(path.read_text(encoding="utf-8")).get("template_version"))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def validate_project_event_schema(root: Path, minimum: int, maximum: int) -> None:
+    for event in load_events(root / "maintenance/events.jsonl"):
+        if not minimum <= int(event["schema_version"]) <= maximum:
+            raise UpdateCompatibilityError(
+                f"事件 {event['event_id']} 的 schema_version={event['schema_version']} "
+                f"不受目标版本支持（{minimum}..{maximum}）"
+            )
 
 
 def check_update(root: Path, manifest: dict) -> dict:
@@ -320,18 +327,14 @@ def run_update(
         minimum, maximum = int(supported["minimum"]), int(supported["maximum"])
     except (KeyError, TypeError, ValueError) as exc:
         raise UpdateError("Release manifest 的 event_schema 范围无效") from exc
-    for event in load_events(root / "maintenance/events.jsonl"):
-        if not minimum <= int(event["schema_version"]) <= maximum:
-            raise UpdateError(
-                f"事件 {event['event_id']} 的 schema_version={event['schema_version']} "
-                f"不受目标版本支持（{minimum}..{maximum}）"
-            )
+    validate_project_event_schema(root, minimum, maximum)
     if check_only:
         return check_update(root, manifest)
     current_build = build_identity().get("build_id")
     latest_build = (manifest.get("build_identity") or {}).get("build_id")
     same_build = not latest_build or current_build == latest_build
-    if project_version(root) == target and __version__ == target and same_build:
+    if (project_version(root) == target and __version__ == target and same_build
+            and (project_template_version(root) or 0) >= TEMPLATE_VERSION):
         return {
             "status": "current",
             "project": str(root),
@@ -348,20 +351,31 @@ def run_update(
     selected = cache_executable(content, target, root)
     env = os.environ.copy()
     env[ACTIVE_ENV] = "1"
+    env[UPDATE_CHILD_ENV] = "1"
     completed = subprocess.run(
         [
             str(selected), "--project", str(root), "_apply-update",
             "--target-version", target,
+            "--minimum-event-schema", str(minimum),
+            "--maximum-event-schema", str(maximum),
+            "--executable-path", str(selected),
         ],
         env=env, text=True, encoding="utf-8", capture_output=True, check=False,
     )
     if completed.returncode != 0:
+        try:
+            failure = json.loads(completed.stderr)
+        except (json.JSONDecodeError, TypeError):
+            failure = None
+        if (isinstance(failure, dict)
+                and failure.get("format") == "workflow-monitor-update-error"
+                and isinstance(failure.get("diagnostic"), dict)):
+            raise UpdateApplyError(failure["diagnostic"])
         raise UpdateError(completed.stderr.strip() or completed.stdout.strip() or "新版 EXE 迁移失败")
     try:
         result = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
         raise UpdateError("新版 EXE 返回了无效迁移结果") from exc
-    write_pointer(target, root, selected)
     result["application_version"] = target
     result["launcher_version"] = LAUNCHER_VERSION
     return result

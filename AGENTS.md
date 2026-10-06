@@ -13,6 +13,7 @@
 - 已启动的任务通过 `report` 一次更新进度和科研证据，完成时运行 `end`。只有 `validated` 尝试可准备 Squash PR，合并必须等待用户明确确认。
 - 项目总目标使用 `project update`；科研进展、证据和关联篇章修订统一通过 `report` 填报，程序生成记录。新证据改变判断时必须提供修订说明、概况和证据；旧 `stage`、`attempt update` 继续兼容。
 - 科研资料文件放在 `resources/` 的预设或已登记自定义文件夹，并通过 `catalog` 指令登记；`resources/sparks/` 中未登记的 Markdown 灵感除外。`check` 必须保持通过。
+- 理论物理任务涉及研究方向与问题收窄、模型分析、理论推导、数值验证、反例压力测试或文献查新时，按需阅读 `maintenance/PHYSICS_RESEARCH_ROADMAP.md`。它只提供研究思路，不是强制阶段、验收项或门禁。
 - 仅当用户明确要求纯 Git 发布，且 `main` 没有活动任务、不再编辑、改动已经结束并验证通过时，才可直接检查、暂存、提交和推送。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态、绕过 `end`、在 `main` 试改、自动合并。
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
@@ -36,6 +37,9 @@
 
 ## 资料登记与目录用途
 
+- 灵感和未成形的问题放入 `resources/sparks/`；已经形成下一步行动或研究方案的内容放入 `resources/plans/`；基于来源整理的成型讲解与学习材料放入 `resources/tutorials/`。
+- 实验代码及其依赖按项目聚集在 `resources/analysis/<项目>/`；程序生成的结果放在同一项目目录下的 `output/` 子目录，不统一堆放到顶层 `resources/outputs/`。
+- 移动已登记资料时保留原 catalog ID 并更新其路径；操作前刷新 `catalog folder index`。目录归属不能从内容和现有用途可靠判断时，先询问用户。
 - 资料路径失效先运行 `catalog reconcile` 搜索可能的移动位置；唯一内容哈希匹配可通过 `--apply` 修复原登记，保留资料身份和关系。歧义、无历史哈希或范围外位置需要用户选择新位置或确认归档，不自动删除或归档。
 - 文件夹导航登记使用 `catalog folder add/update/list/archive/restore`。教程、翻译用于文献加工，plans 用于 Sparks 的下一步；登记文件夹不替代内部文件登记。
 - `start` 保存既有资料问题；AI 在 start/report/end 用 depends_on、deliverable 登记直接依赖和交付物（catalog:ID 或 path:相对路径）。无关且未恶化的既有资料问题保留待处理，不阻止 completed；任务交付物和直接依赖缺失仍阻止完成。全局 check 继续报告全部问题。

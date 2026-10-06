@@ -16,7 +16,7 @@ from ... import DISPLAY_NAME, __version__
 from ...core.catalog import render_context_markdown
 from ...infrastructure.system.dashboard_actions import export_bundle, report_bug as open_dashboard_bug
 from ...infrastructure.system.diagnostics import diagnostics_status
-from ...infrastructure.system.external_navigation import open_directory, reveal_file
+from ...infrastructure.system.external_navigation import open_directory, open_file_default, reveal_file
 from ...infrastructure.git.build_identity import build_identity
 from .projections import web_snapshot
 from ...infrastructure.system.resource_layout import RESOURCE_DIRECTORIES
@@ -25,6 +25,7 @@ from ...infrastructure.system.resource_layout import RESOURCE_DIRECTORIES
 WEBVIEW2_DOWNLOAD_URL = "https://developer.microsoft.com/microsoft-edge/webview2/"
 WEB_ASSET_PACKAGE = Path("project_hooks") / "ui" / "web" / "assets"
 ALLOWED_OPEN_ROOTS = ("resources", "diagnostics-export")
+PHYSICS_ROADMAP_PATH = Path("maintenance") / "PHYSICS_RESEARCH_ROADMAP.md"
 
 
 def asset_root() -> Path:
@@ -114,7 +115,30 @@ class WebDashboardBridge:
             "bridge": "ready", "version": __version__,
             "build_identity": build_identity(),
             "refresh_seconds": self.refresh_seconds,
+            "physics_roadmap_available": self._physics_roadmap_path() is not None,
         })
+
+    def _physics_roadmap_path(self) -> Path | None:
+        try:
+            maintenance_root = (self.project_root / "maintenance").resolve()
+            maintenance_root.relative_to(self.project_root)
+            candidate = (self.project_root / PHYSICS_ROADMAP_PATH).resolve()
+            candidate.relative_to(maintenance_root)
+        except (OSError, ValueError):
+            return None
+        return candidate if candidate.is_file() else None
+
+    def open_physics_research_roadmap(self) -> dict:
+        """Open only the project's fixed, optional physics research guide."""
+        candidate = self._physics_roadmap_path()
+        if candidate is None:
+            return self._error("the physics research roadmap is unavailable", code="missing_path")
+        try:
+            open_file_default(candidate)
+            relative = candidate.relative_to(self.project_root).as_posix()
+            return self._ok({"path": relative})
+        except OSError as exc:
+            return self._error(exc, code="open_failed")
 
     def bootstrap(self) -> dict:
         return self.refresh(None, True)

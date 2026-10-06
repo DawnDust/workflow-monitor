@@ -21,7 +21,7 @@ from urllib.parse import urlencode
 from ..persistence.store import event_lock
 
 
-DIAGNOSTIC_SCHEMA_VERSION = 1
+DIAGNOSTIC_SCHEMA_VERSION = 2
 MAX_RECORDS = 500
 MAX_BYTES = 2 * 1024 * 1024
 HISTORY_FILES = 3
@@ -62,8 +62,21 @@ def sanitize_text(value: object, *, project_root: Path | None = None) -> str:
 
 def classify_failure(exc: BaseException) -> tuple[str, str, str]:
     """Return category, stable error code and a safe next action."""
+    forwarded = getattr(exc, "diagnostic_record", None)
+    if isinstance(forwarded, dict) and forwarded.get("category") and forwarded.get("code"):
+        return (
+            str(forwarded["category"]), str(forwarded["code"]),
+            str(forwarded.get("suggestion") or "按诊断回执中的恢复建议处理。"),
+        )
+    if type(exc).__name__ == "MutationLockError":
+        return (
+            "busy", "PH-W100",
+            "项目写入者仍持有锁；等待写入结束后重试。只有确认进程已退出且锁过期时才运行 task recover。",
+        )
     message = str(exc).lower()
     name = type(exc).__name__.lower()
+    if name == "updatecompatibilityerror":
+        return "validation", "PH-E100", "当前项目事件格式不受目标版本支持；选择兼容版本后重试。"
     if any(word in message for word in ("冲突", "conflict", "分叉", "切换分支", "拒绝覆盖")):
         return "conflict", "PH-C200", "先运行 `.\\workflow-monitor.exe status`，确认冲突后再重试。"
     if any(word in message for word in (
@@ -198,25 +211,59 @@ def create_failure_record(
     git_state: dict | None = None,
 ) -> dict:
     category, code, suggestion = classify_failure(exc)
-    summary = sanitize_text(exc, project_root=project_root)
+    forwarded = getattr(exc, "diagnostic_record", None)
+    if isinstance(forwarded, dict) and forwarded.get("category") and forwarded.get("code"):
+        summary = sanitize_text(forwarded.get("summary") or exc, project_root=project_root)
+        category = str(forwarded["category"])
+        code = str(forwarded["code"])
+        suggestion = str(forwarded.get("suggestion") or suggestion)
+    else:
+        summary = sanitize_text(exc, project_root=project_root)
     relation = (git_state or {}).get("relation")
     branch_kind = (git_state or {}).get("branch_kind")
-    return {
+    record = {
         "schema_version": DIAGNOSTIC_SCHEMA_VERSION,
-        "incident_id": uuid.uuid4().hex[:12],
-        "occurred_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "incident_id": (
+            str(forwarded.get("incident_id")) if isinstance(forwarded, dict) and forwarded.get("incident_id")
+            else uuid.uuid4().hex[:12]
+        ),
+        "occurred_at": (
+            forwarded.get("occurred_at") if isinstance(forwarded, dict) and forwarded.get("occurred_at")
+            else datetime.now(timezone.utc).isoformat(timespec="seconds")
+        ),
         "application_version": application_version,
         "maintenance_schema_version": schema_version,
         "execution_mode": execution_mode,
         "command": re.sub(r"[^a-z0-9_.-]", "", command.lower())[:80] or "unknown",
         "category": category,
         "code": code,
-        "exception_type": type(exc).__name__,
+        "exception_type": (
+            str(forwarded.get("exception_type"))
+            if isinstance(forwarded, dict) and forwarded.get("exception_type")
+            else type(exc).__name__
+        ),
         "summary": summary,
         "fingerprint": _fingerprint(category, exc, summary),
         "suggestion": suggestion,
         "git": {"relation": relation or "unknown", "branch_kind": branch_kind or "unknown"},
     }
+    retryable = getattr(exc, "retryable", None)
+    retry_after = getattr(exc, "retry_after_seconds", None)
+    lock_owner = getattr(exc, "lock_owner", None)
+    if isinstance(forwarded, dict):
+        retryable = forwarded.get("retryable", retryable)
+        retry_after = forwarded.get("retry_after_seconds", retry_after)
+        lock_owner = forwarded.get("lock_owner", lock_owner)
+    if category == "busy":
+        record["retryable"] = True if retryable is None else bool(retryable)
+        record["retry_after_seconds"] = max(1, int(retry_after or 1))
+        if isinstance(lock_owner, dict):
+            record["lock_owner"] = {
+                key: lock_owner[key]
+                for key in ("pid", "command", "task_id", "acquired_at")
+                if lock_owner.get(key) is not None
+            }
+    return record
 
 
 def record_failure(project_root: Path, exc: BaseException, **metadata) -> dict:
@@ -319,6 +366,11 @@ def diagnostics_overview(project_root: Path, *, application_version: str) -> dic
             "exported": bool(export_entries),
             "last_export_id": last_export.get("export_id") if last_export else None,
             "last_exported_at": last_export.get("exported_at") if last_export else None,
+            **{
+                key: latest[key]
+                for key in ("retryable", "retry_after_seconds", "lock_owner")
+                if key in latest
+            },
         })
     issues.sort(key=lambda item: str(item.get("latest_at") or ""), reverse=True)
     return {
