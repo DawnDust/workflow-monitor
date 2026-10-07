@@ -5,6 +5,7 @@
 - [CORE.md](CORE.md)：新会话、上下文丢失或规范变更时读取的生命周期、轨道、安全、测试和研究篇章契约。
 - [RESEARCH.md](RESEARCH.md)：研究篇章、探索、Catalog 与 Sparks。
 - [PHYSICS_RESEARCH_ROADMAP.md](PHYSICS_RESEARCH_ROADMAP.md)：理论物理研究路线参考；相关任务按需阅读，不作为门禁。
+- [RESEARCH_UNDERSTANDING_GUIDE.md](RESEARCH_UNDERSTANDING_GUIDE.md)：科研结果理解与证明阅读参考，按需使用，不作为门禁。
 - [OPERATIONS.md](OPERATIONS.md)：安装、升级、恢复、诊断、交付与发布。
 - `ARCHITECTURE.md`：代码边界和读写模型架构。
 

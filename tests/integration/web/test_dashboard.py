@@ -432,7 +432,10 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('disclosure("diagnostics"', script)
         self.assertIn("draftQuery", script)
         self.assertIn("committedQuery", script)
-        self.assertIn('["status","处置状态","Disposition"]', script)
+        self.assertIn('["search_statuses","合并与归档状态","Merge and archive status"]', script)
+        self.assertIn('id="search-archive-status"', script)
+        self.assertIn('id="search-merge-status"', script)
+        self.assertIn('badge("合并：","Merge: "', script)
         self.assertIn('["occurred_at","记录时间","Recorded at"]', script)
         self.assertNotIn('["explain","?"', script)
         self.assertNotIn('["advanced","⋯"', script)
@@ -448,6 +451,7 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('target="_blank" rel="noopener noreferrer"', script)
         self.assertIn('id="about-report-bug"', script)
         self.assertIn("build_identity", script)
+        self.assertIn("display_version", script)
         self.assertIn("saveLanguage", script)
         self.assertIn('["summary","摘要","Summary"]', script)
         self.assertNotIn("knownStatus", script)
@@ -516,6 +520,61 @@ class WebDashboardIntegrationTests(unittest.TestCase):
           const rows = filterRecords([{{title:'Alpha'}},{{title:'Beta'}}], 'alp', ['title']);
           const page = paginate(Array.from({{length: 21}}, (_, i) => i), 3, 10);
           if (rows.length !== 1 || page.items.length !== 1) process.exit(1);
+        """
+        subprocess.run(["node", "--input-type=module", "-e", script], check=True)
+
+    def test_understanding_guide_and_build_notes_bridge(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        guide = root / "maintenance/RESEARCH_UNDERSTANDING_GUIDE.md"
+        bridge = WebDashboardBridge(FakeProvider(root))
+        self.assertFalse(bridge.ready()["data"]["research_understanding_guide_available"])
+        self.assertEqual(bridge.open_research_understanding_guide()["error"]["code"], "missing_path")
+        guide.parent.mkdir(exist_ok=True)
+        guide.write_text("# Optional guide", encoding="utf-8")
+        self.assertTrue(bridge.ready()["data"]["research_understanding_guide_available"])
+        with patch("project_hooks.ui.web.bridge.open_file_default") as opener:
+            self.assertTrue(bridge.open_research_understanding_guide()["ok"])
+            opener.assert_called_once_with(guide.resolve())
+        with patch("project_hooks.ui.web.bridge.open_file_default", side_effect=OSError("unavailable")):
+            self.assertEqual(bridge.open_research_understanding_guide()["error"]["code"], "open_failed")
+        with patch("project_hooks.ui.web.bridge.read_build_notes", return_value={"available":False,"markdown":"此构建未提供测试说明"}):
+            self.assertFalse(bridge.get_test_build_notes()["data"]["available"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is a development-only optional test runtime")
+    def test_search_archive_and_merge_filters_are_independent_and_intersect(self):
+        source = (asset_root() / "state.js").read_bytes()
+        url = "data:text/javascript;base64," + base64.b64encode(source).decode("ascii")
+        script = f"""
+          import assert from 'node:assert/strict';
+          import {{searchRecords,paginate,dispositionCode,archiveStatusCode,mergeStatusCode}} from {json.dumps(url)};
+          const rows=[{{kind:'task',title:'Alpha',status_code:'unspecified'}},
+            {{kind:'catalog',title:'Alpha old',status_code:'archived',status:'已归档',archive_status_code:'archived'}},
+            {{kind:'catalog',title:'Alpha',status_code:'catalog_active',archive_status_code:'unarchived'}},
+            {{kind:'catalog',title:'Beta',status_code:'catalog_missing',archive_status_code:'unarchived'}},
+            {{kind:'exploration',title:'Alpha merged archived',archive_status_code:'archived',merge_status_code:'merged'}},
+            {{kind:'exploration',title:'Beta merged active',archive_status_code:'unarchived',merge_status_code:'merged'}},
+            {{kind:'exploration',title:'Beta pending archived',archive_status_code:'archived',merge_status_code:'pending_merge'}}];
+          assert.equal(searchRecords(rows).hasCriteria,false);
+          let result=searchRecords(rows,{{kind:'catalog'}});
+          assert.equal(result.items.length,2);assert.equal(result.scoped.length,4);
+          result=searchRecords(rows,{{kind:'catalog',archive:'archived'}});
+          assert.equal(result.items.length,1);assert.equal(result.items[0].title,'Alpha old');assert.equal(result.hasCriteria,true);
+          result=searchRecords(rows,{{archive:'all',merge:'merged'}});
+          assert.equal(result.items.length,2);assert.equal(result.items.some(x=>x.title==='Alpha merged archived'),true);
+          result=searchRecords(rows,{{archive:'archived',merge:'merged'}});
+          assert.equal(result.items.length,1);assert.equal(result.items[0].title,'Alpha merged archived');
+          result=searchRecords(rows,{{archive:'all',merge:'all',query:'alpha'}});
+          assert.equal(result.items.length,4);assert.equal(result.scoped.length,4);
+          assert.equal(searchRecords(rows,{{kind:'task',archive:'missing'}}).archive,'unarchived');
+          assert.equal(searchRecords(rows,{{kind:'catalog',merge:'merged'}}).merge,'all');
+          assert.equal(searchRecords(rows,{{archive:'archived',merge:'merged',query:'不存在'}}).items.length,0);
+          assert.equal(dispositionCode({{status:'archived'}}),'archived');
+          assert.equal(archiveStatusCode({{status_code:'archived'}}),'archived');
+          assert.equal(mergeStatusCode({{status_code:'pending_merge'}}),'pending_merge');
+          assert.equal(paginate(result.items,9,10).page,1);
+          assert.equal(searchRecords(rows,{{kind:'catalog',archive:'unarchived',query:'beta'}}).items[0].title,'Beta');
         """
         subprocess.run(["node", "--input-type=module", "-e", script], check=True)
 

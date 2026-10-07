@@ -14,7 +14,9 @@ from ...core.catalog import decode_item
 from ...core.research_attention import research_attention
 from ..git import client as git_client
 from ..system.finish_preflight import assemble_finish_preflight
-from ..system.resource_layout import resource_directory_snapshot, catalog_consistency_issues
+from ..system.resource_layout import (
+    resource_directory_snapshot, catalog_consistency_issues, is_legacy_program_resource,
+)
 from ..system.folder_index import folder_index
 from .store import SCHEMA_VERSION, ensure_database, journal_hash, rows
 from ..system.verification import changed_paths_from_baseline
@@ -799,7 +801,9 @@ class MaintenanceReadModel:
             catalog_relations = rows(
                 connection, "SELECT * FROM catalog_relations ORDER BY updated_at DESC, relation_id",
             )
-            context["research_attention"] = research_attention(context, catalog_items, catalog_relations)
+            attention_items = [item for item in catalog_items
+                               if not is_legacy_program_resource(item.get("path") or "")]
+            context["research_attention"] = research_attention(context, attention_items, catalog_relations)
             self._review_context(connection, context, catalog_items, catalog_relations)
             return context
         finally:
@@ -880,10 +884,27 @@ class MaintenanceReadModel:
             for commit in publication.get("commits", []) if commit.get("published")
             for event_id in commit.get("event_ids", [])
         }
+        integrated_archive_event_ids: set[str] = set()
+        for row in connection.execute(
+            "SELECT event_id, payload_json FROM events WHERE event_type='attempt.archived'",
+        ).fetchall():
+            payload = json.loads(row["payload_json"])
+            if payload.get("disposition") == "validated-integrated" and payload.get("integrated_commit"):
+                integrated_archive_event_ids.add(row["event_id"])
+        archive_status_labels = {
+            "archived": "已归档", "unarchived": "未归档", "unknown": "归档状态未知",
+            "not_applicable": "不适用",
+        }
+        merge_status_labels = {
+            "merged": "已合并", "pending_merge": "待合并", "merge_unknown": "合并状态未知",
+            "not_applicable": "不适用",
+        }
 
         def add(kind: str, label: str, target: str, record_id: str, occurred_at: str,
                 branch: str, title: str, summary: str, values: list[object],
-                task_ids: list[str] | None = None, status: str = "") -> None:
+                task_ids: list[str] | None = None, status: str = "未标注",
+                status_code: str = "unspecified", archive_status_code: str = "not_applicable",
+                merge_status_code: str = "not_applicable") -> None:
             search_text = " ".join(str(value or "") for value in values)
             result.append({
                 "kind": kind,
@@ -895,6 +916,11 @@ class MaintenanceReadModel:
                 "title": title,
                 "summary": summary,
                 "status": status,
+                "status_code": status_code,
+                "archive_status": archive_status_labels.get(archive_status_code, archive_status_labels["unknown"]),
+                "archive_status_code": archive_status_code,
+                "merge_status": merge_status_labels.get(merge_status_code, merge_status_labels["not_applicable"]),
+                "merge_status_code": merge_status_code,
                 "search_text": search_text,
                 "task_ids": task_ids or [],
             })
@@ -913,8 +939,10 @@ class MaintenanceReadModel:
                 str(item.get("branch") or "").startswith("archive/")
                 or str(item.get("disposition_ref") or "").startswith("archive/")
             )
-            if archived or item["result"] == "abandoned":
+            if item["result"] == "abandoned":
                 disposition_status = "已遗弃"
+            elif archived:
+                disposition_status = "已归档"
             elif item["result"] == "validated" and item["event_id"] in published_event_ids:
                 disposition_status = "已合并"
             elif (item["result"] == "validated" and not publication_available
@@ -928,11 +956,27 @@ class MaintenanceReadModel:
                 disposition_status = "待归档"
             else:
                 disposition_status = "未处置"
+            merge_status_code = (
+                "merged" if item["result"] == "validated" and (
+                    item["event_id"] in published_event_ids or item["event_id"] in integrated_archive_event_ids
+                ) else
+                "merge_unknown" if (item["result"] == "validated" and not publication_available
+                                    and publication_status != "仅记录") else
+                "pending_merge" if item["result"] == "validated" else "not_applicable"
+            )
             add("exploration", "探索", "explorations", item["event_id"], item["occurred_at"], item["branch"],
                 item["goal"] or item["branch"], item["result"] or "",
                 [item["branch"], item["goal"], item["result"], item["evidence"], item["disposition_ref"],
                  item["task_id"], disposition_status],
-                [item["task_id"]] if item["task_id"] else [], disposition_status)
+                [item["task_id"]] if item["task_id"] else [], disposition_status,
+                {"已遗弃": "abandoned", "已归档": "archived", "已合并": "merged",
+                 "合并状态未知": "merge_unknown", "待合并": "pending_merge", "进行中": "active",
+                 "待归档": "pending_archive", "未处置": "undisposed"}[disposition_status],
+                "archived" if archived else (
+                    "unarchived" if item.get("branch") or item.get("disposition_ref") else "unknown"
+                ),
+                merge_status_code,
+            )
 
         relation_values: dict[str, list[str]] = {}
         for relation in rows(
@@ -946,6 +990,9 @@ class MaintenanceReadModel:
             relation_values.setdefault(relation["target_id"], []).append(text)
         for raw in rows(connection, "SELECT * FROM catalog_items"):
             item = decode_item(raw)
+            if (item.get("status") != "archived"
+                    and is_legacy_program_resource(item.get("path") or "")):
+                continue
             add(
                 "catalog", item["kind_label"], "catalog", item["item_id"],
                 item["updated_at"], item["branch"], item["title"], item["summary"],
@@ -956,6 +1003,11 @@ class MaintenanceReadModel:
                     *relation_values.get(item["item_id"], []),
                 ],
                 [item["task_id"]] if item.get("task_id") else [],
+                {"active": "有效", "missing": "文件缺失", "archived": "已归档"}.get(item["status"], "未标注"),
+                {"active": "catalog_active", "missing": "catalog_missing", "archived": "archived"}.get(item["status"], "unspecified"),
+                "archived" if item.get("status") == "archived" else (
+                    "unarchived" if item.get("status") in {"active", "missing"} else "unknown"
+                ),
             )
 
         return sorted(
@@ -1163,7 +1215,9 @@ class MaintenanceReadModel:
             folders = rows(connection, "SELECT * FROM catalog_folders ORDER BY path, folder_id")
             resource_index = folder_index(self.repo_path, catalog_items, folders)
             resource_issues = catalog_consistency_issues(self.repo_path, catalog_items, folders)
-            context["research_attention"] = research_attention(context, catalog_items, catalog_relations)
+            attention_items = [item for item in catalog_items
+                               if not is_legacy_program_resource(item.get("path") or "")]
+            context["research_attention"] = research_attention(context, attention_items, catalog_relations)
             self._review_context(connection, context, catalog_items, catalog_relations)
             return {
                 "branch": branch,

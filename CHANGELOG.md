@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add an optional research understanding guide with managed installation and a Dashboard entry.
+- Show archive and Git merge status independently in search, with separate filters and archived records hidden by default.
+- Support verified local EXE upgrades with per-build caches, source comparison and explicit template conflict receipts.
+- Bundle test build notes and fingerprint packaged guides; expose notes through CLI and About.
+
+- Keep the Windows executable filename fixed as `workflow-monitor.exe`; identify local test builds in version metadata as `<version>-test.<YYYYMMDD>.<build-id>` and prevent test-channel builds from producing release manifests.
+- Move programs out of resource tracking into a root `program/` directory and add a conflict-safe, audited migration from `resources/analysis/`.
+- Add a successful exploration archive command after verified integration into main, and report archive-attempt state errors before unrelated repository integrity failures.
 - Add a supported, audited workflow for redacting privacy-sensitive values from event additions after a trusted Git baseline, while preserving event IDs, unrelated evidence, and the append-only baseline.
 
 ## 2.1.0 - 2026-09-30

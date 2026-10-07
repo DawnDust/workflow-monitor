@@ -17,15 +17,17 @@ from ...core.catalog import render_context_markdown
 from ...infrastructure.system.dashboard_actions import export_bundle, report_bug as open_dashboard_bug
 from ...infrastructure.system.diagnostics import diagnostics_status
 from ...infrastructure.system.external_navigation import open_directory, open_file_default, reveal_file
-from ...infrastructure.git.build_identity import build_identity
+from ...infrastructure.git.build_identity import build_identity, display_version
 from .projections import web_snapshot
 from ...infrastructure.system.resource_layout import RESOURCE_DIRECTORIES
+from ...infrastructure.system.build_notes import read_build_notes
 
 
 WEBVIEW2_DOWNLOAD_URL = "https://developer.microsoft.com/microsoft-edge/webview2/"
 WEB_ASSET_PACKAGE = Path("project_hooks") / "ui" / "web" / "assets"
 ALLOWED_OPEN_ROOTS = ("resources", "diagnostics-export")
 PHYSICS_ROADMAP_PATH = Path("maintenance") / "PHYSICS_RESEARCH_ROADMAP.md"
+UNDERSTANDING_GUIDE_PATH = Path("maintenance") / "RESEARCH_UNDERSTANDING_GUIDE.md"
 
 
 def asset_root() -> Path:
@@ -113,16 +115,22 @@ class WebDashboardBridge:
                 pass
         return self._ok({
             "bridge": "ready", "version": __version__,
+            "display_version": display_version(__version__),
             "build_identity": build_identity(),
             "refresh_seconds": self.refresh_seconds,
             "physics_roadmap_available": self._physics_roadmap_path() is not None,
+            "research_understanding_guide_available": self._guide_path(UNDERSTANDING_GUIDE_PATH) is not None,
+            "test_build_notes_available": read_build_notes()["available"],
         })
 
     def _physics_roadmap_path(self) -> Path | None:
+        return self._guide_path(PHYSICS_ROADMAP_PATH)
+
+    def _guide_path(self, relative: Path) -> Path | None:
         try:
             maintenance_root = (self.project_root / "maintenance").resolve()
             maintenance_root.relative_to(self.project_root)
-            candidate = (self.project_root / PHYSICS_ROADMAP_PATH).resolve()
+            candidate = (self.project_root / relative).resolve()
             candidate.relative_to(maintenance_root)
         except (OSError, ValueError):
             return None
@@ -139,6 +147,19 @@ class WebDashboardBridge:
             return self._ok({"path": relative})
         except OSError as exc:
             return self._error(exc, code="open_failed")
+
+    def open_research_understanding_guide(self) -> dict:
+        candidate = self._guide_path(UNDERSTANDING_GUIDE_PATH)
+        if candidate is None:
+            return self._error("the research understanding guide is unavailable", code="missing_path")
+        try:
+            open_file_default(candidate)
+            return self._ok({"path": candidate.relative_to(self.project_root).as_posix()})
+        except OSError as exc:
+            return self._error(exc, code="open_failed")
+
+    def get_test_build_notes(self) -> dict:
+        return self._ok(read_build_notes())
 
     def bootstrap(self) -> dict:
         return self.refresh(None, True)

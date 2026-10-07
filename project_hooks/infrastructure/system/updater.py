@@ -17,10 +17,15 @@ from ..git.build_identity import (
     SOFTWARE_SOURCE_PATHS,
     build_identity,
     build_warning,
+    display_version,
     exe_matches_repository,
 )
-from .runtime import ACTIVE_ENV, UPDATE_CHILD_ENV, is_frozen, runtime_root
-from .project_manager import INSTALLATION_PATH, TEMPLATE_VERSION, apply_project_update, preflight_update
+from .runtime import ACTIVE_ENV, UPDATE_CHILD_ENV, is_frozen, runtime_root, cached_executable
+from .project_manager import (INSTALLATION_PATH, TEMPLATE_VERSION, apply_project_update, preflight_update,
+                             template_files, AGENTS_BLOCK, GITIGNORE_BLOCK, GITATTRIBUTES_BLOCK,
+                             AGENTS_BEGIN, AGENTS_END, GITIGNORE_BEGIN, GITIGNORE_END,
+                             GITATTRIBUTES_BEGIN, GITATTRIBUTES_END, extract_block)
+from .build_notes import read_build_notes
 from ..persistence.store import SCHEMA_VERSION, load_events
 
 
@@ -101,14 +106,15 @@ def verify_digest(content: bytes, expected: str) -> None:
         raise UpdateError(f"下载摘要不匹配：期望 {expected}，实际 {actual}")
 
 
-def cache_executable(content: bytes, version: str, project_root: Path) -> Path:
+def cache_executable(content: bytes, version: str, project_root: Path, *, build_id: str | None = None) -> Path:
     """Store a verified executable inside the project's ignored runtime directory."""
-    folder = runtime_root(project_root) / "executables" / version
-    target = folder / EXECUTABLE_NAME
+    target = cached_executable(project_root, version, build_id)
+    folder = target.parent
     content_digest = hashlib.sha256(content).hexdigest()
     digest_file = folder / ".exe-sha256"
     if (target.is_file() and digest_file.is_file()
-            and digest_file.read_text(encoding="ascii").strip() == content_digest):
+            and digest_file.read_text(encoding="ascii").strip() == content_digest
+            and hashlib.sha256(target.read_bytes()).hexdigest() == content_digest):
         return target
     folder.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix="workflow-monitor-", suffix=".exe", dir=folder)
@@ -381,6 +387,117 @@ def run_update(
     return result
 
 
+def template_hashes() -> dict[str, str]:
+    values = template_files()
+    values.update({"AGENTS.md:block": AGENTS_BLOCK, ".gitignore:block": GITIGNORE_BLOCK,
+                   ".gitattributes:block": GITATTRIBUTES_BLOCK})
+    return {key: hashlib.sha256(value.encode("utf-8")).hexdigest() for key, value in values.items()}
+
+
+def _template_preview(root: Path, desired: dict[str, str]) -> dict:
+    try:
+        installed = json.loads((root / INSTALLATION_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        installed = {}
+    blocks = {"AGENTS.md:block": (AGENTS_BEGIN, AGENTS_END),
+              ".gitignore:block": (GITIGNORE_BEGIN, GITIGNORE_END),
+              ".gitattributes:block": (GITATTRIBUTES_BEGIN, GITATTRIBUTES_END)}
+    changed, conflicts = [], []
+    for key, expected in desired.items():
+        if not isinstance(key, str) or not isinstance(expected, str):
+            raise UpdateError("目标 EXE 的模板摘要格式错误")
+        relative = key.removesuffix(":block")
+        path = (root / relative).resolve()
+        if not path.is_relative_to(root) or Path(relative).is_absolute():
+            raise UpdateError("目标 EXE 的模板路径超出项目")
+        current = path.read_bytes() if path.is_file() else None
+        if key in blocks:
+            block = extract_block(current.decode("utf-8") if current else "", *blocks[key])
+            current = block.encode("utf-8") if block is not None else None
+        actual = hashlib.sha256(current).hexdigest() if current is not None else None
+        previous = (installed.get("managed_files") or {}).get(key, {})
+        if actual != expected:
+            changed.append(key)
+            if current is not None and (previous.get("customized") or actual != previous.get("hash")):
+                conflicts.append(key)
+    return {"changed": sorted(changed), "conflicts": sorted(conflicts)}
+
+
+def inspect_executable(executable: Path, root: Path) -> dict:
+    """Query this exact file, bypassing the project's cached runtime pointer."""
+    env = os.environ.copy()
+    env[ACTIVE_ENV] = "1"
+    completed = subprocess.run([str(executable), "--project", str(root), "version"],
+                               env=env, text=True, encoding="utf-8", capture_output=True,
+                               timeout=60, check=False)
+    if completed.returncode:
+        raise UpdateError(completed.stderr.strip() or "无法读取本地 EXE 身份")
+    try:
+        report = json.loads(completed.stdout)
+        identity = report["build_identity"]
+        version_key(report["application_version"])
+        cached_executable(root, report["application_version"], identity["build_id"])
+        if identity.get("mode") != "frozen" or not report.get("template_hashes"):
+            raise ValueError("缺少完整的冻结构建或模板信息")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UpdateError("此 EXE 不支持可验证的本地升级；请使用包含构建和模板身份的新版") from exc
+    return report
+
+
+def run_local_update(root: Path, executable: Path, *, check_only: bool = False) -> dict:
+    root, executable = root.resolve(), executable.resolve()
+    if not executable.is_file():
+        raise UpdateError("本地 EXE 不存在")
+    # Hold the bytes whose identity is inspected; detect replacement during inspection.
+    content = executable.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    report = inspect_executable(executable, root)
+    if hashlib.sha256(executable.read_bytes()).hexdigest() != digest:
+        raise UpdateError("读取身份期间本地 EXE 发生变化")
+    target, identity = report["application_version"], report["build_identity"]
+    supported = report.get("event_schema") or {"minimum": 1, "maximum": report["schema_version"]}
+    blockers = []
+    try:
+        preflight_update(root)
+        validate_project_event_schema(root, int(supported["minimum"]), int(supported["maximum"]))
+        if project_version(root) and version_key(target) < version_key(project_version(root)):
+            raise UpdateError("本地升级不支持版本降级")
+    except (ValueError, RuntimeError) as exc:
+        blockers.append(str(exc))
+    match = exe_matches_repository(root, identity)
+    if match is False:
+        blockers.append("源码与目标 EXE 不一致；需要对应提交或补丁，不能仅替换 EXE 宣称源码已更新")
+    preview = {"status": "blocked" if blockers else "ready", "dry_run": check_only,
+               "target_build_identity": identity, "application_version": target,
+               "source_sync": "already-matched" if match is True else "source-required" if match is False else "not-applicable",
+               "source_message": "已一致，无需源码修改" if match is True else "源码尚未同步" if match is False else "此项目不是软件源码仓库",
+               "template_version": report["template_version"], "blockers": blockers,
+               **_template_preview(root, report["template_hashes"])}
+    if check_only:
+        return preview
+    if blockers:
+        raise UpdateError("；".join(blockers))
+    selected = cache_executable(content, target, root, build_id=identity["build_id"])
+    env = os.environ.copy()
+    env[ACTIVE_ENV], env[UPDATE_CHILD_ENV] = "1", "1"
+    completed = subprocess.run([
+        str(selected), "--project", str(root), "_apply-update", "--target-version", target,
+        "--minimum-event-schema", str(supported["minimum"]), "--maximum-event-schema", str(supported["maximum"]),
+        "--executable-path", str(selected), "--cache-build-id", identity["build_id"],
+    ], env=env, text=True, encoding="utf-8", capture_output=True, check=False)
+    if completed.returncode:
+        raise UpdateError(completed.stderr.strip() or "本地 EXE 升级失败，原运行指针保留")
+    try:
+        result = json.loads(completed.stdout)
+    except (ValueError, TypeError) as exc:
+        raise UpdateError("本地 EXE 升级回执无法解析") from exc
+    if result.get("running_build_id") != identity["build_id"]:
+        raise UpdateError("升级回执的实际运行构建不匹配")
+    result.update({"source_sync": preview["source_sync"], "source_message": preview["source_message"],
+                   "target_build_identity": identity, "executable_replacement": "cached-and-selected"})
+    return result
+
+
 def version_report(root: Path | None) -> dict:
     identity = build_identity()
     project_build_id = None
@@ -397,8 +514,16 @@ def version_report(root: Path | None) -> dict:
             pass
     return {
         "application_version": __version__,
+        "display_version": display_version(__version__, identity),
+        "build_channel": identity.get("channel") or (
+            "source" if identity.get("mode") == "source" else "stable"
+        ),
         "project_version": project_version(root) if root else None,
         "schema_version": SCHEMA_VERSION,
+        "event_schema": {"minimum": 1, "maximum": SCHEMA_VERSION},
+        "template_version": TEMPLATE_VERSION,
+        "template_hashes": template_hashes(),
+        "test_build_notes_available": read_build_notes()["available"],
         "build_identity": identity,
         "project_build_id": project_build_id,
         "build_warning": build_warning(project_build_id, project_build_input_fingerprint),

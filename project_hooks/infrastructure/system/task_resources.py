@@ -29,6 +29,10 @@ def inspect_task_resources(root, record, events, items, relations, folders, chan
         seen.add(reference)
         prefix, value = reference.split(":", 1)
         item = by_id.get(value) if prefix == "catalog" else None
+        # Archived catalog entries retain their historical paths, but those paths
+        # no longer represent required files for the current task.
+        if item and item.get("status") == "archived":
+            continue
         path = item.get("path") if item else value if prefix == "path" else None
         # A pathless catalog record may be a valid logical resource; an unknown ID cannot.
         if item and not path:

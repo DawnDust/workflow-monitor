@@ -40,6 +40,32 @@ SOURCE_ROOT = Path(__file__).resolve().parents[3]
 
 
 class ProjectHooksSqliteTests(unittest.TestCase):
+    def test_search_catalog_dispositions_preserve_archived_missing_path(self):
+        self.start("20261007_dispositions_001")
+        paths = ["resources/theory/current.md", "resources/theory/old.md", "resources/theory/missing.md"]
+        for path in paths:
+            (self.root / path).write_text("# material", encoding="utf-8")
+        self.hooks("catalog", "add", "--id", "current", "--kind", "theory", "--path", paths[0], "--title", "Current")
+        self.hooks("catalog", "add", "--id", "old", "--kind", "theory", "--path", paths[1], "--title", "Old")
+        self.hooks("catalog", "add", "--id", "missing", "--kind", "theory", "--path", paths[2], "--title", "Missing")
+        (self.root / paths[2]).unlink()
+        self.hooks("catalog", "update", "missing", "--status", "missing")
+        self.hooks("catalog", "archive", "old")
+        (self.root / paths[1]).unlink()
+        snapshot = MaintenanceReadModel(self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl", lambda:"main").dashboard_snapshot()
+        catalog = {x["record_id"]:x for x in snapshot["search_index"] if x["kind"] == "catalog"}
+        self.assertEqual(catalog["old"]["status_code"], "archived")
+        self.assertEqual(catalog["old"]["status"], "已归档")
+        self.assertEqual(catalog["old"]["archive_status_code"], "archived")
+        self.assertEqual(catalog["old"]["merge_status_code"], "not_applicable")
+        self.assertIn(paths[1], catalog["old"]["search_text"])
+        self.assertEqual(catalog["current"]["status_code"], "catalog_active")
+        self.assertEqual(catalog["current"]["status"], "有效")
+        self.assertEqual(catalog["current"]["archive_status_code"], "unarchived")
+        self.assertEqual(catalog["missing"]["status_code"], "catalog_missing")
+        self.assertEqual(catalog["missing"]["status"], "文件缺失")
+
     def test_folder_index_is_readonly_and_output_import_uses_explicit_registered_folder(self):
         before = (self.root / "maintenance/events.jsonl").read_bytes()
         index = json.loads(self.hooks("catalog", "folder", "index", "--format", "json").stdout)
@@ -53,12 +79,12 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertIn("--folder", rejected.stderr)
         started = self.start("20260930_folders_001", check=False)
         self.assertEqual(started.returncode, 0, started.stderr)
-        target = self.root / "resources/analysis/program/outputs"
+        target = self.root / "resources/reports/program-outputs"
         target.mkdir(parents=True)
-        self.hooks("catalog", "folder", "add", "--path", "resources/analysis/program/outputs", "--name", "程序输出", "--purpose", "程序结果")
+        self.hooks("catalog", "folder", "add", "--path", "resources/reports/program-outputs", "--name", "程序输出", "--purpose", "程序结果")
         self.hooks("catalog", "folder", "index")
-        imported = json.loads(self.hooks("catalog", "ingest", str(outside), "--kind", "output", "--folder", "resources/analysis/program/outputs").stdout)
-        self.assertEqual(imported["item"]["path"], "resources/analysis/program/outputs/result.csv")
+        imported = json.loads(self.hooks("catalog", "ingest", str(outside), "--kind", "output", "--folder", "resources/reports/program-outputs").stdout)
+        self.assertEqual(imported["item"]["path"], "resources/reports/program-outputs/result.csv")
         self.assertEqual(imported["item"]["kind"], "output")
         journal = (self.root / "maintenance/events.jsonl").read_bytes()
         self.assertEqual(json.loads(self.hooks("catalog", "folder", "list").stdout)[0]["name"], "程序输出")
@@ -76,10 +102,12 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             installed = json.loads(installation.read_text(encoding="utf-8"))
             installed["application_version"] = __version__
             installation.write_text(json.dumps(installed), encoding="utf-8")
-        for name in ("source", "data", "theory", "analysis", "outputs", "others", "reports", "sparks", "tutorials", "translations", "plans"):
+        for name in ("source", "data", "theory", "outputs", "others", "reports", "sparks", "tutorials", "translations", "plans"):
             directory = cls.seed_root / "resources" / name
             directory.mkdir(parents=True)
             (directory / ".gitkeep").write_text("\n", encoding="utf-8")
+        (cls.seed_root / "program").mkdir()
+        (cls.seed_root / "program/.gitkeep").write_text("\n", encoding="utf-8")
         for name in ("AGENTS.md", ".gitignore", ".gitattributes"):
             shutil.copy2(SOURCE_ROOT / name, cls.seed_root / name)
         (cls.seed_root / "maintenance/events.jsonl").write_text("", encoding="utf-8")
@@ -1154,6 +1182,12 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual({"task", "exploration"}, {item["kind"] for item in snapshot["search_index"]})
         exploration = next(item for item in snapshot["search_index"] if item["kind"] == "exploration")
         self.assertEqual(exploration["status"], "待合并")
+        self.assertEqual(exploration["status_code"], "pending_merge")
+        self.assertEqual(exploration["archive_status_code"], "unarchived")
+        self.assertEqual(exploration["merge_status_code"], "pending_merge")
+        task = next(item for item in snapshot["search_index"] if item["kind"] == "task")
+        self.assertEqual((task["status_code"], task["status"]), ("unspecified", "未标注"))
+        self.assertEqual((task["archive_status_code"], task["merge_status_code"]), ("not_applicable", "not_applicable"))
 
     def test_legacy_migration_is_complete_idempotent_and_deletes_sources(self) -> None:
         maintenance = self.root / "maintenance"
@@ -1268,6 +1302,72 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(result["merge_method"], "squash_pr")
         self.assertFalse(result["network_actions_performed"])
 
+        rejected = self.hooks("archive-attempt", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("exploration archive-validated", rejected.stderr)
+
+    def test_validated_exploration_can_be_archived_after_squash_merge(self) -> None:
+        branch = "research/integrated-success"
+        task_id = "20260722_integrated_success_001"
+        self.start(task_id, "--track", "research", "--topic", "integrated-success")
+        self.update_state("validated and ready")
+        self.hooks("attempt", "update", "--hypothesis", "hypothesis holds", "--evidence", "independent checks passed",
+                   "--conclusion", "validated")
+        self.end(task_id, state="validated")
+        self.commit_all("validated successful exploration")
+        exploration_commit = self.git("rev-parse", "HEAD").stdout.strip()
+
+        self.git("switch", "main")
+        self.git("merge", "--squash", branch)
+        self.commit_all("squash merge successful exploration")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("branch", "-m", branch, "archive/research/integrated-success")
+
+        stable = "20260722_archive_success_001"
+        started = self.start(stable, check=False)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.update_state("record successful exploration archival")
+        archive_result = self.hooks(
+            "exploration", "archive-validated", "archive/research/integrated-success",
+            check=False,
+        )
+        self.assertEqual(archive_result.returncode, 0, archive_result.stderr)
+        archived = json.loads(archive_result.stdout)
+        self.assertEqual(archived["state"], "validated")
+        self.assertEqual(archived["branch"], "archive/research/integrated-success")
+        self.assertEqual(archived["commit"], exploration_commit)
+        self.assertTrue(archived["archived"])
+        self.assertEqual(self.git("show-ref", "--verify", "--quiet", "refs/heads/archive/research/integrated-success", check=False).returncode, 0)
+        self.assertNotEqual(self.git("show-ref", "--verify", "--quiet", "refs/heads/research/integrated-success", check=False).returncode, 0)
+
+        events = load_events(self.root / "maintenance/events.jsonl")
+        archive_events = [event for event in events
+                          if event["event_type"] == "attempt.archived"
+                          and event["payload"].get("archive_branch") == "archive/research/integrated-success"]
+        self.assertEqual(len(archive_events), 1)
+        self.assertEqual(archive_events[0]["payload"]["disposition"], "validated-integrated")
+        self.assertEqual(archive_events[0]["payload"]["integrated_commit"], exploration_commit)
+
+        repeated = json.loads(self.hooks(
+            "exploration", "archive-validated", "archive/research/integrated-success",
+        ).stdout)
+        self.assertTrue(repeated["already_recorded"])
+        self.update_state("archive event recorded")
+        self.end(stable)
+        snapshot = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).dashboard_snapshot()
+        archived_record = next(
+            item for item in snapshot["search_index"]
+            if item["kind"] == "exploration" and item["branch"] == "archive/research/integrated-success"
+        )
+        self.assertEqual(archived_record["summary"], "validated")
+        self.assertEqual(archived_record["status"], "已归档")
+        self.assertEqual(archived_record["archive_status_code"], "archived")
+        self.assertEqual(archived_record["merge_status_code"], "merged")
+
     def test_exploration_identity_is_branch_across_multiple_tasks_and_commits(self) -> None:
         branch = "experiment/branch-scoped"
         first_task = "20260722_branch_scoped_001"
@@ -1319,6 +1419,8 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             if item["kind"] == "exploration" and item["branch"] == branch
         )
         self.assertEqual(merged_record["status"], "已合并")
+        self.assertEqual(merged_record["archive_status_code"], "unarchived")
+        self.assertEqual(merged_record["merge_status_code"], "merged")
 
     def test_validated_attempt_requires_all_evidence_fields(self) -> None:
         task_id = "20260722_missing_001"
@@ -1374,7 +1476,23 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             item for item in archived_snapshot["search_index"]
             if item["kind"] == "exploration" and item["summary"] == "negative"
         )
-        self.assertEqual(archived_record["status"], "已遗弃")
+        self.assertEqual(archived_record["status"], "已归档")
+
+    def test_abandoning_a_task_does_not_mark_its_exploration_abandoned(self):
+        branch = "research/abandoned-display"
+        self.start("20260722_abandoned_display_001", "--track", "research", "--topic", "abandoned-display")
+        self.hooks("task", "abandon", "--reason", "Explicitly abandoned fixture")
+        snapshot = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl",
+            lambda: "main",
+        ).dashboard_snapshot()
+        abandoned_record = next(
+            item for item in snapshot["search_index"]
+            if item["kind"] == "exploration" and item["branch"] == branch
+        )
+        self.assertEqual(abandoned_record["summary"], "active")
+        self.assertEqual(abandoned_record["status"], "进行中")
 
     def test_database_missing_or_corrupt_rebuilds_from_journal(self) -> None:
         task_id = "20260722_rebuild_001"
@@ -1550,6 +1668,25 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertIn("交付物", failed.stderr)
         self.assertTrue(json.loads(self.hooks("status").stdout)["active"])
 
+    def test_archived_catalog_deliverable_does_not_block_when_historical_path_is_missing(self):
+        previous = "20260930_archive_seed_001"
+        self.start(previous)
+        self.register_paper()
+        self.end(previous)
+        self.commit_all("register catalog item for archive gate")
+
+        current = "20260930_archive_deliverable_001"
+        self.start(current, "--kind", "docs", "--deliverable", "catalog:paper")
+        self.hooks("catalog", "archive", "paper")
+        (self.root / "resources/source/paper.pdf").unlink()
+
+        finished = json.loads(self.end(current).stdout)
+        self.assertEqual(finished["result"], "completed")
+        self.assertEqual(finished["resource_blockers"], [])
+        archived = json.loads(self.hooks("catalog", "show", "paper", "--format", "json").stdout)["item"]
+        self.assertEqual(archived["status"], "archived")
+        self.assertEqual(archived["path"], "resources/source/paper.pdf")
+
     def test_legacy_hashless_move_requires_input_then_explicit_repair(self):
         self.start("20260930_legacyhash_001")
         original = self.register_paper()
@@ -1592,17 +1729,17 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         for name in ("tutorials", "translations", "plans"):
             self.assertTrue((self.root / "resources" / name).is_dir())
         self.start("20260930_folders_001")
-        nested = self.root / "resources/analysis/program/outputs"
+        nested = self.root / "resources/tutorials/program/outputs"
         nested.mkdir(parents=True)
-        parent = json.loads(self.hooks("catalog", "folder", "add", "--path", "resources/analysis/program", "--name", "Program", "--purpose", "Program materials").stdout)
-        child = json.loads(self.hooks("catalog", "folder", "add", "--path", "resources/analysis/program/outputs").stdout)
+        parent = json.loads(self.hooks("catalog", "folder", "add", "--path", "resources/tutorials/program", "--name", "Program", "--purpose", "Program materials").stdout)
+        child = json.loads(self.hooks("catalog", "folder", "add", "--path", "resources/tutorials/program/outputs").stdout)
         self.assertNotEqual(parent["folder_id"], child["folder_id"])
         listed = json.loads(self.hooks("catalog", "folder", "list").stdout)
         self.assertEqual(len(listed), 2)
-        moved = self.root / "resources/analysis/renamed"
+        moved = self.root / "resources/tutorials/renamed"
         nested.parent.rename(moved)
-        self.hooks("catalog", "folder", "update", parent["folder_id"], "--path", "resources/analysis/renamed")
-        self.hooks("catalog", "folder", "update", child["folder_id"], "--path", "resources/analysis/renamed/outputs")
+        self.hooks("catalog", "folder", "update", parent["folder_id"], "--path", "resources/tutorials/renamed")
+        self.hooks("catalog", "folder", "update", child["folder_id"], "--path", "resources/tutorials/renamed/outputs")
         connection = rebuild(self.root / ".project_hooks/maintenance.sqlite3", self.root / "maintenance/events.jsonl")
         connection.close()
         listed = json.loads(self.hooks("catalog", "folder", "list").stdout)
@@ -1713,7 +1850,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         )
         dashboard = model.dashboard_snapshot()
         self.assertEqual(len(dashboard["catalog_items"]), 3)
-        self.assertEqual(len(dashboard["resource_directories"]), 11)
+        self.assertEqual(len(dashboard["resource_directories"]), 10)
         data_directory = next(
             item for item in dashboard["resource_directories"] if item["name"] == "data"
         )
@@ -1757,7 +1894,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             "catalog", "add", "--kind", "other", "--title", "loose",
             "--path", "loose.pdf", check=False,
         )
-        self.assertIn("资料文件必须位于 resources/source", rejected.stderr)
+        self.assertIn("程序请放入 program/", rejected.stderr)
         mismatch = self.hooks(
             "catalog", "update",
             next(item["item_id"] for item in items if item["kind"] == "report"),
@@ -1766,87 +1903,93 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(mismatch.returncode, 0)
         self.assertEqual(json.loads(mismatch.stdout)["kind"], "other")
 
-    def test_simulation_directory_bundle_is_atomic_and_refreshes_digest(self) -> None:
-        task_id = "20260809_simulation_bundle_001"
+    def test_program_directory_is_unmonitored_and_analysis_migration_preserves_history(self) -> None:
+        task_id = "20260809_program_migration_001"
         self.start(task_id)
         bundle = self.root / "resources/analysis/monte-carlo"
-        bundle.mkdir()
+        bundle.mkdir(parents=True)
         (bundle / "main.py").write_text("print('run')\n", encoding="utf-8")
         (bundle / "model.py").write_text("VALUE = 1\n", encoding="utf-8")
-        cache = bundle / "__pycache__"
-        cache.mkdir()
-        (cache / "model.pyc").write_bytes(b"ignored")
-        (bundle / "scratch.tmp").write_bytes(b"ignored")
+        (self.root / "program/README.md").write_text("existing program", encoding="utf-8")
 
-        added = json.loads(self.hooks(
-            "catalog", "add", "--kind", "simulation", "--title", "Monte Carlo 主程序",
-            "--path", "resources/analysis/monte-carlo", "--entrypoint", "main.py",
-        ).stdout)
-        self.assertEqual(added["metadata"]["entry_type"], "bundle")
-        self.assertEqual(added["metadata"]["file_count"], 2)
-        self.assertEqual(added["metadata"]["entrypoint"], "main.py")
-        first_digest = added["metadata"]["tree_sha256"]
+        item = {
+            "item_id": "legacy-program", "kind": "simulation", "title": "Monte Carlo",
+            "summary": "legacy bundle", "path": "resources/analysis/monte-carlo",
+            "status": "active", "tags": [], "source": "", "metadata": {"entry_type": "bundle"},
+            "created_at": "2026-08-09 00:00:00（Asia/Shanghai）",
+        }
+        folder = {
+            "folder_id": "legacy-program-folder", "path": "resources/analysis/monte-carlo",
+            "name": "Monte Carlo", "purpose": "legacy program", "status": "active",
+            "created_at": "2026-08-09 00:00:00（Asia/Shanghai）",
+        }
+        relation = {
+            "relation_id": "legacy-program-relation", "source_id": "legacy-program",
+            "target_id": "reference-theory", "relation_type": "supports", "note": "history",
+            "created_at": "2026-08-09 00:00:00（Asia/Shanghai）",
+        }
+        reference_path = self.root / "resources/theory/reference.md"
+        reference_path.write_text("# Reference", encoding="utf-8")
+        reference_item = {
+            "item_id": "reference-theory", "kind": "theory", "title": "Reference",
+            "summary": "", "path": "resources/theory/reference.md", "status": "active",
+            "tags": [], "source": "", "metadata": {},
+            "created_at": "2026-08-09 00:00:00（Asia/Shanghai）",
+        }
+        append_events(self.root / "maintenance/events.jsonl", self.root / ".project_hooks", [
+            new_event("catalog.item_upserted", branch="main", task_id=task_id,
+                      payload=item, timezone="Asia/Shanghai"),
+            new_event("catalog.item_upserted", branch="main", task_id=task_id,
+                      payload=reference_item, timezone="Asia/Shanghai"),
+            new_event("catalog.folder_upserted", branch="main", task_id=task_id,
+                      payload=folder, timezone="Asia/Shanghai"),
+            new_event("catalog.relation_upserted", branch="main", task_id=task_id,
+                      payload=relation, timezone="Asia/Shanghai"),
+        ])
+
+        preview = json.loads(self.hooks("program", "migrate-analysis").stdout)
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["move_count"], 1)
+        self.assertEqual(preview["items_to_archive"], ["legacy-program"])
+        self.assertTrue(bundle.is_dir())
         self.assertEqual(self.hooks("check", check=False).returncode, 0)
+        self.assertFalse(any(d["path"] == "resources/analysis" for d in
+                             MaintenanceReadModel(self.root / ".project_hooks/maintenance.sqlite3",
+                                                  self.root / "maintenance/events.jsonl",
+                                                  lambda: "main").dashboard_snapshot()["resource_directories"]))
 
-        model = MaintenanceReadModel(
-            self.root / ".project_hooks/maintenance.sqlite3",
-            self.root / "maintenance/events.jsonl", lambda: "main",
-        )
-        analysis = next(
-            item for item in model.dashboard_snapshot()["resource_directories"]
-            if item["kind"] == "simulation"
-        )
-        self.assertEqual(analysis["logical_items"], 1)
-        self.assertEqual(analysis["indexed_items"], 1)
-        self.assertEqual(analysis["bundle_count"], 1)
-        self.assertEqual(analysis["contained_files"], 2)
-
-        (bundle / "model.py").write_text("VALUE = 2\n", encoding="utf-8")
-        changed = self.hooks("check", check=False)
-        self.assertNotEqual(changed.returncode, 0)
-        self.assertIn("模拟资料包内容已变化", changed.stderr)
-        refreshed = json.loads(self.hooks("catalog", "scan").stdout)
-        self.assertEqual(refreshed["scanned_files"], 2)
-        self.assertEqual(refreshed["scanned_items"], 1)
-        self.assertEqual(len(refreshed["changes"]), 1)
-        current = json.loads(self.hooks(
-            "catalog", "show", added["item_id"], "--format", "json",
-        ).stdout)["item"]
-        self.assertNotEqual(current["metadata"]["tree_sha256"], first_digest)
+        applied = json.loads(self.hooks("program", "migrate-analysis", "--apply").stdout)
+        self.assertEqual(applied["moved"], 1)
+        self.assertEqual(applied["archived_items"], 1)
+        self.assertEqual(applied["archived_folders"], 1)
+        self.assertTrue((self.root / "program/monte-carlo/main.py").is_file())
+        self.assertTrue((self.root / "program/README.md").is_file())
+        self.assertFalse((self.root / "resources/analysis").exists())
+        details = json.loads(self.hooks("catalog", "show", "legacy-program", "--format", "json").stdout)
+        self.assertEqual(details["item"]["status"], "archived")
+        self.assertEqual(details["relations"][0]["relation_id"], "legacy-program-relation")
+        self.assertEqual(self.hooks("catalog", "folder", "index").stdout.count("resources/analysis"), 0)
+        scan = json.loads(self.hooks("catalog", "scan", "--dry-run").stdout)
+        self.assertFalse(any(change.get("path", "").startswith("program/") for change in scan["changes"]))
         self.assertEqual(self.hooks("check", check=False).returncode, 0)
+        events_before = (self.root / "maintenance/events.jsonl").read_bytes()
+        repeated = json.loads(self.hooks("program", "migrate-analysis", "--apply").stdout)
+        self.assertTrue(repeated["already_migrated"])
+        self.assertEqual((self.root / "maintenance/events.jsonl").read_bytes(), events_before)
 
-        standalone = self.root / "resources/analysis/standalone.py"
-        standalone.write_text("print('standalone')\n", encoding="utf-8")
-        standalone_scan = json.loads(self.hooks("catalog", "scan").stdout)
-        self.assertEqual(len(standalone_scan["changes"]), 1)
-        simulations = json.loads(self.hooks(
-            "catalog", "list", "--kind", "simulation", "--format", "json",
-        ).stdout)
-        self.assertEqual(len(simulations), 2)
-        self.assertEqual(
-            {item["metadata"].get("entry_type", "file") for item in simulations},
-            {"bundle", "file"},
-        )
-        self.assertEqual(self.hooks("check", check=False).returncode, 0)
-
-        duplicate = self.hooks(
-            "catalog", "add", "--kind", "simulation", "--title", "重复文件",
-            "--path", "resources/analysis/monte-carlo/model.py", check=False,
-        )
-        self.assertIn("位于已登记模拟资料包内", duplicate.stderr)
-        nested = bundle / "nested"
-        nested.mkdir()
-        (nested / "run.py").write_text("pass\n", encoding="utf-8")
-        nested_result = self.hooks(
-            "catalog", "add", "--kind", "simulation", "--title", "嵌套资料包",
-            "--path", "resources/analysis/monte-carlo/nested", check=False,
-        )
-        self.assertIn("位于已登记模拟资料包内", nested_result.stderr)
-        invalid_entry = self.hooks(
-            "catalog", "update", added["item_id"], "--entrypoint", "missing.py",
-            check=False,
-        )
-        self.assertIn("入口文件不存在", invalid_entry.stderr)
+    def test_program_analysis_migration_refuses_conflicts_without_partial_moves(self) -> None:
+        self.start("20260809_program_migration_conflict_001")
+        (self.root / "resources/analysis/solver").mkdir(parents=True)
+        (self.root / "resources/analysis/solver/main.py").write_text("old", encoding="utf-8")
+        (self.root / "program/solver").mkdir()
+        (self.root / "program/solver/main.py").write_text("new", encoding="utf-8")
+        preview = json.loads(self.hooks("program", "migrate-analysis").stdout)
+        self.assertEqual(preview["conflict_count"], 1)
+        rejected = self.hooks("program", "migrate-analysis", "--apply", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("未移动文件", rejected.stderr)
+        self.assertEqual((self.root / "resources/analysis/solver/main.py").read_text(encoding="utf-8"), "old")
+        self.assertEqual((self.root / "program/solver/main.py").read_text(encoding="utf-8"), "new")
 
     def test_catalog_rejects_non_simulation_directory_bundle(self) -> None:
         self.start("20260809_non_simulation_bundle_001")

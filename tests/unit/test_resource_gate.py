@@ -34,12 +34,21 @@ class ResourceGateTests(unittest.TestCase):
         gate = task_resource_gate([issue], [issue], [], [], [event], [], [])
         self.assertEqual(gate["blockers"], [issue])
 
-    def test_archived_required_file_cannot_be_replaced_by_a_directory(self):
+    def test_archived_catalog_reference_keeps_history_without_requiring_path(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             path = "resources/source/input.pdf"
-            (root / path).mkdir(parents=True)
             item = {"item_id": "input", "kind": "literature", "path": path, "status": "archived", "metadata": {}}
+            with patch("project_hooks.infrastructure.system.task_resources.catalog_consistency_issues", return_value=[]):
+                gate = inspect_task_resources(root, {"declaration": {"depends_on": ["catalog:input"]}},
+                                              [], [item], [], [], [])
+            self.assertEqual(gate["blockers"], [])
+
+    def test_active_catalog_reference_still_requires_a_file(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            path = "resources/source/input.pdf"
+            item = {"item_id": "input", "kind": "literature", "path": path, "status": "active", "metadata": {}}
             with patch("project_hooks.infrastructure.system.task_resources.catalog_consistency_issues", return_value=[]):
                 gate = inspect_task_resources(root, {"declaration": {"depends_on": ["catalog:input"]}},
                                               [], [item], [], [], [])

@@ -23,6 +23,8 @@ SOFTWARE_INPUT_FILES = {
     "requirements.txt",
     "requirements-dev.txt",
     "workflow-monitor.spec",
+    "maintenance/PHYSICS_RESEARCH_ROADMAP.md",
+    "maintenance/RESEARCH_UNDERSTANDING_GUIDE.md", "TEST_BUILD_NOTES.md",
 }
 EXCLUDED_PARTS = {
     ".git", ".project_hooks", "__pycache__", ".pytest_cache", ".venv",

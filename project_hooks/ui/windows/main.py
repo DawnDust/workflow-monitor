@@ -231,10 +231,18 @@ def main(argv: list[str] | None = None) -> int:
     if delegated is not None:
         return delegated
     if args:
-        from project_hooks.cli import main as cli_main
+        from project_hooks.cli import discover_project_root, main as cli_main
 
-        if "--project" not in args:
-            args = ["--project", str(project), *args]
+        # A CLI executable may live in dist/ or another utility directory while
+        # the command is being run against the current repository. Prefer the
+        # project containing the shell's working directory. Keep portable-root
+        # behavior when no project is discoverable, and let `init <path>` use
+        # its own target path.
+        has_project = "--project" in args
+        is_init = bool(args and args[0] == "init")
+        if not has_project and not is_init:
+            selected_project = discover_project_root() or project
+            args = ["--project", str(selected_project), *args]
         return cli_main(args)
     try:
         return run_portable_dashboard(project)

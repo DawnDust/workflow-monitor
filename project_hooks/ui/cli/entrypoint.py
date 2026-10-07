@@ -14,6 +14,8 @@ from .agent_output import brief_context, verification_view, markdown_view, compa
 from ...infrastructure.system.diagnostics import create_failure_record
 from ...infrastructure.system.runtime import UPDATE_CHILD_ENV
 from ...infrastructure.system.updater import validate_project_event_schema
+from ...infrastructure.system.updater import run_local_update
+from ...infrastructure.system.build_notes import read_build_notes
 
 def main(argv: list[str] | None = None) -> int:
     raw_args = list(os.sys.argv[1:] if argv is None else argv)
@@ -28,8 +30,14 @@ def main(argv: list[str] | None = None) -> int:
         from .structured_input import expand
         expanded_args = expand(raw_args)
         args = build_parser().parse_args(expanded_args)
+        if args.command == "update" and args.from_exe and args.manifest_url:
+            raise WorkflowError("--from-exe 不能与远程版本选择参数 --manifest-url 同时使用")
         if args.command == "end" and not args.check_only and (not args.result or not args.note):
             raise WorkflowError("结束任务必须填写 --result 和 --note；只检查使用 end --check-only")
+        if args.command == "build-notes":
+            notes = read_build_notes()
+            print(notes["markdown"] if args.format == "markdown" else json.dumps(notes, ensure_ascii=False, indent=2))
+            return 0
         if args.command == "init":
             root = (args.project or args.path).resolve()
         else:
@@ -64,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
                 "当前目录不在 Workflow Monitor 科研项目中；请先运行 `.\\workflow-monitor.exe init .`，"
                 "或使用 `--project <path>`"
             )
+        elif args.command == "update" and args.from_exe:
+            output = run_local_update(ROOT, args.from_exe, check_only=args.check)
         elif shared_action is not None:
             if getattr(args, "compact", False) and args.command != "start":
                 receipt_task_id = read_active()["task_id"]
@@ -87,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             validate_project_event_schema(ROOT, minimum_schema, maximum_schema)
             output = apply_project_update(
                 ROOT, args.target_version, executable_path=args.executable_path,
+                cache_build_id=args.cache_build_id,
             )
         elif args.command is None:
             configured = run_git(["config", "--local", "--get", "core.hooksPath"], check=False).stdout.strip()
@@ -135,7 +146,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "attempt": output = get_attempt(current_branch()) if args.attempt_command == "show" else attempt_update(args)
         elif args.command in {"history", "explorations"}:
             output = render_records(query_output(args.command, args.limit), args.format)
-        elif args.command == "exploration": output = exploration_import(args)
+        elif args.command == "exploration" and args.exploration_command == "import": output = exploration_import(args)
+        elif args.command == "exploration" and args.exploration_command == "archive-validated":
+            output = archive_validated_exploration(args.branch)
+        elif args.command == "program": output = program_command(args)
         elif args.command == "privacy" and args.privacy_command == "sanitize-events":
             output = sanitize_uncommitted_events(args.base_ref, apply=args.apply)
         elif args.command == "catalog": output = catalog_command(args, catalog_runtime())

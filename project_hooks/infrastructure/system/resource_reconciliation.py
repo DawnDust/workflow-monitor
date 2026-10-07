@@ -27,7 +27,20 @@ def project_inventory(root: Path):
     files, directories = [], []
     for current, names, filenames in os.walk(root, followlinks=False):
         base = Path(current)
+        def managed_directory(name: str) -> bool:
+            candidate = base / name
+            try:
+                relative = candidate.relative_to(root).as_posix().casefold()
+            except ValueError:
+                return False
+            if relative == "program" or relative == "resources/analysis":
+                return False
+            if root.name.casefold() == "resources" and base == root and name.casefold() == "analysis":
+                return False
+            return True
+
         names[:] = sorted(name for name in names if name.casefold() not in SEARCH_IGNORES
+                          and managed_directory(name)
                           and not (base / name).is_symlink()
                           and not (base / name).is_junction())
         for name in names:
@@ -37,8 +50,14 @@ def project_inventory(root: Path):
             if path.is_symlink() or not is_indexable_resource_file(path, base=root):
                 continue
             try:
-                path.resolve().relative_to(root)
+                relative = path.resolve().relative_to(root).as_posix().casefold()
             except ValueError:
+                continue
+            if relative.startswith("program/") or relative == "program":
+                continue
+            if relative == "resources/analysis" or relative.startswith("resources/analysis/"):
+                continue
+            if root.name.casefold() == "resources" and (relative == "analysis" or relative.startswith("analysis/")):
                 continue
             files.append(path)
     return files, directories

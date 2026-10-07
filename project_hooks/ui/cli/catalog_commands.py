@@ -18,7 +18,9 @@ from ...infrastructure.system.folder_index import folder_index, render_folder_in
 
 from ...infrastructure.system.resource_layout import (
     LEGACY_BY_PATH,
+    LEGACY_PROGRAM_RESOURCE_PATH,
     OPTIONAL_CATALOG_KINDS,
+    PROGRAM_DIRECTORY,
     RESOURCE_BY_KIND,
     RESOURCE_DIRECTORIES,
     RESOURCE_KINDS,
@@ -26,6 +28,7 @@ from ...infrastructure.system.resource_layout import (
     bundle_contains,
     files_under,
     is_simulation_bundle,
+    is_legacy_program_resource,
     is_indexable_resource_file,
     legacy_resource_for_path,
     resource_for_path,
@@ -39,7 +42,7 @@ from ...core.catalog import (
     render_context_markdown,
 )
 
-CATALOG_KINDS = RESOURCE_KINDS
+CATALOG_KINDS = (*RESOURCE_KINDS, "simulation")
 CATALOG_KIND_PREFIXES = {
     "literature": "lit",
     "data": "data",
@@ -100,6 +103,11 @@ def normalize_project_path(root: Path, value: str, *, require_file: bool = False
 
 
 def validate_resource_path(relative: str, kind: str) -> str:
+    if is_legacy_program_resource(relative):
+        raise CatalogError(
+            f"{LEGACY_PROGRAM_RESOURCE_PATH} 已退出资料管理；请将程序放在 {PROGRAM_DIRECTORY}/，"
+            "或运行 `program migrate-analysis` 迁移旧目录"
+        )
     resource = resource_for_path(relative)
     if resource is None:
         legacy = legacy_resource_for_path(relative)
@@ -109,8 +117,7 @@ def validate_resource_path(relative: str, kind: str) -> str:
                 "请运行 catalog migrate-layout --dry-run"
             )
         raise CatalogError(
-            "资料文件必须位于 resources/source、resources/data、resources/theory、"
-            "resources/analysis、resources/outputs、resources/others 或 resources/reports"
+            "资料文件必须位于 resources/ 下的资料目录；程序请放入 program/"
         )
     # Directory kinds supply defaults; moving a material preserves its original kind.
     return relative
@@ -271,7 +278,8 @@ def selected_items(
     needle = (query or "").strip().casefold()
     return [
         item for item in values
-        if (id_filter is None or item["item_id"] in id_filter)
+        if (not is_legacy_program_resource(item.get("path") or "") or status == "archived")
+        and (id_filter is None or item["item_id"] in id_filter)
         and (not kind or item["kind"] == kind)
         and (not status or item["status"] == status)
         and (not tag_set or tag_set.issubset(set(item["tags"])))
@@ -549,7 +557,8 @@ def folder_command(args: argparse.Namespace, runtime: CatalogRuntime):
     finally:
         connection.close()
     if args.folder_command == "list":
-        return folders
+        return [folder for folder in folders
+                if not is_legacy_program_resource(folder["path"]) or folder.get("status") == "archived"]
     record, branch = runtime.write_context()
     folder_id = getattr(args, "folder_id", None) or getattr(args, "id", None)
     current = next((f for f in folders if f["folder_id"] == folder_id), None)
@@ -559,6 +568,8 @@ def folder_command(args: argparse.Namespace, runtime: CatalogRuntime):
     relative = normalize_project_path(runtime.root, path)
     if not relative.startswith("resources/"):
         raise CatalogError("资料文件夹必须位于 resources 内")
+    if is_legacy_program_resource(relative) and args.folder_command != "archive":
+        raise CatalogError(f"{LEGACY_PROGRAM_RESOURCE_PATH} 已退出资料管理；请使用 program/ 存放程序")
     if args.folder_command != "archive" and not (runtime.root / relative).is_dir():
         raise CatalogError(f"资料文件夹不存在: {relative}")
     folder_id = validate_identifier(folder_id or "folder-" + hashlib.sha256(relative.casefold().encode()).hexdigest()[:12])
@@ -626,6 +637,8 @@ def scan_items(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
                 except ValueError:
                     continue
                 relative = path.relative_to(runtime.root).as_posix()
+                if is_legacy_program_resource(relative):
+                    continue
                 if relative.casefold() in reserved:
                     continue
                 inferred = resource_for_path(relative).kind
@@ -805,7 +818,7 @@ def ingest_plan(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
         target_name = _validate_target_name(args.name or source.name)
         folder = getattr(args, "folder", None)
         if kind == "output" and not folder:
-            raise CatalogError("输出资料需要先读取 catalog folder index，并通过 --folder 选择程序的输出目录")
+            raise CatalogError("要登记为资料的输出，请读取 catalog folder index 并用 --folder 选择 resources 内的目标目录；程序运行输出留在 program/")
         if folder:
             relative_folder = normalize_project_path(root, folder)
             index = folder_index(root, [], _read_folders(runtime))
@@ -1059,6 +1072,140 @@ def migrate_layout(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     }
 
 
+def migrate_analysis(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
+    """Move the legacy analysis directory into unmanaged program/ and archive its catalog records."""
+    root = runtime.root.resolve()
+    source_dir = root / LEGACY_PROGRAM_RESOURCE_PATH
+    target_dir = root / PROGRAM_DIRECTORY
+    if source_dir.is_symlink() or (hasattr(source_dir, "is_junction") and source_dir.is_junction()):
+        raise CatalogError(f"拒绝迁移链接目录: {LEGACY_PROGRAM_RESOURCE_PATH}")
+    if source_dir.exists() and not source_dir.is_dir():
+        raise CatalogError(f"旧 analysis 路径不是目录: {LEGACY_PROGRAM_RESOURCE_PATH}")
+    if target_dir.exists() and (not target_dir.is_dir() or target_dir.is_symlink()
+                                or (hasattr(target_dir, "is_junction") and target_dir.is_junction())):
+        raise CatalogError(f"程序目录不是安全的普通目录: {PROGRAM_DIRECTORY}")
+
+    connection = runtime.database()
+    try:
+        items = [decode_item(row) for row in connection.catalog_items()]
+        folders = connection.catalog_folders()
+    finally:
+        connection.close()
+    legacy_items = [item for item in items if is_legacy_program_resource(item.get("path") or "")
+                    and item.get("status") != "archived"]
+    legacy_folders = [folder for folder in folders if is_legacy_program_resource(folder["path"])
+                      and folder.get("status") != "archived"]
+
+    conflicts: list[dict] = []
+    moves: list[dict] = []
+    source_children = list(source_dir.iterdir()) if source_dir.is_dir() else []
+    existing_names = {path.name.casefold() for path in target_dir.iterdir()} if target_dir.is_dir() else set()
+    planned_names: set[str] = set()
+    placeholder = None
+    for child in source_children:
+        if child.name.casefold() == ".gitkeep" and child.is_file() and child.read_bytes() == b"\n":
+            placeholder = child
+            continue
+        entry = {"source": child.relative_to(root).as_posix(),
+                 "target": (Path(PROGRAM_DIRECTORY) / child.name).as_posix()}
+        unsafe_link = child.is_symlink() or (hasattr(child, "is_junction") and child.is_junction())
+        if unsafe_link or child.name.casefold() in existing_names or child.name.casefold() in planned_names:
+            entry["reason"] = "链接目录不支持迁移" if unsafe_link else "目标名称冲突"
+            conflicts.append(entry)
+        else:
+            moves.append(entry)
+            planned_names.add(child.name.casefold())
+
+    preview = {
+        "dry_run": not args.apply,
+        "source": LEGACY_PROGRAM_RESOURCE_PATH,
+        "destination": PROGRAM_DIRECTORY,
+        "moves": moves,
+        "conflicts": conflicts,
+        "items_to_archive": [item["item_id"] for item in legacy_items],
+        "folders_to_archive": [folder["folder_id"] for folder in legacy_folders],
+        "move_count": len(moves),
+        "conflict_count": len(conflicts),
+    }
+    if not args.apply:
+        return preview
+    if conflicts:
+        raise CatalogError(
+            "analysis 迁移存在冲突，未移动文件或更新目录记录: "
+            + ", ".join(item["target"] for item in conflicts)
+        )
+
+    record, branch = runtime.write_context()
+    if branch != "main" or record.get("git", {}).get("track") != "stable":
+        raise CatalogError("analysis 迁移只能在 main 的 stable 活动任务中执行")
+    if not moves and not legacy_items and not legacy_folders and not source_dir.exists():
+        return {**preview, "dry_run": False, "already_migrated": True}
+
+    events = [runtime.emit(
+        "catalog.item_archived", branch=branch, task_id=record["task_id"],
+        payload={"item_id": item["item_id"]},
+    ) for item in legacy_items]
+    events.extend(runtime.emit(
+        "catalog.folder_upserted", branch=branch, task_id=record["task_id"],
+        payload={
+            "folder_id": folder["folder_id"], "path": folder["path"],
+            "name": folder["name"], "purpose": folder.get("purpose", ""),
+            "status": "archived", "created_at": folder.get("created_at"),
+        },
+    ) for folder in legacy_folders)
+
+    moved: list[tuple[Path, Path]] = []
+    removed_placeholder = False
+    created_target = False
+    try:
+        if moves and not target_dir.exists():
+            target_dir.mkdir(parents=True)
+            created_target = True
+        for move in moves:
+            source = root / move["source"]
+            target = root / move["target"]
+            shutil.move(str(source), str(target))
+            moved.append((source, target))
+        if placeholder is not None and placeholder.exists():
+            placeholder.unlink()
+            removed_placeholder = True
+        if source_dir.is_dir():
+            source_dir.rmdir()
+        if events:
+            runtime.persist(events)
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        try:
+            if removed_placeholder:
+                source_dir.mkdir(parents=True, exist_ok=True)
+                (source_dir / ".gitkeep").write_bytes(b"\n")
+        except OSError as rollback_exc:
+            rollback_errors.append(f"恢复 {LEGACY_PROGRAM_RESOURCE_PATH}/.gitkeep: {rollback_exc}")
+        for source, target in reversed(moved):
+            try:
+                source.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists() and not source.exists():
+                    shutil.move(str(target), str(source))
+            except OSError as rollback_exc:
+                rollback_errors.append(f"{target} -> {source}: {rollback_exc}")
+        if created_target:
+            try:
+                target_dir.rmdir()
+            except OSError:
+                pass
+        if rollback_errors:
+            raise CatalogError(f"迁移失败且文件回滚不完整: {exc}; " + "; ".join(rollback_errors)) from exc
+        raise
+
+    return {
+        **preview,
+        "dry_run": False,
+        "moved": len(moves),
+        "archived_items": len(legacy_items),
+        "archived_folders": len(legacy_folders),
+    }
+
+
 def bulk_update(args: argparse.Namespace, runtime: CatalogRuntime) -> dict:
     selectors = any((
         args.id, args.kind, args.status, args.tag, args.query, args.related_to,
@@ -1175,7 +1322,7 @@ def configure_catalog_parser(subparsers) -> None:
             command.add_argument("--purpose")
     add_parser = catalog_sub.add_parser("add")
     add_parser.add_argument("--id")
-    add_parser.add_argument("--kind", required=True, choices=CATALOG_KINDS)
+    add_parser.add_argument("--kind", required=True, choices=RESOURCE_KINDS)
     add_parser.add_argument("--title", required=True)
     add_parser.add_argument("--summary")
     add_parser.add_argument("--path")
@@ -1210,7 +1357,7 @@ def configure_catalog_parser(subparsers) -> None:
     unlink_parser.add_argument("relation_id")
     scan_parser = catalog_sub.add_parser("scan")
     scan_parser.add_argument("--root")
-    scan_parser.add_argument("--kind", choices=CATALOG_KINDS)
+    scan_parser.add_argument("--kind", choices=RESOURCE_KINDS)
     scan_parser.add_argument("--dry-run", action="store_true")
     migrate_parser = catalog_sub.add_parser("migrate-layout")
     migrate_parser.add_argument("--dry-run", action="store_true")
@@ -1223,7 +1370,7 @@ def configure_catalog_parser(subparsers) -> None:
     add_catalog_filters(context_parser, include_ids=True)
     ingest_parser = catalog_sub.add_parser("ingest")
     ingest_parser.add_argument("file")
-    ingest_parser.add_argument("--kind", choices=CATALOG_KINDS)
+    ingest_parser.add_argument("--kind", choices=RESOURCE_KINDS)
     ingest_parser.add_argument("--folder", help="从文件夹索引选择目标目录；输出资料必须指定")
     ingest_parser.add_argument("--name")
     ingest_parser.add_argument("--title")

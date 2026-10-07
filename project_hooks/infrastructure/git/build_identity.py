@@ -13,6 +13,8 @@ BUILD_INPUT_PATHS = (
     "project_hooks", "scripts", "tests", ".github/workflows", ".githooks",
     "requirements-dev.txt", "requirements-docs.txt", "mkdocs.yml",
     ".coveragerc", ".gitattributes", ".gitignore",
+    "maintenance/PHYSICS_RESEARCH_ROADMAP.md",
+    "maintenance/RESEARCH_UNDERSTANDING_GUIDE.md", "TEST_BUILD_NOTES.md",
 )
 # Compatibility import for callers that use the old public constant.
 SOFTWARE_SOURCE_PATHS = BUILD_INPUT_PATHS
@@ -123,7 +125,7 @@ def exe_matches_repository(root: Path, identity: dict | None = None) -> bool | N
 
 
 def _embedded_path() -> Path:
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[3]))
     return base / "build-info.json"
 
 
@@ -136,7 +138,7 @@ def build_identity() -> dict:
             return value
     except (OSError, ValueError):
         pass
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[3]
     repository = repository_source_identity(root)
     tree = repository["source_tree"]
     return {
@@ -148,7 +150,22 @@ def build_identity() -> dict:
         "built_at": None,
         "dirty": repository["dirty"],
         "mode": "source",
+        "channel": "source",
     }
+
+
+def display_version(application_version: str, identity: dict | None = None) -> str:
+    """Return a human-readable label without changing the executable filename."""
+    identity = identity or build_identity()
+    channel = identity.get("channel") or (
+        "source" if identity.get("mode") == "source" else "stable"
+    )
+    if channel not in {"test", "source"}:
+        return application_version
+    build_id = str(identity.get("build_id") or "unknown")[:8]
+    built_at = str(identity.get("built_at") or "")
+    date = built_at[:10].replace("-", "") if len(built_at) >= 10 else "undated"
+    return f"{application_version}-{channel}.{date}.{build_id}"
 
 
 def build_warning(

@@ -29,6 +29,7 @@ from .catalog_commands import (
     catalog_command,
     configure_catalog_parser,
     decode_item,
+    migrate_analysis,
 )
 from ...infrastructure.system.diagnostics import (
     cleanup_resolved_diagnostics,
@@ -161,6 +162,9 @@ usage: workflow-monitor [-h] [--help-all] [--project PATH] <command> ...
 状态与记录:
   project, stage, state, history, explorations, catalog
 
+程序目录:
+  program migrate-analysis  预览或迁移旧 resources/analysis 内容
+
 探索流程:
   attempt, exploration, prepare-pr, archive-attempt
 
@@ -251,6 +255,8 @@ def command_is_read_only(args: argparse.Namespace) -> bool:
         or (args.catalog_command == "folder" and args.folder_command in {"list", "index"})
         or (args.catalog_command == "migrate-layout" and args.dry_run)
     ):
+        return True
+    if args.command == "program" and args.program_command == "migrate-analysis" and not args.apply:
         return True
     return False
 
@@ -1831,14 +1837,21 @@ def prepare_pr() -> dict:
 
 def archive_attempt() -> dict:
     assert_no_active_task()
-    check_repository(raise_on_error=True)
-    assert_clean_worktree()
     branch = current_branch()
     attempt = get_attempt(branch)
     if classify_branch(branch)["kind"] != "exploration" or not attempt:
         raise WorkflowError("archive-attempt 只能在有效探索分支运行")
-    if attempt["state"] not in {"negative", "inconclusive", "paused"} or not has_finished_receipt(branch, attempt["state"]):
+    if attempt["state"] == "validated":
+        raise WorkflowError(
+            "validated 探索不能使用 archive-attempt；成功合入 main 后请运行 "
+            f"exploration archive-validated {branch}"
+        )
+    if attempt["state"] not in {"negative", "inconclusive", "paused"}:
         raise WorkflowError("尝试必须先通过 end 记录 negative、inconclusive 或 paused")
+    if not has_finished_receipt(branch, attempt["state"]):
+        raise WorkflowError("尝试必须先通过 end 记录对应的结束回执")
+    check_repository(raise_on_error=True)
+    assert_clean_worktree()
     target = f"archive/{attempt['track']}/{attempt['topic']}"
     if ref_exists(f"refs/heads/{target}") or ref_exists(f"refs/remotes/origin/{target}"):
         raise WorkflowError(f"归档分支已存在或与远程冲突: {target}")
@@ -1847,6 +1860,80 @@ def archive_attempt() -> dict:
     return {"archived": True, "from": branch, "branch": target, "network_actions_performed": False,
             "next": [f"提交 maintenance/events.jsonl 后执行 git push -u origin {target}",
                      f"回到 main 的稳定任务运行 project_hooks exploration import {target}"]}
+
+
+def archive_validated_exploration(branch_ref: str) -> dict:
+    record = read_active()
+    current = assert_active_branch(record)
+    default = branch_policy()["default_branch"]
+    if current != default or record["git"]["track"] != "stable":
+        raise WorkflowError(f"成功探索归档必须在 {default} 的 stable 活动任务中运行")
+
+    requested = clean_text(branch_ref, "探索分支", 300)
+    assert requested is not None
+    classification = classify_branch(requested)
+    if classification["kind"] == "exploration":
+        source = requested
+        target = f"archive/{classification['track']}/{classification['topic']}"
+    elif classification["kind"] == "archive":
+        source = f"{classification['track']}/{classification['topic']}"
+        target = requested
+    else:
+        raise WorkflowError("参数必须是 research/experiment/sandbox 探索分支或对应 archive 分支")
+
+    source_ref, target_ref = f"refs/heads/{source}", f"refs/heads/{target}"
+    has_source, has_target = ref_exists(source_ref), ref_exists(target_ref)
+    if not has_source and not has_target:
+        raise WorkflowError("找不到该探索分支或其本地 archive 分支")
+    if has_source and has_target:
+        raise WorkflowError(f"源分支和归档分支同时存在，需先人工消除引用冲突: {target}")
+
+    checked_out: set[str] = set()
+    for line in run_git(["worktree", "list", "--porcelain"]).stdout.splitlines():
+        if line.startswith("branch refs/heads/"):
+            checked_out.add(line.removeprefix("branch refs/heads/"))
+    if source in checked_out or target in checked_out:
+        raise WorkflowError("探索分支仍被 worktree 检出；先从对应 worktree 切出或移除后重试")
+
+    ref = source if has_source else target
+    commit = run_git(["rev-parse", f"{ref}^{{commit}}"]).stdout.strip()
+    main_commit = run_git(["rev-parse", f"{default}^{{commit}}"]).stdout.strip()
+    attempt = get_attempt(source)
+    if not attempt or attempt["state"] != "validated":
+        state = attempt["state"] if attempt else "无有效探索记录"
+        raise WorkflowError(f"成功归档仅适用于状态为 validated 的探索；当前状态：{state}")
+    if not has_finished_receipt(source, "validated"):
+        raise WorkflowError("探索缺少 validated 结束回执；拒绝归档")
+
+    matching = [event for event in load_events(journal_path())
+                if event["event_type"] == "attempt.archived"
+                and event["payload"].get("attempt_id") == attempt["attempt_id"]
+                and event["payload"].get("archive_branch") == target]
+    if matching:
+        return {"archived": True, "already_recorded": True, "source": source,
+                "branch": target, "commit": commit, "state": "validated"}
+
+    if run_git(["merge-base", "--is-ancestor", commit, main_commit], check=False).returncode == 0:
+        integration = "ancestor"
+    else:
+        merged = run_git(["merge-tree", "--write-tree", default, ref], check=False)
+        main_tree = run_git(["rev-parse", f"{default}^{{tree}}"]).stdout.strip()
+        merged_tree = merged.stdout.splitlines()[0].strip() if merged.stdout.splitlines() else ""
+        if merged.returncode != 0 or merged_tree != main_tree:
+            raise WorkflowError(f"探索分支提交尚未完整包含在 {default} 中；拒绝归档")
+        integration = "squash-equivalent"
+
+    if has_source:
+        run_git(["branch", "-m", source, target])
+    persist([emit(
+        "attempt.archived", branch=source, task_id=record["task_id"],
+        payload={"attempt_id": attempt["attempt_id"], "archive_branch": target,
+                 "disposition": "validated-integrated", "integrated_commit": commit,
+                 "integration": integration},
+    )])
+    return {"archived": True, "already_recorded": False, "source": source,
+            "branch": target, "commit": commit, "state": "validated",
+            "next": "结束当前 stable 任务；此命令不推送分支或修改探索判决。"}
 
 
 def context_data(branch: str | None = None) -> dict:
@@ -2043,6 +2130,12 @@ def catalog_runtime() -> CatalogRuntime:
         auto_start=catalog_auto_start,
         auto_finish=catalog_auto_finish,
     )
+
+
+def program_command(args: argparse.Namespace) -> dict:
+    if args.program_command == "migrate-analysis":
+        return migrate_analysis(args, catalog_runtime())
+    raise WorkflowError(f"未知程序管理命令: {args.program_command}")
 
 
 def exploration_import(args: argparse.Namespace) -> dict:
@@ -2550,7 +2643,7 @@ def cli_shared_action(args: argparse.Namespace) -> tuple[str, dict] | None:
         action_id = "exploration.prepare_pr"
     elif args.command == "archive-attempt":
         action_id = "exploration.archive"
-    elif args.command == "exploration":
+    elif args.command == "exploration" and args.exploration_command == "import":
         action_id = "exploration.import"
     if action_id is None:
         return None

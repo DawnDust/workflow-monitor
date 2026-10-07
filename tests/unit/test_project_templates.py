@@ -19,11 +19,14 @@ class ProjectTemplateTests(unittest.TestCase):
             self.assertIn("sparks", content)
             self.assertIn("plans", content)
             self.assertIn("tutorials", content)
-            self.assertIn("analysis/<项目>/", content)
+            self.assertIn("program/", content)
+            self.assertTrue("不登记为资料" in content or "不要登记为资料" in content)
             self.assertIn("catalog ID", content)
             self.assertIn("catalog folder index", content)
             self.assertIn("询问用户", content)
-        self.assertIn("output/", research)
+        self.assertIn("program/", research)
+        self.assertIn("program/.gitkeep", files)
+        self.assertNotIn("resources/analysis/.gitkeep", files)
         self.assertEqual(research, MAINTENANCE_RESEARCH)
 
     def test_physics_roadmap_is_optional_guidance_and_managed_template(self):

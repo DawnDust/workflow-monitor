@@ -8,9 +8,11 @@
 
 探索启动使用 `--stage auto|new|none|篇章ID`；新篇章通过 `--new-stage` 同次创建，无需额外维护周期。已有活动篇章时必须明确暂停原因，不自动替换。维护默认不关联篇章，探索不关联时须填写 `--without-stage-reason`。
 
-科研资料放在 `resources/` 的预设或已登记自定义文件夹，并通过 `catalog` 登记。灵感和未成形的问题放入 `sparks`，形成行动的计划放入 `plans`，成型的来源讲解与学习材料放入 `tutorials`；实验代码及依赖按项目放入 `analysis/<项目>/`，生成结果放在项目内的 `output/`。移动已登记资料时保留 catalog ID 并更新路径。每次资料操作前重新读取 `catalog folder index`；归属不明确时先询问用户。`resources/sparks/` 保存自由 Markdown 灵感，未登记内容不触发 `check` 警告；需要检索时可选择性登记。Markdown 公式使用 Markdown/LaTeX 语法。
+科研资料放在 `resources/` 的预设或已登记自定义文件夹，并通过 `catalog` 登记。新建程序、实验代码、Notebook、依赖和运行输出统一放在根目录 `program/`；不登记为资料，也不纳入资料完整性检查或审阅，程序仍由 Git 跟踪。旧项目可运行 `program migrate-analysis` 预览 `resources/analysis/` 迁移，确认后加 `--apply`；迁移保留资料 ID 和关联历史，遇到冲突不覆盖。灵感和未成形的问题放入 `sparks`，形成行动的计划放入 `plans`，成型的来源讲解与学习材料放入 `tutorials`。移动已登记资料时保留 catalog ID 并更新路径。每次资料操作前重新读取 `catalog folder index`；归属不明确时先询问用户。`resources/sparks/` 保存自由 Markdown 灵感，未登记内容不触发 `check` 警告；需要检索时可选择性登记。Markdown 公式使用 Markdown/LaTeX 语法。
 
 只有证据完整且状态为 `validated` 的探索可准备 Squash PR；合并等待用户明确确认。
+
+探索成功并合入 `main` 后，使用稳定任务运行 `exploration archive-validated <exploration-or-archive-branch>` 记录归档。命令确认探索为 `validated`、结束回执存在、提交已包含在 `main` 且分支未被任何 worktree 检出；不修改探索判决、不推送。`archive-attempt` 只用于 `negative`、`inconclusive` 和 `paused`，并在状态不适用时先报告原因。
 
 分支、篇章、探索和资料的审阅覆盖具体事件与文件版本，不能用无关活动刷新内容更新时间。`review list --kind ...` 分类查看，`review show` 默认返回精简变化，完整来源按需展开。正式研究使用变化触发和 14 天提醒，稳定参考不作周期提醒，示例只保留完整性检查；详见 [AUTOMATION.md](AUTOMATION.md)。
 
