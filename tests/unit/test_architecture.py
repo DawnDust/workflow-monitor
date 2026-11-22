@@ -165,8 +165,22 @@ class ArchitectureTests(unittest.TestCase):
     def test_windows_png_icon_exists(self): self.assertTrue((PACKAGE / "ui/windows/assets/workflow_monitor_icon.png").is_file())
     def test_windows_ico_icon_exists(self): self.assertTrue((PACKAGE / "ui/windows/assets/workflow_monitor_icon.ico").is_file())
 
-    def test_core_event_schema_is_five(self): self.assertEqual(SCHEMA_VERSION, 5)
+    def test_core_event_schema_is_six(self): self.assertEqual(SCHEMA_VERSION, 6)
     def test_core_json_is_canonical(self): self.assertEqual(canonical_json({"b": 1, "a": 2}), '{"a":2,"b":1}')
+
+    def test_integrated_research_divergence_retains_sources_without_timestamp_winner(self):
+        from project_hooks.core.stage_versions import annotate_parallel_conflicts
+        stage = {"stage_id": "same", "summary": "latest is not a decision"}
+        state = {"judgment": "latest interpretation"}
+        context = {"stages": [stage], "state": state, "overview_state": state,
+                   "stage_versions": [{"stage_id": "same", "sources": ["working-tree"], "event_ids": ["left", "right"]}]}
+        sources = [{"version": {"event_ids": [event]}} for event in ("left", "right")]
+        project = {"conflicts": [{"requires_user_decision": True, "status": "pending", "object": "stage:same", "sources": sources}]}
+        annotate_parallel_conflicts(context, project)
+        self.assertEqual(stage["judgment_status"], "pending_user_decision")
+        self.assertEqual(stage["unconfirmed_summary"], "latest is not a decision")
+        self.assertEqual(state["unconfirmed_judgment"], "latest interpretation")
+        self.assertEqual(len(stage["parallel_versions"]), 2)
     def test_core_rejects_invalid_event(self):
         with self.assertRaises(RuntimeError): validate_event({"event_id": "bad"})
 

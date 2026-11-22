@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from project_hooks.core.events import SCHEMA_VERSION
+
 import hashlib
 import json
 import subprocess
@@ -162,7 +164,7 @@ class DistributionTests(unittest.TestCase):
         exe = Path(self.temp.name) / "candidate.exe"
         exe.write_bytes(b"candidate")
         report = {"application_version":CURRENT_VERSION,"build_identity":{"build_id":"candidate","mode":"frozen"},
-                  "template_version":TEMPLATE_VERSION,"template_hashes":template_hashes(),"event_schema":{"minimum":1,"maximum":5},"schema_version":5}
+                  "template_version":TEMPLATE_VERSION,"template_hashes":template_hashes(),"event_schema":{"minimum":1,"maximum":SCHEMA_VERSION},"schema_version":SCHEMA_VERSION}
         journal = self.root / "maintenance/events.jsonl"
         before = journal.read_bytes()
         with patch("project_hooks.infrastructure.system.updater.inspect_executable", return_value=report):
@@ -185,7 +187,7 @@ class DistributionTests(unittest.TestCase):
         exe.write_bytes(b"candidate")
         identity = {"build_id":"candidate","mode":"frozen","channel":"test"}
         report = {"application_version":CURRENT_VERSION,"build_identity":identity,"template_version":TEMPLATE_VERSION,
-                  "template_hashes":template_hashes(),"event_schema":{"minimum":1,"maximum":5},"schema_version":5}
+                  "template_hashes":template_hashes(),"event_schema":{"minimum":1,"maximum":SCHEMA_VERSION},"schema_version":SCHEMA_VERSION}
         real_run = subprocess.run
         def run(command, *args, **kwargs):
             if str(command[0]).endswith(".exe"):
@@ -228,7 +230,7 @@ class DistributionTests(unittest.TestCase):
         self.git("-c", "core.hooksPath=.git/no-hooks", "commit", "-m", message)
 
     def init(self, version: str = CURRENT_VERSION) -> None:
-        initialize_project(self.root, version)
+        initialize_project(self.root, version, unified=False)
 
     def test_application_icon_assets_are_present(self) -> None:
         self.assertTrue(PNG_ICON.is_file())
@@ -248,7 +250,7 @@ class DistributionTests(unittest.TestCase):
             "version": CURRENT_VERSION,
             "build_identity": {"build_id": build_id} if build_id else {},
             "launcher_min_version": "1.0.0",
-            "event_schema": {"minimum": 1, "maximum": 5},
+            "event_schema": {"minimum": 1, "maximum": SCHEMA_VERSION},
             "windows_exe": {
                 "file": windows_exe.name,
                 "url": windows_exe.as_uri(),
@@ -310,7 +312,7 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue((self.root / "program" / ".gitkeep").is_file())
         self.assertEqual(
             self.git("config", "--local", "--get", "core.hooksPath").stdout.strip(),
-            ".githooks",
+            (self.root / ".git/workflow-monitor/hooks").as_posix(),
         )
         with self.assertRaises(ProjectManagerError):
             initialize_project(self.root, CURRENT_VERSION)

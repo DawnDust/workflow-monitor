@@ -26,6 +26,9 @@ from .infrastructure.system.updater import (
     software_delivery_report,
 )
 from .ui.web.data_provider import WebWorkbenchDataProvider
+from .infrastructure.system.dashboard_views import DashboardViews
+from .infrastructure.system.project_search import ProjectSearch
+from .infrastructure.system.workflow_views import primary_root, project_snapshot, workflow_snapshot, workflow_content, checkout_model
 
 
 def build_action_service(
@@ -50,14 +53,19 @@ def build_action_service(
 
 def build_web_data_provider(model, classifier, *, branch=None, action_service=None):
     """Wire the read-only Web provider without allowing UI-to-CLI imports."""
-    project_root = model.database_path.parent.parent
+    project_root = primary_root(model.repo_path)
+    if project_root != model.repo_path:
+        model = checkout_model(project_root, "main")
+    def diagnostics():
+        return diagnostics_overview(project_root, application_version=__version__)
+
+    views = DashboardViews(project_root, model, ProjectSearch(project_root, model), diagnostics)
     queries = WorkbenchQueryService(
         snapshot_loader=model.dashboard_snapshot,
         classifier=classifier,
-        diagnostics_loader=lambda: diagnostics_overview(
-            project_root, application_version=__version__,
-        ),
+        diagnostics_loader=diagnostics,
         branch=branch,
+        project_loader=lambda: project_snapshot(project_root, known_primary=True),
     )
     return WebWorkbenchDataProvider(
         project_root,
@@ -66,4 +74,7 @@ def build_web_data_provider(model, classifier, *, branch=None, action_service=No
         update_checker=lambda: check_latest_update(project_root),
         software_delivery_refresher=lambda release: refresh_software_delivery(project_root, release),
         software_delivery_checker=lambda: software_delivery_report(project_root),
+        workflow_loader=lambda workflow_id, task_id: workflow_snapshot(project_root, workflow_id, task_id),
+        workflow_content_loader=lambda workflow_id: workflow_content(project_root, workflow_id),
+        dashboard_loader=views.load,
     )

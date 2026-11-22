@@ -95,6 +95,8 @@ from ...application.action_service import ActionProgress, WorkflowActionService,
 from ...composition import build_action_service
 from ...core.branches import classify_branch as classify_branch_with_policy
 from ...core.privacy import added_json_findings, added_line_categories, sanitize_public_payload
+from ...infrastructure.persistence.project_registry import registry_for, RegistryError
+from ...infrastructure.system import multi_worktree
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -171,6 +173,10 @@ usage: workflow-monitor [-h] [--help-all] [--project PATH] <command> ...
 数据维护:
   db, diagnostics, privacy
 
+多工作树并行:
+  worktree enable --check|--apply, worktree list/remove
+  status/context --all, task pause/resume/heartbeat, events sync, conflict list/show/resolve
+
 内部 Git Hook 命令不显示。
 使用 <命令> --help 查看详细参数。
 """
@@ -232,6 +238,12 @@ def installed_project_version() -> str | None:
 
 
 def command_is_read_only(args: argparse.Namespace) -> bool:
+    if args.command == "workflow":
+        return args.workflow_command != "close" or not args.confirmed
+    if args.command == "worktree":
+        return args.worktree_command == "list" or (args.worktree_command in {"enable", "migrate"} and args.check) or (args.worktree_command == "remove" and not args.confirmed)
+    if args.command == "conflict":
+        return args.conflict_command != "resolve"
     if args.command == "review" or (args.command == "end" and getattr(args, "check_only", False)):
         return True
     if args.command in {None, "version", "context", "check", "status", "branch-status",
@@ -263,11 +275,19 @@ def command_is_read_only(args: argparse.Namespace) -> bool:
 
 def command_requires_project_lock(args: argparse.Namespace) -> bool:
     """The update parent stages a verified EXE; its migration child owns writes."""
-    return not command_is_read_only(args) and args.command != "update"
+    if args.command == "start" and registry_for(ROOT) and (getattr(args, "track", None) in {"research", "experiment", "sandbox"}) and not os.environ.get(multi_worktree.RESERVATION_ENV):
+        return False
+    return not command_is_read_only(args) and args.command not in {"update", "events-merge", "worktree"}
 
 
 def assert_project_version_compatible(args: argparse.Namespace) -> None:
     installed = installed_project_version()
+    registry = registry_for(ROOT) if (ROOT / ".git").exists() else None
+    if registry and registry.setting("unified"):
+        installation = Path(registry.setting("primary_root")) / INSTALLATION_PATH
+        if installation.is_file():
+            metadata = json.loads(installation.read_text(encoding="utf-8"))
+            installed = metadata.get("application_version") or metadata.get("core_version")
     if (installed and installed != __version__ and args.command not in {"_apply-update", "update"}
             and not command_is_read_only(args)):
         raise WorkflowError(
@@ -328,7 +348,7 @@ def sha256(path: Path) -> str:
 
 
 def snapshot() -> dict[str, dict]:
-    ignored_dirs = {".git", ".project_hooks", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
+    ignored_dirs = {".git", ".project_hooks", ".worktrees", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
     result: dict[str, dict] = {}
     for base, dirs, files in os.walk(ROOT):
         dirs[:] = [name for name in dirs if name not in ignored_dirs]
@@ -462,6 +482,13 @@ def check_repository(
 
 
 def active_row(connection: ProjectDatabase | None = None) -> dict | None:
+    registry = registry_for(ROOT) if is_git_repo() else None
+    if registry:
+        row = registry.active(ROOT)
+        if not row:
+            return None
+        state = multi_worktree.decode_state(row)
+        return {"task_id": row["task_id"], "started_at": row["started_at"], "branch": row["branch"], "record_json": canonical_json(state.get("record", {})), "state_updated": int(state.get("checkpoint_recorded", False))}
     owned = connection is None
     connection = connection or database()
     row = connection.latest_active_task()
@@ -470,7 +497,18 @@ def active_row(connection: ProjectDatabase | None = None) -> dict | None:
     return row
 
 
-def read_active() -> dict:
+def read_active(*, include_suspended: bool = False) -> dict:
+    registry = registry_for(ROOT) if is_git_repo() else None
+    if registry:
+        row = registry.active(ROOT)
+        if not row:
+            raise WorkflowError("没有活动任务")
+        state = multi_worktree.decode_state(row)
+        if not state.get("record"):
+            raise WorkflowError("任务启动尚未完成，请运行 task recover")
+        if row["status"] in {"paused", "blocked"} and not include_suspended:
+            raise WorkflowError("任务已暂停或阻塞，请先 task resume")
+        return {**state["record"], "state_updated": bool(state.get("checkpoint_recorded")), "recovery_phase": row["status"], "finish": state.get("finish")}
     try:
         state = load_active_state(state_dir())
     except ActiveTaskError as exc:
@@ -498,6 +536,9 @@ def save_active(
     phase: str = "active",
     finish: dict | None = None,
 ) -> None:
+    registry = registry_for(ROOT) if is_git_repo() else None
+    if registry:
+        registry.save(ROOT, record, state_updated=state_updated, phase=phase, finish=finish)
     save_active_state(
         state_dir(), record, state_updated=bool(state_updated),
         phase=phase, finish=finish,
@@ -510,6 +551,11 @@ def save_active(
 def update_active_flags(*, state_updated: bool = False) -> None:
     record = read_active()
     next_state_updated = bool(record["state_updated"] or state_updated)
+    registry = registry_for(ROOT) if is_git_repo() else None
+    if registry:
+        save_active(_base_active_record(record), state_updated=int(next_state_updated),
+                    phase=record.get("recovery_phase", "active"), finish=record.get("finish"))
+        return
     save_active_state(
         state_dir(), {key: value for key, value in record.items()
                      if key not in {"state_updated", "recovery_phase", "finish"}},
@@ -525,6 +571,9 @@ def update_active_flags(*, state_updated: bool = False) -> None:
 
 
 def delete_active(task_id: str) -> None:
+    registry = registry_for(ROOT) if is_git_repo() else None
+    if registry:
+        registry.finalize(task_id)
     connection = database()
     connection.delete_active_task(task_id)
     connection.close()
@@ -809,9 +858,20 @@ def stage_command(args: argparse.Namespace, pending_events: list | None = None) 
 
 
 def start_task(args: argparse.Namespace) -> dict:
-    if active_row() is not None:
+    registry = registry_for(ROOT)
+    reserved = registry.task(args.task_id) if registry else None
+    if registry and reserved is None:
+        # Internal stable operations (for example catalog ingest) use the same
+        # authority as explicit starts. Public explicit IDs are rejected earlier.
+        if current_branch() != "main" or args.track not in {None, "stable"}:
+            raise WorkflowError("探索任务应从主工作树通过 start 自动建树")
+        day = datetime.now(resolve_timezone(config()["timezone"])).strftime("%Y%m%d")
+        reserved = registry.reserve(ROOT, day, track="stable")
+        args.task_id = reserved["task_id"]
+        registry.bind(ROOT, args.task_id, reserved["token"])
+    if active_row() is not None and not (reserved and reserved["status"] == "starting" and not json.loads(reserved["state_json"]).get("record")):
         raise WorkflowError("已有活动任务，请先执行 status/end")
-    if not TASK_ID_RE.fullmatch(args.task_id):
+    if not TASK_ID_RE.fullmatch(args.task_id) and not (registry and re.fullmatch(r"\d{8}-\d{3,}", args.task_id)):
         raise WorkflowError("task_id 必须为 YYYYMMDD_<slug>_NNN")
     original_branch = current_branch()
     classification = classify_branch(original_branch)
@@ -956,7 +1016,8 @@ def start_task(args: argparse.Namespace) -> dict:
                   for kind, payload in stage_events_payloads)
     if classification["kind"] == "exploration" and (created_branch or initialize_attempt):
         events.append(emit("attempt.started", branch=branch, task_id=args.task_id, payload={
-            "attempt_id": args.task_id, "track": classification["track"], "topic": classification["topic"],
+            "attempt_id": reserved["workflow_id"] if reserved else args.task_id,
+            "track": classification["track"], "topic": classification["topic"],
             "base_commit": base_head, "source_task_id": args.task_id,
             "stage_id": linked_stage["stage_id"] if linked_stage else None,
             "without_stage_reason": args.without_stage_reason,
@@ -986,6 +1047,10 @@ def start_task(args: argparse.Namespace) -> dict:
 
 
 def task_status() -> dict:
+    registry = registry_for(ROOT)
+    row = registry.active(ROOT) if registry else None
+    if row and row["status"] in {"paused", "blocked"}:
+        return {"active": True, "task_id": row["task_id"], "state": row["status"], "branch": row["branch"], "next": "task resume", "checks": check_repository()}
     row = active_row()
     if row is None:
         return {"active": False, "checks": check_repository()}
@@ -1002,6 +1067,14 @@ def task_status() -> dict:
 
 
 def task_recover(args: argparse.Namespace) -> dict:
+    registry = registry_for(ROOT)
+    if registry:
+        row = registry.active(ROOT)
+        if row:
+            state = multi_worktree.decode_state(row)
+            if row["status"] in {"paused", "blocked"}:
+                return {"task_id": row["task_id"], "phase": row["status"], "next": "task resume"}
+            save_active_state(state_dir(), state["record"], state_updated=state.get("checkpoint_recorded", False), phase=row["status"], finish=state.get("finish"))
     try:
         state = load_active_state(state_dir())
     except ActiveTaskError as exc:
@@ -1085,7 +1158,7 @@ def task_recover(args: argparse.Namespace) -> dict:
 
 
 def task_abandon(args: argparse.Namespace) -> dict:
-    record = read_active()
+    record = read_active(include_suspended=True)
     branch = assert_active_branch(record)
     receipts = [receipt_summary(item) for item in load_test_receipts(ROOT, record["task_id"])]
     event = emit(
@@ -1410,6 +1483,14 @@ def install_git_hook(force: bool = False) -> str:
     if not is_git_repo():
         return "非 Git 仓库，已初始化数据库并跳过 pre-commit 安装"
     configured = run_git(["config", "--local", "--get", "core.hooksPath"], check=False).stdout.strip()
+    registry = registry_for(ROOT)
+    if registry and registry.setting("unified"):
+        shared = multi_worktree.repository_context(ROOT).shared_dir / "hooks"
+        if configured != shared.as_posix():
+            multi_worktree.install_shared_hooks(ROOT)
+        if not (ROOT / INSTALLATION_PATH).exists():
+            write_json(ROOT / INSTALLATION_PATH, installation_record(ROOT, __version__))
+        return f"已连接共享提交检查，并初始化 SQLite: {database_path()}"
     if configured and configured != TRACKED_HOOKS_DIR and not force:
         raise WorkflowError(f"本仓库已有 core.hooksPath={configured}；使用 --force 前请先人工合并")
     hook = ROOT / TRACKED_HOOKS_DIR / "pre-commit"
@@ -1424,7 +1505,8 @@ def install_git_hook(force: bool = False) -> str:
         hook.chmod(0o755)
     except OSError:
         pass
-    run_git(["config", "--local", "core.hooksPath", TRACKED_HOOKS_DIR])
+    if configured != TRACKED_HOOKS_DIR:
+        run_git(["config", "--local", "core.hooksPath", TRACKED_HOOKS_DIR])
     installation = ROOT / INSTALLATION_PATH
     if not installation.exists():
         write_json(installation, installation_record(ROOT, __version__))
@@ -1508,8 +1590,13 @@ def _finish_signature(args: argparse.Namespace) -> str:
 
 
 def _fixed_finish_event_ids(task_id: str, events: list[dict]) -> None:
+    registry = registry_for(ROOT)
+    operation = ""
+    if registry:
+        task = registry.task(task_id)
+        operation = ":" + str(task["revision"])
     for index, event in enumerate(events):
-        material = f"{task_id}:finish:{index}:{event['event_type']}"
+        material = f"{task_id}{operation}:finish:{index}:{event['event_type']}"
         event["event_id"] = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
 
@@ -1594,6 +1681,9 @@ def finish_task(args: argparse.Namespace) -> dict:
     # The report owns the final checkpoint, so finish must not write it again.
     record = read_active()
     stage_error = None
+    if registry_for(ROOT) and (args.result == "blocked" or args.attempt_state == "paused"):
+        return multi_worktree.change_lifecycle(ROOT, record["task_id"], "blocked" if args.result == "blocked" else "paused",
+                    reason=args.blocker or args.note, evidence=args.evidence, next_steps=args.next)
     try:
         checked_review = stage_review(record, args.stage_review)["result"]
     except WorkflowError as exc:
@@ -1664,7 +1754,7 @@ def finish_task(args: argparse.Namespace) -> dict:
             raise WorkflowError("探索任务结束时必须显式使用 --attempt-state")
         if args.attempt_state == "validated" and (not attempt["hypothesis"] or not attempt["evidence"] or not attempt["conclusion"]):
             raise WorkflowError("validated 尝试必须填写 hypothesis、evidence 和 conclusion")
-        archive = f"archive/{attempt['track']}/{attempt['topic']}" if args.attempt_state in {"negative", "inconclusive", "paused"} else None
+        archive = f"archive/{branch}" if args.attempt_state in {"negative", "inconclusive", "paused"} else None
         events.append(emit("attempt.state_changed", branch=branch, task_id=args.task_id, payload={
             "attempt_id": attempt["attempt_id"], "state": args.attempt_state, "archive_branch": archive,
         }))
@@ -1812,6 +1902,7 @@ def attempt_pr_summary(attempt: dict, events: list[dict] | None = None) -> str:
 
 
 def prepare_pr() -> dict:
+    multi_worktree.assert_integratable(ROOT, current_branch())
     assert_no_active_task()
     check_repository(raise_on_error=True)
     assert_clean_worktree()
@@ -1838,6 +1929,12 @@ def prepare_pr() -> dict:
 def archive_attempt() -> dict:
     assert_no_active_task()
     branch = current_branch()
+    registry = registry_for(ROOT)
+    if registry and registry.setting("unified"):
+        workflow = next((item for item in registry.workflows() if item["branch"] == branch), None)
+        if workflow:
+            from ...infrastructure.system.workflow_views import close_workflow
+            return close_workflow(ROOT, workflow["workflow_id"], confirmed=True)
     attempt = get_attempt(branch)
     if classify_branch(branch)["kind"] != "exploration" or not attempt:
         raise WorkflowError("archive-attempt 只能在有效探索分支运行")
@@ -1868,6 +1965,13 @@ def archive_validated_exploration(branch_ref: str) -> dict:
     default = branch_policy()["default_branch"]
     if current != default or record["git"]["track"] != "stable":
         raise WorkflowError(f"成功探索归档必须在 {default} 的 stable 活动任务中运行")
+    registry = registry_for(ROOT)
+    if registry and registry.setting("unified"):
+        workflow = next((item for item in registry.workflows()
+                         if branch_ref in {item["branch"], "archive/" + item["branch"], item["archive_branch"]}), None)
+        if workflow and workflow["workflow_id"] != "main":
+            from ...infrastructure.system.workflow_views import close_workflow
+            return close_workflow(ROOT, workflow["workflow_id"], confirmed=True)
 
     requested = clean_text(branch_ref, "探索分支", 300)
     assert requested is not None
@@ -1897,13 +2001,46 @@ def archive_validated_exploration(branch_ref: str) -> dict:
 
     ref = source if has_source else target
     commit = run_git(["rev-parse", f"{ref}^{{commit}}"]).stdout.strip()
-    main_commit = run_git(["rev-parse", f"{default}^{{commit}}"]).stdout.strip()
     attempt = get_attempt(source)
     if not attempt or attempt["state"] != "validated":
         state = attempt["state"] if attempt else "无有效探索记录"
         raise WorkflowError(f"成功归档仅适用于状态为 validated 的探索；当前状态：{state}")
     if not has_finished_receipt(source, "validated"):
         raise WorkflowError("探索缺少 validated 结束回执；拒绝归档")
+
+    events = load_events(journal_path())
+    validated_records = []
+    for event in events:
+        payload = event.get("payload") or {}
+        if (event["event_type"] != "exploration.recorded"
+                or event.get("branch") != source
+                or payload.get("result") != "validated"):
+            continue
+        if payload.get("attempt_id") == attempt["attempt_id"]:
+            validated_records.append(event)
+            continue
+        # Schema v3 exploration records can predate both attempt_id and
+        # exploration_id. Accept them only when a same-task validated state
+        # transition links the record to this exact attempt; the source-commit
+        # check below still verifies its ID.
+        record_task_id = event.get("task_id")
+        if (payload.get("attempt_id")
+                or payload.get("exploration_id") not in {None, source}
+                or not record_task_id):
+            continue
+        linked_validated_transition = any(
+            candidate["event_type"] == "attempt.state_changed"
+            and candidate.get("branch") == source
+            and candidate.get("task_id") == record_task_id
+            and (candidate.get("payload") or {}).get("attempt_id") == attempt["attempt_id"]
+            and (candidate.get("payload") or {}).get("state") == "validated"
+            for candidate in events
+        )
+        if linked_validated_transition:
+            validated_records.append(event)
+    if not validated_records:
+        raise WorkflowError("缺少 validated 探索记录；拒绝归档")
+    validated_record_id = validated_records[-1]["event_id"]
 
     matching = [event for event in load_events(journal_path())
                 if event["event_type"] == "attempt.archived"
@@ -1913,15 +2050,16 @@ def archive_validated_exploration(branch_ref: str) -> dict:
         return {"archived": True, "already_recorded": True, "source": source,
                 "branch": target, "commit": commit, "state": "validated"}
 
-    if run_git(["merge-base", "--is-ancestor", commit, main_commit], check=False).returncode == 0:
-        integration = "ancestor"
-    else:
-        merged = run_git(["merge-tree", "--write-tree", default, ref], check=False)
-        main_tree = run_git(["rev-parse", f"{default}^{{tree}}"]).stdout.strip()
-        merged_tree = merged.stdout.splitlines()[0].strip() if merged.stdout.splitlines() else ""
-        if merged.returncode != 0 or merged_tree != main_tree:
-            raise WorkflowError(f"探索分支提交尚未完整包含在 {default} 中；拒绝归档")
-        integration = "squash-equivalent"
+    integration_evidence = git_ops.integration_evidence(
+        ROOT, default, ref,
+        required_path=journal_path().resolve().relative_to(ROOT).as_posix(),
+        required_text=validated_record_id,
+    )
+    if integration_evidence.get("reason") == "source_record_missing":
+        raise WorkflowError("探索分支提交未包含其 validated 探索记录；拒绝归档")
+    if integration_evidence["state"] != "merged":
+        raise WorkflowError(f"探索分支提交尚未完整包含在 {default} 中；拒绝归档")
+    integration = integration_evidence["method"]
 
     if has_source:
         run_git(["branch", "-m", source, target])
@@ -1929,16 +2067,24 @@ def archive_validated_exploration(branch_ref: str) -> dict:
         "attempt.archived", branch=source, task_id=record["task_id"],
         payload={"attempt_id": attempt["attempt_id"], "archive_branch": target,
                  "disposition": "validated-integrated", "integrated_commit": commit,
-                 "integration": integration},
+                 "integration": integration,
+                 "integration_proof_commit": integration_evidence["proof_commit"]},
     )])
     return {"archived": True, "already_recorded": False, "source": source,
             "branch": target, "commit": commit, "state": "validated",
+            "integration": integration,
+            "integration_proof_commit": integration_evidence["proof_commit"],
             "next": "结束当前 stable 任务；此命令不推送分支或修改探索判决。"}
 
 
 def context_data(branch: str | None = None) -> dict:
     try:
+        project = multi_worktree.snapshot(ROOT)
         result = read_model().context(branch)
+        if project:
+            from ...core.stage_versions import annotate_parallel_conflicts
+            annotate_parallel_conflicts(result, project)
+            result["project_monitor"] = project
         return result
     except ReadModelError as exc:
         raise WorkflowError(str(exc)) from exc
@@ -2409,6 +2555,15 @@ def _next_dashboard_task_id() -> str:
     raise WorkflowError("当天的 Dashboard 自动任务编号已用尽")
 
 
+def workflow_hook_installed() -> bool:
+    configured = run_git(["config", "--local", "--get", "core.hooksPath"], check=False).stdout.strip()
+    registry = registry_for(ROOT)
+    if registry and registry.setting("unified"):
+        expected = registry.path.parent / "hooks"
+        return bool(configured) and (ROOT / configured).resolve() == expected.resolve() and (expected / "pre-commit").is_file()
+    return configured == TRACKED_HOOKS_DIR
+
+
 def dashboard_action_state() -> dict:
     """Return the small mutable-state projection used by Dashboard actions."""
     branch = current_branch()
@@ -2458,7 +2613,6 @@ def dashboard_action_state() -> dict:
     ).git_state(branch_policy()["default_branch"])
     attempt = get_attempt(branch) if classification["kind"] == "exploration" else None
     installed = installed_project_version()
-    hook = run_git(["config", "--local", "--get", "core.hooksPath"], check=False).stdout.strip()
     try:
         health_errors = check_repository()
     except Exception as exc:
@@ -2476,7 +2630,7 @@ def dashboard_action_state() -> dict:
         "application_version": __version__,
         "build_identity": build_identity(),
         "project_version": installed,
-        "installed": hook == TRACKED_HOOKS_DIR,
+        "installed": workflow_hook_installed(),
         "frozen": is_frozen(),
         "branch": branch,
         "classification": classification,
@@ -2515,12 +2669,24 @@ def dashboard_execute_action(
     if action_id == "task.start":
         values = dict(fields)
         requested_task_id = values.pop("_task_id", None)
-        return start_task(_action_namespace(
+        arguments = _action_namespace(
             values,
             task_id=requested_task_id or _next_dashboard_task_id(), out_of_scope=None, topic=None,
-            task_size="small", git_commit="auto", track="stable",
+            task_size="small", git_commit="auto", track=None,
             verification_profile="auto", without_stage_reason=None,
-        ))
+        )
+        registry = registry_for(ROOT)
+        if registry and not registry.task(arguments.task_id):
+            from .multi_worktree_commands import start_action
+            launched = start_action(ROOT, arguments, requested_task_id)
+            if launched is not None:
+                return launched
+        result = start_task(arguments)
+        if registry:
+            task = registry.task(result["task_id"])
+            result.update(workflow_id=task["workflow_id"], worktree=task["path"],
+                          entrypoint=str(Path(registry.setting("primary_root")) / "workflow-monitor.exe"))
+        return result
     if action_id == "state.update":
         return state_update(_action_namespace(
             fields, goal=None, judgment=None, breakpoint=None, blocker=None,
@@ -2633,6 +2799,8 @@ def cli_shared_action(args: argparse.Namespace) -> tuple[str, dict] | None:
     elif args.command == "stage" and args.stage_command in {"start", "update"}:
         action_id = f"stage.{args.stage_command}"
     elif args.command == "task":
+        if args.task_command in {"pause", "resume", "heartbeat"} or getattr(args, "task_id", None):
+            return None
         if args.task_command == "abandon":
             action_id = "task.abandon"
         elif args.skip_auto_commit:

@@ -112,6 +112,8 @@ def compact_result(output: dict[str, Any], *, task_id: str | None = None) -> dic
         "task_id", "attempt_id", "result", "branch", "track", "state", "stage_review", "git",
         "warnings", "deprecation_warnings", "next_actions", "next_step", "changed_count", "logs", "review_summary",
         "pending_resources", "resource_blockers", "verification_problems", "blocker", "recovery_conditions",
+        "worktree", "base_commit", "next", "sync_failures",
+        "workflow_id", "entrypoint",
     ))
     result.setdefault("task_id", task_id)
     result.setdefault("result", "success")

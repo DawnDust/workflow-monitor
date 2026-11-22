@@ -276,6 +276,25 @@ class WebDashboardBridgeTests(unittest.TestCase):
         self.assertTrue(failed["data"]["stale"])
         self.assertEqual(failed["data"]["snapshot"]["branch"], "experiment/web-dashboard-v2")
 
+    def test_page_refresh_is_lazy_and_keeps_its_own_last_good_snapshot(self) -> None:
+        provider = FakeProvider(self.root)
+        bridge = WebDashboardBridge(lambda: provider, project_root=self.root)
+        with patch.object(provider, "load_view", create=True) as load:
+            bridge.ready()
+            load.assert_not_called()
+            load.return_value = {"branch": "main", "context": {"project_profile": {"big_goal": "Verify"}}}
+            first = bridge.refresh_view("overview")
+            self.assertTrue(first["ok"])
+            load.assert_called_once_with("overview", force=False)
+            load.side_effect = OSError("temporarily unavailable")
+            previous = bridge.refresh_view("overview", first["data"]["state_token"])
+            self.assertTrue(previous["data"]["stale"])
+            self.assertEqual(previous["data"]["updated_at"], first["data"]["updated_at"])
+            self.assertEqual(previous["data"]["snapshot"]["context"]["project_profile"]["big_goal"], "Verify")
+            failure = bridge.refresh_view("search")
+            self.assertIsNone(failure["data"]["snapshot"])
+            self.assertEqual(bridge.refresh_view("invalid")["error"]["code"], "invalid_parameters")
+
     def test_refresh_calls_are_coalesced(self) -> None:
         provider = FakeProvider(self.root, delay=.05)
         bridge = WebDashboardBridge(provider)
@@ -305,13 +324,13 @@ class WebDashboardBridgeTests(unittest.TestCase):
         bridge = WebDashboardBridge(FakeProvider(self.root))
 
         self.assertTrue(bridge.ready()["data"]["physics_roadmap_available"])
-        with patch("project_hooks.ui.web.bridge.open_file_default") as opener:
+        with patch("project_hooks.infrastructure.system.external_navigation.open_file_default") as opener:
             result = bridge.open_physics_research_roadmap()
         self.assertTrue(result["ok"])
         self.assertEqual(result["data"]["path"], "maintenance/PHYSICS_RESEARCH_ROADMAP.md")
         opener.assert_called_once_with(roadmap.resolve())
 
-        with patch("project_hooks.ui.web.bridge.open_file_default", side_effect=OSError("no default app")):
+        with patch("project_hooks.infrastructure.system.external_navigation.open_file_default", side_effect=OSError("no default app")):
             failed = bridge.open_physics_research_roadmap()
         self.assertFalse(failed["ok"])
         self.assertEqual(failed["error"]["code"], "open_failed")
@@ -329,7 +348,7 @@ class WebDashboardBridgeTests(unittest.TestCase):
         source = sample_snapshot()
         source["catalog_folders"] = [{"folder_id": "nested", "path": "resources/theory/nested", "status": "active"}]
         provider = FakeProvider(self.root)
-        with patch.object(provider, "load", return_value=source), patch("project_hooks.ui.web.bridge.open_directory") as opener:
+        with patch.object(provider, "load", return_value=source), patch("project_hooks.infrastructure.system.external_navigation.open_directory") as opener:
             bridge = WebDashboardBridge(provider)
             bridge.bootstrap()
             self.assertTrue(bridge.open_resource_directory("resources/theory/nested")["ok"])
@@ -347,7 +366,7 @@ class WebDashboardBridgeTests(unittest.TestCase):
         })
         provider = FakeProvider(self.root)
         with patch.object(provider, "load", return_value=source), patch(
-            "project_hooks.ui.web.bridge.open_directory"
+            "project_hooks.infrastructure.system.external_navigation.open_directory"
         ) as opener:
             bridge = WebDashboardBridge(provider)
             bridge.bootstrap()
@@ -384,7 +403,7 @@ class WebDashboardIntegrationTests(unittest.TestCase):
 
     def test_static_assets_are_local_es_modules_and_packaged(self) -> None:
         root = asset_root()
-        for name in ("index.html", "styles.css", "settings.css", "app.js", "state.js", "i18n.js"):
+        for name in ("index.html", "styles.css", "settings.css", "app.js", "state.js", "i18n.js", "workspace-view.js"):
             self.assertTrue((root / name).is_file(), name)
         html = (root / "index.html").read_text(encoding="utf-8")
         script = (root / "app.js").read_text(encoding="utf-8")
@@ -405,6 +424,14 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('src="workflow-monitor-mark.svg"', html)
         self.assertNotIn('brand-mark"><i', html)
         self.assertIn('from "./i18n.js"', script)
+        self.assertIn('from "./workspace-view.js"', script)
+        self.assertIn('["workflow","⌁","工作流","Workflow"],["workspaces"', script)
+        workspace = (root / "workspace-view.js").read_text(encoding="utf-8")
+        self.assertIn("Search this workspace", workspace)
+        self.assertNotIn("get_workflow_snapshot", workspace)
+        self.assertIn("refresh_view", script)
+        self.assertIn('data-workspace-row', workspace)
+        self.assertNotIn('workflow-back', script)
         self.assertNotIn("copy_workbench_items", script)
         self.assertNotIn("data-workbench-kind", script)
         self.assertNotIn("purpose-chips", script)
@@ -484,13 +511,13 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         self.assertIn('disclosure("field-sources",l("字段来源","Field sources")', advanced_source)
         self.assertIn('verification:new Set(["context"])', script)
         self.assertIn('"field-sources":new Set(["context"])', script)
-        self.assertIn('settings:new Set(["status_glossary","context"', script)
+        self.assertIn('state.settingsSection !== "advanced"', script)
         self.assertIn("selectedResourcePath", script)
         resource_script = (asset_root() / "resource-view.js").read_text(encoding="utf-8")
         self.assertIn("folder-list", resource_script)
         self.assertIn("resource-breadcrumbs", resource_script)
         self.assertIn("resourceDetails", script)
-        self.assertIn("resource_index", script)
+        self.assertIn("resource_index", resource_script)
         self.assertIn("data-folder-path", script)
         self.assertIn("data-open-resource", script)
         self.assertIn("x.work_summary", script)
@@ -534,12 +561,12 @@ class WebDashboardIntegrationTests(unittest.TestCase):
         guide.parent.mkdir(exist_ok=True)
         guide.write_text("# Optional guide", encoding="utf-8")
         self.assertTrue(bridge.ready()["data"]["research_understanding_guide_available"])
-        with patch("project_hooks.ui.web.bridge.open_file_default") as opener:
+        with patch("project_hooks.infrastructure.system.external_navigation.open_file_default") as opener:
             self.assertTrue(bridge.open_research_understanding_guide()["ok"])
             opener.assert_called_once_with(guide.resolve())
-        with patch("project_hooks.ui.web.bridge.open_file_default", side_effect=OSError("unavailable")):
+        with patch("project_hooks.infrastructure.system.external_navigation.open_file_default", side_effect=OSError("unavailable")):
             self.assertEqual(bridge.open_research_understanding_guide()["error"]["code"], "open_failed")
-        with patch("project_hooks.ui.web.bridge.read_build_notes", return_value={"available":False,"markdown":"此构建未提供测试说明"}):
+        with patch("project_hooks.infrastructure.system.build_notes.read_build_notes", return_value={"available":False,"markdown":"此构建未提供测试说明"}):
             self.assertFalse(bridge.get_test_build_notes()["data"]["available"])
 
     @unittest.skipUnless(shutil.which("node"), "Node is a development-only optional test runtime")

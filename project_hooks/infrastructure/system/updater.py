@@ -357,6 +357,7 @@ def run_update(
     selected = cache_executable(content, target, root)
     env = os.environ.copy()
     env[ACTIVE_ENV] = "1"
+    env.pop("PROJECT_HOOKS_PORTABLE_ROOT", None)
     env[UPDATE_CHILD_ENV] = "1"
     completed = subprocess.run(
         [
@@ -473,6 +474,13 @@ def run_local_update(root: Path, executable: Path, *, check_only: bool = False) 
                "source_message": "已一致，无需源码修改" if match is True else "源码尚未同步" if match is False else "此项目不是软件源码仓库",
                "template_version": report["template_version"], "blockers": blockers,
                **_template_preview(root, report["template_hashes"])}
+    if report["template_version"] >= 19:
+        from .worktree_migration import plan_migration
+        layout = plan_migration(root)
+        preview["linked_worktree_migration"] = layout
+        if layout["blockers"]:
+            blockers.extend(str(item.get("reason") or item) for item in layout["blockers"])
+            preview["status"] = "blocked"
     if check_only:
         return preview
     if blockers:

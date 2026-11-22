@@ -11,8 +11,8 @@ from .errors import StoreError
 from .privacy import sanitize_public_payload
 
 
-SCHEMA_VERSION = 5
-SUPPORTED_EVENT_SCHEMA_VERSIONS = (1, 2, 3, 4, 5)
+SCHEMA_VERSION = 6
+SUPPORTED_EVENT_SCHEMA_VERSIONS = (1, 2, 3, 4, 5, 6)
 
 
 def resolve_timezone(name: str):

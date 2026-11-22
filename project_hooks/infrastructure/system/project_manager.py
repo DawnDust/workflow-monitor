@@ -24,10 +24,10 @@ from ..persistence.store import (
     validate_projection,
 )
 from ..persistence.database import integrity_check, latest_active_task_id
-from .runtime import runtime_root, write_pointer, cached_executable
+from .runtime import write_pointer, cached_executable, legacy_runtime_root
 
 
-TEMPLATE_VERSION = 17
+TEMPLATE_VERSION = 19
 INSTALLATION_PATH = Path(".codex/project-maintenance-installation.json")
 CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
 AGENTS_BEGIN = "<!-- project-maintenance-hooks:begin -->"
@@ -51,7 +51,7 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 ## 项目维护生命周期
 
 - 项目生命周期操作和维护状态写入使用仓库根目录的 `.\\workflow-monitor.exe`；文件读取、搜索和测试使用相应工具。
-- 新 clone 或 worktree 首次使用时，将 `workflow-monitor.exe` 放到仓库根目录并运行 `.\\workflow-monitor.exe install`。
+- 在主项目保留一个 `workflow-monitor.exe` 入口。任务工作区通过主入口的 `--project <工作区路径>` 调用生命周期。
 - 每次任务先运行 `.\\workflow-monitor.exe context --view brief --format markdown`，按 `core_read_order` 读取尚未掌握或已变更的规范，首次写入前运行 `start`。
 - 纯只读咨询和审查不启动写入生命周期，也不调用 `end`；准备首次写入时再判断轨道。已启动的任务必须通过 `end` 或规定的放弃流程收尾。
 - 用户只需用自然语言描述任务；AI 提取目标、验收和证据，任务 ID、时间、分支、状态令牌和安全默认值由工作流代码处理。
@@ -79,6 +79,13 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - `start` 保存既有资料问题；AI 在 start/report/end 用 depends_on、deliverable 登记直接依赖和交付物（catalog:ID 或 path:相对路径）。无关且未恶化的既有资料问题保留待处理，不阻止 completed；任务交付物和直接依赖缺失仍阻止完成。全局 check 继续报告全部问题。
 - 确实受阻时使用 `end --result blocked --blocker <原因> --evidence <证据> --next <恢复条件>`。检查失败保留活动任务，不默认 abandon；只有用户明确放弃才运行 task abandon。所有修复通过工作流命令或结构化服务追加事件，不直接编辑 SQLite 或既有事件，历史 abandoned 不改写。
 
+## 多工作树并行
+
+- 新项目默认统一管理工作区。旧项目升级前预览移动方案，所有未结束任务都需先结束。主树探索 start 自动返回工作流、任务和工作区路径。
+- 每树最多关联一个未结束任务。任务结束后，后续任务用 `start --workflow <ID>` 复用分支和目录。暂停或阻塞时使用 `task resume`。
+- `status --all` 与 Dashboard 汇总项目任务；`conflict list/show` 提供文件、篇章和资料的重叠来源。AI 比较证据并提出方案，研究判断及结论取舍由用户本人最终确认。
+- 同 ID 同内容事件机械去重；分歧保留版本，不按更新时间选结论。清理、迁移和正式合并继续取得用户确认。
+
 ## Codex 简短调用
 
 - 默认读取 `context --view brief --format markdown`；只查结束门禁使用 `context --view verification`，追溯全部事实使用 `context --view full`。篇章和交接详情按需使用 `stage show`、`history`。
@@ -98,6 +105,7 @@ __pycache__/
 build/
 dist/
 /workflow-monitor.exe
+/.worktrees/
 /diagnostics-export/
 # project-maintenance-hooks:end"""
 
@@ -152,8 +160,8 @@ MAINTENANCE_RESEARCH = """# 科研与研究篇章规范
 
 MAINTENANCE_OPERATIONS = """# 安装、恢复与交付
 
-- 新 clone/worktree：放置根目录 EXE，运行 `.\\workflow-monitor.exe install`。
-- 升级：在无活动任务、干净且同步的 main 上运行 `.\\workflow-monitor.exe update`。首次写入 Schema v5 后不可降级到仅支持 v1-v4 的版本。
+- 新 clone：在主目录放置唯一 EXE，运行 `.\\workflow-monitor.exe install`。
+- 升级：在无活动任务、干净且同步的 main 上运行 `.\\workflow-monitor.exe update`。首次写入 Schema v6 后不可降级到仅支持 v1-v5 的版本。
 - 恢复：异常中断运行 `task recover`；明确放弃运行 `task abandon --reason <原因>`。
 - 诊断：使用 `diagnostics status/export`；诊断不自动上传。
 - 验证：完成一批相关代码修改后使用 report --verify fast；结束时自动补齐同一软件输入指纹的回执（软件改动 fast/full，release profile 为 fast/release；纯文档和治理改动使用内置检查），正常收尾使用 `end` 内置检查，不重复运行独立 `check`；专项诊断可按需检查，涉及持久化或本机交付时运行 `db verify`。
@@ -168,7 +176,7 @@ LEGACY_MAINTENANCE_README = """# 项目维护规范
 
 ## 日常流程
 
-所有命令使用仓库根目录的 `.\\workflow-monitor.exe`。
+所有命令使用主项目的 `.\\workflow-monitor.exe`。
 
 1. 运行 `.\\workflow-monitor.exe context --format markdown`。
 2. 首次写入前运行 `.\\workflow-monitor.exe start ...`。
@@ -382,7 +390,7 @@ def require_git_repository(root: Path) -> None:
         raise ProjectManagerError("目标目录必须已经是 Git 仓库")
 
 
-def initialize_project(root: Path, application_version: str) -> dict:
+def initialize_project(root: Path, application_version: str, *, unified=True) -> dict:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     require_git_repository(root)
@@ -441,11 +449,19 @@ def initialize_project(root: Path, application_version: str) -> dict:
     configured = git(root, "config", "--local", "core.hooksPath", ".githooks")
     if configured.returncode != 0:
         raise ProjectManagerError(configured.stderr.strip() or "无法配置 Git hooksPath")
+    if unified:
+        from .multi_worktree import initialize_unified
+        initialize_unified(root)
     return {"status": "initialized", "project": str(root), "application_version": application_version}
 
 
 def preflight_update(root: Path) -> None:
     require_git_repository(root)
+    from ..persistence.project_registry import registry_for, OCCUPIED
+    registry = registry_for(root)
+    active = [item for item in registry.tasks() if item["status"] in OCCUPIED] if registry else []
+    if active:
+        raise ProjectManagerError("项目工作树仍有未结束任务: " + ", ".join(item["task_id"] + " @ " + item["path"] for item in active))
     installation = root / INSTALLATION_PATH
     if not installation.is_file():
         raise ProjectManagerError("缺少安装清单；请先使用当前 EXE执行 .\\workflow-monitor.exe install 进行接管")
@@ -541,7 +557,9 @@ def validate_project(root: Path) -> None:
         raise ProjectManagerError(f"升级后缺少程序目录: {PROGRAM_DIRECTORY}")
     load_events(root / "maintenance/events.jsonl")
     configured = git(root, "config", "--local", "--get", "core.hooksPath").stdout.strip()
-    if configured != ".githooks":
+    from ..git.worktrees import repository_context
+    shared_hooks = repository_context(root).shared_dir / "hooks"
+    if configured not in {".githooks", shared_hooks.as_posix()}:
         raise ProjectManagerError("升级后 core.hooksPath 不是 .githooks")
 
 
@@ -599,10 +617,17 @@ def apply_project_update(
 ) -> dict:
     root = root.resolve()
     preflight_update(root)
+    from .worktree_migration import plan_migration, migrate_project
+    workspace_plan = plan_migration(root)
+    if workspace_plan["blockers"]:
+        raise ProjectManagerError("工作区迁移受阻: " + canonical_json(workspace_plan["blockers"]))
+    staged_in_legacy = False
     if executable_path is not None:
         expected_executable = cached_executable(root, target_version, cache_build_id).resolve()
         executable_path = Path(executable_path).resolve()
-        if executable_path != expected_executable or not executable_path.is_file():
+        legacy_executable = cached_executable(root, target_version, cache_build_id, legacy=True).resolve()
+        staged_in_legacy = executable_path == legacy_executable
+        if executable_path not in {expected_executable, legacy_executable} or not executable_path.is_file():
             raise ProjectManagerError("迁移 EXE 不在目标版本的本地缓存位置")
         digest_file = executable_path.parent / ".exe-sha256"
         try:
@@ -619,7 +644,7 @@ def apply_project_update(
     old_records = installation.get("managed_files", {})
     database = root / ".project_hooks/maintenance.sqlite3"
     paths = [root / CONFIG_PATH, install_path, root / "maintenance/events.jsonl",
-             runtime_root(root) / "current.json",
+             legacy_runtime_root(root) / "current.json",
              database, Path(str(database) + "-wal"), Path(str(database) + "-shm")]
     paths.extend(root / item for item in template_files())
     paths.extend((root / "AGENTS.md", root / ".gitignore", root / ".gitattributes"))
@@ -704,8 +729,8 @@ def apply_project_update(
         if integrity != "ok":
             raise ProjectManagerError(f"SQLite integrity_check: {integrity}")
         validate_project(root)
-        if executable_path is not None:
-            write_pointer(target_version, root, executable_path, build_id=cache_build_id)
+        if executable_path is not None and staged_in_legacy:
+            write_pointer(target_version, root, executable_path, build_id=cache_build_id, legacy=True)
         try:
             from .diagnostics import cleanup_after_update
             diagnostic_cleanup = cleanup_after_update(
@@ -713,7 +738,7 @@ def apply_project_update(
             )
         except Exception as exc:
             diagnostic_cleanup = {"status": "failed", "error_type": type(exc).__name__, "records": 0}
-        return {
+        result = {
             "status": "needs-attention" if conflicts else "updated",
             "project": str(root),
             "application_version": target_version,
@@ -731,3 +756,17 @@ def apply_project_update(
         raise
     finally:
         shutil.rmtree(backup, ignore_errors=True)
+    try:
+        result["linked_worktree_migration"] = migrate_project(root)
+        if executable_path is not None:
+            shared = cached_executable(root, target_version, cache_build_id)
+            if executable_path != shared:
+                shared.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(executable_path, shared)
+                shutil.copy2(executable_path.parent / ".exe-sha256", shared.parent / ".exe-sha256")
+            write_pointer(target_version, root, shared, build_id=cache_build_id)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        result["status"] = "needs-attention"
+        result["linked_worktree_migration"] = {"status": "incomplete", "reason": str(exc),
+                                              "next": "worktree migrate --apply"}
+    return result

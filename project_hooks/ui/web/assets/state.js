@@ -82,7 +82,7 @@ export function mergeStatusOptions(records, kind) {
   return statusOptions(records, kind, mergeStatusCode, ["all"]);
 }
 
-export function searchRecords(records, {kind="all", archive="unarchived", merge="all", query=""} = {}) {
+export function searchRecords(records, {kind="all", archive="unarchived", merge="all", query="", scopeSelected=false} = {}) {
   const archiveOptions = archiveStatusOptions(records, kind);
   const mergeOptions = mergeStatusOptions(records, kind);
   if (!archiveOptions.includes(archive)) archive = "unarchived";
@@ -99,6 +99,6 @@ export function searchRecords(records, {kind="all", archive="unarchived", merge=
   ].join(" ")}));
   const scoped = filterRecords(searchable, query, ["title","summary","search_text","branch","kind_label","status","status_code","archive_status","merge_status","search_status_text"]);
   const typed = kind === "all" ? scoped : scoped.filter(x => x.kind === kind);
-  const hasCriteria = Boolean(query) || kind !== "all" || archive !== "unarchived" || merge !== "all";
+  const hasCriteria = scopeSelected || Boolean(query) || kind !== "all" || archive !== "unarchived" || merge !== "all";
   return {archive, merge, archiveOptions, mergeOptions, scoped, hasCriteria, items:hasCriteria ? typed : []};
 }

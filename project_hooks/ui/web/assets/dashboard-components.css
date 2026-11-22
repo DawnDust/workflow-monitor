@@ -21,3 +21,62 @@
 .resource-layout .badge.warn{color:var(--amber);background:color-mix(in srgb,var(--amber) 12%,transparent)}
 
 .disposition-control{grid-column:1/-1;display:flex;align-items:center;gap:10px;font-size:11px;color:var(--muted)}.disposition-control select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px;max-width:100%}.badge.disposition.archived{background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber)}
+
+.workspace:has(.workspace-monitor) { margin-block: 0 }
+.workspaces-status { flex-wrap: wrap; gap: 7px 16px; justify-content: flex-start }
+.workspace-running { display: inline-flex; align-items: center; color: var(--text) }
+.workspaces-status > .workspace-alert:last-child, .workspaces-status > .workspace-alert {
+  display: inline-flex; gap: 5px; margin: 0; align-items: center;
+  font: inherit; color: var(--amber)
+}
+.workspace-monitor { color-scheme: dark; padding: 14px }
+.app[data-theme="light"] .workspace-monitor { color-scheme: light }
+.workspace-filters {
+  display: flex; flex-wrap: wrap; align-items: end; gap: 12px;
+  padding: 2px 2px 14px; border-bottom: 1px solid var(--line)
+}
+.workspace-filters .workspace-query { flex: 1 1 200px; max-width: 330px }
+.workspace-field { display: grid; gap: 5px; color: var(--muted); min-width: 0; font-size: 11px }
+.workspace-field select, .workspace-field input,
+.workspace-filters button {
+  min-height: 34px; min-width: 0; border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 10px; background: var(--panel);
+  color: var(--text); font: inherit; font-size: 12px
+}
+.workspace-filters button { cursor: pointer }
+.workspace-filters button:hover { border-color: var(--cyan) }
+.workspace-monitor :is(button, select, input, summary):focus-visible {
+  outline: 2px solid var(--cyan); outline-offset: -2px
+}
+.workspace-monitor .stage-list { margin-top: 12px }
+.workspace-row > summary { gap: 12px; align-items: center }
+.workspace-row > summary:hover { background: color-mix(in srgb,var(--cyan) 5%,transparent) }
+.workspace-row .stage-heading { min-width: 0 }
+.workspace-row .stage-heading > b { font-size: 13px }
+.workspace-row .stage-heading > code { color: var(--muted); font-size: 11px; overflow-wrap: anywhere }
+.workspace-row-meta { display: grid; gap: 5px; justify-items: end; min-width: 0 }
+.workspace-tags { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 4px }
+.workspace-row-meta small, .workspace-row-meta time { color: var(--muted); font-size: 10px }
+.workspace-monitor .badge { font-family: inherit; font-size: 10px; line-height: 1.3; white-space: nowrap }
+.workspace-monitor .badge.muted-label { background: var(--panel2); color: var(--muted) }
+.workspace-monitor .badge.warn-label { background: color-mix(in srgb,var(--amber) 12%,transparent); color: var(--amber) }
+.workspace-body { background: color-mix(in srgb,var(--panel) 68%,transparent) }
+.workspace-path { grid-template-columns: minmax(68px, .18fr) minmax(0,1fr) }
+.workspace-path dt, .workspace-path dd { padding: 5px 0; font-size: 11px; border: 0 }
+.workspace-path dd span { display: block; margin-top: 3px }
+.workspace-body .workspace-field select { width: min(100%, 360px) }
+.workspace-body .workspace-section h3 { color: var(--text); font-size: 11px }
+.workspace-body .workspace-section > p { margin: 4px 0 }
+.workspace-list { margin: 5px 0; padding-inline-start: 16px; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere }
+.workspace-issues { color: var(--amber) }
+.workspace-alerts { margin-top: 12px }
+.workspace-alert-body { display: grid; gap: 8px; padding: 0 12px 12px }
+.workspace-alert-body > p { padding: 0; overflow-wrap: anywhere }
+.workspace-body > .muted { margin: 0 }
+@media (max-width:720px) {
+  .workspace-row > summary { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start }
+  .workspace-row-meta { grid-column: 2; justify-items: start }
+  .workspace-tags { justify-content: flex-start }
+  .workspace-monitor { padding: 11px }
+  .workspace-body { padding: 12px; gap: 12px }
+}

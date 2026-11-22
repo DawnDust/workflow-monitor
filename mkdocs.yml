@@ -43,6 +43,7 @@ plugins:
             Using the workbench: 使用工作台
             Maintenance and research: 维护与探索
             Advanced usage: 高级使用
+            Parallel worktrees: 多工作树并行
             Troubleshooting: 故障排查
             Contributor guide: 维护者指南
 nav:
@@ -51,6 +52,7 @@ nav:
   - Using the workbench: workbench.md
   - Maintenance and research: lifecycle.md
   - Advanced usage: advanced.md
+  - Parallel worktrees: worktrees.md
   - Troubleshooting: troubleshooting.md
   - Contributor guide: contributing.md
 markdown_extensions:

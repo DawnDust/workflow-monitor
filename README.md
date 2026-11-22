@@ -11,6 +11,9 @@
 
 Workflow Monitor is a local, single-file workflow companion for AI-assisted scientific Git projects on Windows. It keeps tasks, Research Chapters, attempts, handoffs, resources, and release readiness visible without running a server or uploading project data.
 
+
+Opt-in [parallel worktrees](docs/en/worktrees.md) share a durable clone-local task registry in Git’s common directory while retaining append-only journals per worktree.
+
 ## More output is not more control
 
 AI can now produce code, notes, plans, experiments, and reports faster than people can reliably review them. Yet a larger stream of output does not automatically create better research. It can make the important questions harder to answer: What is the current goal? Which result was actually verified? Is this stable work or an experiment? Where did a conclusion come from, and what action did the researcher authorize?
