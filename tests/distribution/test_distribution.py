@@ -310,9 +310,10 @@ class DistributionTests(unittest.TestCase):
         for name in ("source", "data", "theory", "others", "reports", "sparks", "tutorials", "translations", "plans"):
             self.assertTrue((self.root / "resources" / name / ".gitkeep").is_file())
         self.assertTrue((self.root / "program" / ".gitkeep").is_file())
-        self.assertEqual(
-            self.git("config", "--local", "--get", "core.hooksPath").stdout.strip(),
-            (self.root / ".git/workflow-monitor/hooks").as_posix(),
+        self.assertTrue(
+            Path(self.git("config", "--local", "--get", "core.hooksPath").stdout.strip()).samefile(
+                self.root / ".git/workflow-monitor/hooks"
+            )
         )
         with self.assertRaises(ProjectManagerError):
             initialize_project(self.root, CURRENT_VERSION)
