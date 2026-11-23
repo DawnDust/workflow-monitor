@@ -13,14 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from ... import DISPLAY_NAME, __version__
-from ...core.catalog import render_context_markdown
-from ...infrastructure.system.dashboard_actions import export_bundle, report_bug as open_dashboard_bug
-from ...infrastructure.system.diagnostics import diagnostics_status
-from ...infrastructure.system.external_navigation import open_directory, open_file_default, reveal_file
-from ...infrastructure.git.build_identity import build_identity, display_version
 from .projections import web_snapshot
-from ...infrastructure.system.resource_layout import RESOURCE_DIRECTORIES
-from ...infrastructure.system.build_notes import read_build_notes
 
 
 WEBVIEW2_DOWNLOAD_URL = "https://developer.microsoft.com/microsoft-edge/webview2/"
@@ -86,10 +79,12 @@ class WebDashboardBridge:
 
     def __init__(
         self, provider, *, diagnostic_checks: Callable[[], dict] | None = None,
-        refresh_seconds: float = 3.0,
+        refresh_seconds: float = 3.0, project_root: Path | None = None,
     ):
-        self.provider = provider
-        self.project_root = provider.project_root.resolve()
+        self._provider = provider if project_root is None else None
+        self._provider_factory = provider if project_root is not None else None
+        self._provider_lock = threading.Lock()
+        self.project_root = (project_root or provider.project_root).resolve()
         self.diagnostic_checks = diagnostic_checks or (lambda: {"status": "not-requested"})
         self.refresh_seconds = max(0.0, float(refresh_seconds))
         self._condition = threading.Condition()
@@ -97,6 +92,16 @@ class WebDashboardBridge:
         self._last_snapshot: dict | None = None
         self._last_token: str | None = None
         self._changed_sections: list[str] = []
+        self._view_lock = threading.Lock()
+        self._views: dict[str, tuple] = {}
+
+    @property
+    def provider(self):
+        if self._provider is None:
+            with self._provider_lock:
+                if self._provider is None:
+                    self._provider = self._provider_factory()
+        return self._provider
 
     @staticmethod
     def _ok(data: object = None) -> dict:
@@ -107,6 +112,8 @@ class WebDashboardBridge:
         return {"ok": False, "data": None, "error": {"code": code, "message": str(exc)}}
 
     def ready(self) -> dict:
+        from ...infrastructure.git.build_identity import build_identity, display_version
+        from ...infrastructure.system.build_notes import read_build_notes
         marker = os.environ.get("WORKFLOW_MONITOR_BRIDGE_READY_FILE")
         if marker:
             try:
@@ -137,6 +144,7 @@ class WebDashboardBridge:
         return candidate if candidate.is_file() else None
 
     def open_physics_research_roadmap(self) -> dict:
+        from ...infrastructure.system.external_navigation import open_file_default
         """Open only the project's fixed, optional physics research guide."""
         candidate = self._physics_roadmap_path()
         if candidate is None:
@@ -149,6 +157,7 @@ class WebDashboardBridge:
             return self._error(exc, code="open_failed")
 
     def open_research_understanding_guide(self) -> dict:
+        from ...infrastructure.system.external_navigation import open_file_default
         candidate = self._guide_path(UNDERSTANDING_GUIDE_PATH)
         if candidate is None:
             return self._error("the research understanding guide is unavailable", code="missing_path")
@@ -159,10 +168,64 @@ class WebDashboardBridge:
             return self._error(exc, code="open_failed")
 
     def get_test_build_notes(self) -> dict:
+        from ...infrastructure.system.build_notes import read_build_notes
         return self._ok(read_build_notes())
 
     def bootstrap(self) -> dict:
         return self.refresh(None, True)
+
+    def get_project_snapshot(self) -> dict:
+        return self.refresh(None, True)
+
+    def get_workflow_snapshot(self, workflow_id: str, task_id: str | None = None) -> dict:
+        try:
+            return self._ok(self.provider.workflow(workflow_id, task_id))
+        except (OSError, ValueError, RuntimeError) as exc:
+            return self._error(exc, code="workflow_unavailable")
+
+    def get_workflow_content(self, workflow_id: str) -> dict:
+        try:
+            return self._ok(self.provider.workflow_content(workflow_id))
+        except (OSError, ValueError, RuntimeError) as exc:
+            return self._error(exc, code="workflow_unavailable")
+
+    def refresh_view(self, view: str, state_token: str | None = None, force: bool = False) -> dict:
+        from ...infrastructure.system.dashboard_views import DASHBOARD_VIEWS
+        if not isinstance(view, str) or view not in DASHBOARD_VIEWS:
+            return self._error("unknown Dashboard view", code="invalid_parameters")
+        with self._view_lock:
+            previous, previous_token, previous_time = self._views.get(view, ({}, None, None))
+            try:
+                loaded = self.provider.load_view(view, force=force)
+                if view in {"workflow", "settings"}:
+                    matrix = self._action_matrix()
+                    if matrix is not None:
+                        loaded["action_matrix"] = matrix
+                loaded = web_snapshot(loaded)
+                snapshot_revision = _token(loaded)
+                changed = [key for key in loaded if _token(previous.get(key)) != _token(loaded.get(key))]
+                stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+                self._views[view] = loaded, snapshot_revision, stamp
+                return self._ok({"view": view, "state_token": snapshot_revision,
+                                 "snapshot": loaded if force or snapshot_revision != state_token else None,
+                                 "changed_sections": changed, "updated_at": stamp, "stale": False})
+            except Exception as exc:
+                reply = self._error(exc, code="refresh_failed")
+                reply["data"] = {"view": view, "state_token": previous_token, "snapshot": previous or None,
+                                 "updated_at": previous_time, "stale": True}
+                return reply
+
+    def _action_matrix(self) -> dict | None:
+        service = getattr(self.provider, "action_service", None)
+        if service is None:
+            return None
+        matrix = service.availability_matrix()
+        return {
+            "state_token": matrix.state_token, "state": matrix.state,
+            "actions": [{"action_id": item.action_id, "label": item.label, "category": item.category,
+                         "status": item.status, "missing_fields": list(item.missing_fields),
+                         "availability": item.availability.as_dict()} for item in matrix.actions],
+        }
 
     def refresh(self, state_token: str | None = None, force_full: bool = False) -> dict:
         """Coalesce concurrent refresh calls and preserve the last good snapshot."""
@@ -174,19 +237,9 @@ class WebDashboardBridge:
             self._refreshing = True
         try:
             source = self.provider.load()
-            service = getattr(self.provider, "action_service", None)
-            if service is not None:
-                matrix = service.availability_matrix()
-                source["action_matrix"] = {
-                    "state_token": matrix.state_token,
-                    "state": matrix.state,
-                    "actions": [{
-                        "action_id": action.action_id, "label": action.label,
-                        "category": action.category, "status": action.status,
-                        "missing_fields": list(action.missing_fields),
-                        "availability": action.availability.as_dict(),
-                    } for action in matrix.actions],
-                }
+            matrix = self._action_matrix()
+            if matrix is not None:
+                source["action_matrix"] = matrix
             loaded = web_snapshot(source)
             next_token = _token(loaded)
             with self._condition:
@@ -236,6 +289,7 @@ class WebDashboardBridge:
             return self._error(exc, code="software_refresh_failed")
 
     def export_diagnostics(self, filename: str | None = None) -> dict:
+        from ...infrastructure.system.dashboard_actions import export_bundle
         safe_name = filename or f"workflow-monitor-diagnostics-{datetime.now():%Y%m%d-%H%M%S}.zip"
         if Path(safe_name).name != safe_name or not safe_name.lower().endswith(".zip"):
             return self._error("filename must be a ZIP file name without directories", code="invalid_path")
@@ -247,6 +301,8 @@ class WebDashboardBridge:
             return self._error(exc, code="diagnostic_export_failed")
 
     def report_bug(self) -> dict:
+        from ...infrastructure.system.diagnostics import diagnostics_status
+        from ...infrastructure.system.dashboard_actions import report_bug as open_dashboard_bug
         try:
             incident_id = diagnostics_status(self.project_root).get("latest_incident_id")
             return self._ok({"opened": open_dashboard_bug(incident_id=incident_id),
@@ -254,9 +310,18 @@ class WebDashboardBridge:
         except Exception as exc:
             return self._error(exc, code="report_bug_failed")
 
+    def _resource_snapshot(self) -> dict:
+        if self._last_snapshot is not None:
+            return self._last_snapshot
+        if hasattr(self.provider, "load_view"):
+            return self._views.get("resources", (None,))[0] or self.provider.load_view("resources")
+        return self.provider.load()
+
     def open_resource_directory(self, relative: str) -> dict:
+        from ...infrastructure.system.resource_layout import RESOURCE_DIRECTORIES
+        from ...infrastructure.system.external_navigation import open_directory
         allowed = {"resources", *(item.relative_path for item in RESOURCE_DIRECTORIES)}
-        snapshot = self._last_snapshot or web_snapshot(self.provider.load())
+        snapshot = self._resource_snapshot()
         allowed.update(folder["path"] for folder in snapshot.get("catalog_folders") or []
                        if folder.get("status") != "archived")
         allowed.update(item["path"] for item in snapshot.get("catalog_items") or []
@@ -279,9 +344,10 @@ class WebDashboardBridge:
             return self._error(exc, code="open_failed")
 
     def reveal_resource_file(self, item_id: str) -> dict:
+        from ...infrastructure.system.external_navigation import open_directory, reveal_file
         if not isinstance(item_id, str) or not item_id.strip():
             return self._error("item_id is required", code="invalid_parameters")
-        snapshot = self._last_snapshot or web_snapshot(self.provider.load())
+        snapshot = self._resource_snapshot()
         item = next((value for value in snapshot.get("catalog_items") or []
                      if value.get("item_id") == item_id), None)
         if item is None:
@@ -308,10 +374,11 @@ class WebDashboardBridge:
             return self._error(exc, code="open_failed")
 
     def copy_context(self, item_ids: list[str] | None = None) -> dict:
+        from ...core.catalog import render_context_markdown
         if item_ids is not None and (not isinstance(item_ids, list)
                                      or any(not isinstance(value, str) for value in item_ids)):
             return self._error("item_ids must be a string array", code="invalid_parameters")
-        snapshot = self._last_snapshot or web_snapshot(self.provider.load())
+        snapshot = self._resource_snapshot()
         requested = set(item_ids or [])
         items = [item for item in snapshot.get("catalog_items") or []
                  if not requested or item.get("item_id") in requested]
@@ -325,6 +392,7 @@ def launch_web_dashboard(
     *,
     diagnostic_checks: Callable[[], dict],
     shown_callback: Callable[[], None] | None = None,
+    project_root: Path | None = None,
 ) -> None:
     """Launch the local HTML application in an Edge WebView2 window."""
     runtime = webview2_runtime_version()
@@ -342,9 +410,9 @@ def launch_web_dashboard(
         raise RuntimeError("pywebview 未安装，无法启动 Web Dashboard") from exc
     bridge = WebDashboardBridge(
         provider, diagnostic_checks=diagnostic_checks,
-        refresh_seconds=refresh_seconds,
+        refresh_seconds=refresh_seconds, project_root=project_root,
     )
-    user_data = provider.project_root / ".project_hooks" / "webview2"
+    user_data = bridge.project_root / ".project_hooks" / "webview2"
     user_data.mkdir(parents=True, exist_ok=True)
     page_url = index.as_uri()
     requested_theme = os.environ.get("WORKFLOW_MONITOR_THEME")

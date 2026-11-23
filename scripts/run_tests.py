@@ -33,6 +33,7 @@ MODULES = (
     "tests.integration.system.test_diagnostics",
     "tests.unit.application.test_action_service",
     "tests.integration.persistence.test_workflow",
+    "tests.integration.persistence.test_multi_worktree",
     "tests.distribution.test_distribution",
     "tests.distribution.test_public_release",
     "tests.integration.web.test_dashboard",
@@ -57,8 +58,10 @@ FAST_CLASSES = (
     "tests.unit.test_architecture.ArchitectureTests",
 )
 CORE_SMOKE = (
+    "tests.integration.persistence.test_multi_worktree.MultiWorktreeTests.test_three_real_worktrees_parallel_and_project_progress",
+    "tests.integration.persistence.test_multi_worktree.MultiWorktreeTests.test_outbox_survives_failure_and_retries_without_duplicates",
     "tests.integration.persistence.test_workflow.ProjectHooksSqliteTests.test_install_rebuilds_database_and_context_is_available",
-    "tests.integration.persistence.test_workflow.ProjectHooksSqliteTests.test_record_events_rolls_back_journal_when_projection_fails",
+    "tests.integration.persistence.test_workflow.ProjectHooksSqliteTests.test_record_events_preserves_journal_when_projection_fails",
     "tests.integration.persistence.test_workflow.ProjectHooksSqliteTests.test_failed_exploration_start_restores_branch_active_state_and_journal",
     "tests.integration.persistence.test_workflow.ProjectHooksSqliteTests.test_end_can_update_final_state_in_one_step_with_auto_commit",
     "tests.integration.persistence.test_workflow.ProjectHooksSqliteTests.test_catalog_cli_scan_relations_context_and_rebuild",

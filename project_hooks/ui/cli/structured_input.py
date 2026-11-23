@@ -24,8 +24,8 @@ def expand(raw):
     if not isinstance(value, dict):
         raise WorkflowError("填报必须是 JSON 对象")
     args = raw[:pos] + raw[pos + 2:]
-    if not any(command in args for command in ("start", "report", "end")):
-        raise WorkflowError("--input-json 仅支持 start/report/end")
+    if not any(command in args for command in ("start", "report", "end")) and not ("conflict" in args and "resolve" in args):
+        raise WorkflowError("--input-json 支持 start/report/end 和 conflict resolve")
     for name, item in value.items():
         option = "--" + name.replace("_", "-")
         if option in args or any(arg.startswith(option + "=") for arg in args):

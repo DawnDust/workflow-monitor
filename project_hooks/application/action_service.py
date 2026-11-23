@@ -96,7 +96,7 @@ class WorkflowActionService:
         }:
             blockers.append(_block(
                 "WORKFLOW_NOT_INSTALLED", "当前仓库尚未安装工作流 Hook",
-                "core.hooksPath 不是 .githooks", "install",
+                "无法找到此项目配置的工作流提交钩子", "install",
             ))
         version_mismatch = bool(
             state.get("project_version") and state.get("application_version")

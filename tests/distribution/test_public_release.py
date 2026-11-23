@@ -55,7 +55,7 @@ class PublicReleaseSurfaceTests(unittest.TestCase):
         english = {path.name for path in (ROOT / "docs/en").glob("*.md")}
         chinese = {path.name for path in (ROOT / "docs/zh").glob("*.md")}
         self.assertEqual(english, chinese)
-        self.assertEqual(len(english), 7)
+        self.assertEqual(english, {"index.md", "getting-started.md", "workbench.md", "lifecycle.md", "advanced.md", "worktrees.md", "troubleshooting.md", "contributing.md"})
         for name in (
             "workflow-monitor-overview.png",
             "workflow-monitor-settings.png",

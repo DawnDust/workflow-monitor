@@ -18,6 +18,7 @@ from ...infrastructure.system.updater import run_local_update
 from ...infrastructure.system.build_notes import read_build_notes
 
 def main(argv: list[str] | None = None) -> int:
+    global ROOT
     raw_args = list(os.sys.argv[1:] if argv is None else argv)
     args: argparse.Namespace | None = None
     root: Path | None = None
@@ -30,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
         from .structured_input import expand
         expanded_args = expand(raw_args)
         args = build_parser().parse_args(expanded_args)
+        if args.command == "events-merge":
+            return multi_worktree.merge_driver_main([args.base, args.ours, args.theirs])
         if args.command == "update" and args.from_exe and args.manifest_url:
             raise WorkflowError("--from-exe 不能与远程版本选择参数 --manifest-url 同时使用")
         if args.command == "end" and not args.check_only and (not args.result or not args.note):
@@ -44,7 +47,15 @@ def main(argv: list[str] | None = None) -> int:
             root = args.project.resolve() if args.project else discover_project_root()
         if root is not None:
             set_project_root(root)
+            ROOT = root
             assert_project_version_compatible(args)
+            if not command_is_read_only(args) and args.command not in {"worktree", "install", "events", "_apply-update", "update"}:
+                multi_worktree.assert_write_allowed(root, allow_pending=args.command == "start" and args.track in {"research", "experiment", "sandbox"})
+            if args.command == "start":
+                launched = multi_worktree.start(root, args, expanded_args)
+                if launched is not None:
+                    print(json.dumps(launched, ensure_ascii=False, indent=2))
+                    return 0
             shared_action = cli_shared_action(args)
             if command_requires_project_lock(args):
                 lock_state_dir = root / ".project_hooks" if args.command == "init" else state_dir()
@@ -72,6 +83,8 @@ def main(argv: list[str] | None = None) -> int:
                 "当前目录不在 Workflow Monitor 科研项目中；请先运行 `.\\workflow-monitor.exe init .`，"
                 "或使用 `--project <path>`"
             )
+        elif (multi_result := _multi_dispatch(args))[0]:
+            output = multi_result[1]
         elif args.command == "update" and args.from_exe:
             output = run_local_update(ROOT, args.from_exe, check_only=args.check)
         elif shared_action is not None:
@@ -100,8 +113,7 @@ def main(argv: list[str] | None = None) -> int:
                 cache_build_id=args.cache_build_id,
             )
         elif args.command is None:
-            configured = run_git(["config", "--local", "--get", "core.hooksPath"], check=False).stdout.strip()
-            if configured != TRACKED_HOOKS_DIR:
+            if not workflow_hook_installed():
                 raise WorkflowError(
                     "项目维护尚未安装。请先运行 `.\\workflow-monitor.exe install`，"
                     "再运行 `.\\workflow-monitor.exe check`。"
@@ -116,7 +128,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "archive-attempt": output = archive_attempt()
         elif args.command == "check":
             check_repository(raise_on_error=True); output = {"status": "passed"}
-        elif args.command == "install": output = {"status": install_git_hook(args.force)}
+        elif args.command == "install":
+            output = {"status": install_git_hook(args.force)}
+            if len(multi_worktree.list_worktrees(root)) > 1:
+                output["worktree_migration"] = multi_worktree.enable(root, apply=False)
         elif args.command == "pre-commit": pre_commit_check(); output = {"status": "passed"}
         elif args.command == "context":
             data = context_data()
@@ -214,3 +229,9 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if writer_context is not None:
             writer_context.__exit__(None, None, None)
+
+
+def _multi_dispatch(args):
+    from . import commands as runtime
+    from .multi_worktree_commands import dispatch
+    return dispatch(runtime, args)

@@ -30,7 +30,7 @@ from project_hooks.infrastructure.persistence.read_model import (
     is_publication_step,
     stage_freshness_warning,
 )
-from project_hooks.infrastructure.persistence.store import append_events, ensure_database, load_events, new_event, record_events, rebuild
+from project_hooks.infrastructure.persistence.store import SCHEMA_VERSION, append_events, ensure_database, load_events, new_event, record_events, rebuild
 from project_hooks.infrastructure.system.verification import (
     iso_now, verification_fingerprint, verify_receipts, write_test_receipt,
 )
@@ -515,7 +515,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(attempt[0], "current-stage")
         self.assertEqual(active[0], "active-legacy")
 
-    def test_record_events_rolls_back_journal_when_projection_fails(self) -> None:
+    def test_record_events_preserves_journal_when_projection_fails(self) -> None:
         database = self.root / ".project_hooks/rollback.sqlite3"
         journal = self.root / "maintenance/rollback-events.jsonl"
         state_dir = self.root / ".project_hooks"
@@ -555,9 +555,10 @@ class ProjectHooksSqliteTests(unittest.TestCase):
             with self.assertRaises(sqlite3.OperationalError):
                 record_events(database, journal, state_dir, [addition])
 
-        self.assertEqual(journal.read_bytes(), before)
+        self.assertTrue(journal.read_bytes().startswith(before))
+        self.assertIn(addition, load_events(journal))
         connection = ensure_database(database, journal)
-        self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
         connection.close()
 
     def test_failed_exploration_start_restores_branch_active_state_and_journal(self) -> None:
@@ -1422,6 +1423,86 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(merged_record["archive_status_code"], "unarchived")
         self.assertEqual(merged_record["merge_status_code"], "merged")
 
+        (self.root / "program/unmerged-after-validation.py").write_text("# unmerged follow-up\n", encoding="utf-8")
+        self.commit_all("unmerged follow-up after published validation")
+        advanced_snapshot = MaintenanceReadModel(
+            self.root / ".project_hooks/maintenance.sqlite3",
+            self.root / "maintenance/events.jsonl", lambda: branch,
+        ).dashboard_snapshot()
+        advanced_record = next(
+            item for item in advanced_snapshot["search_index"]
+            if item["kind"] == "exploration" and item["branch"] == branch
+        )
+        self.assertEqual(advanced_record["status_code"], "pending_merge")
+        self.assertEqual(advanced_record["merge_status_code"], "pending_merge")
+
+    def test_validated_exploration_archives_historical_tree_with_legacy_record(self) -> None:
+        branch = "experiment/historical-tree-proof"
+        task_id = "20261008_historical_tree_001"
+        self.start(task_id, "--track", "experiment", "--topic", "historical-tree-proof")
+        self.update_state("validated exploration snapshot")
+        self.hooks(
+            "attempt", "update", "--hypothesis", "history rewrite remains verifiable",
+            "--evidence", "the complete branch tree is recorded in main history",
+            "--conclusion", "the exact tree is an integration proof",
+        )
+        self.end(task_id, state="validated")
+        journal = self.root / "maintenance/events.jsonl"
+        events = load_events(journal)
+        for event in events:
+            if (event["event_type"] == "exploration.recorded"
+                    and event.get("branch") == branch
+                    and event.get("payload", {}).get("result") == "validated"):
+                event["payload"].pop("attempt_id", None)
+                event["payload"].pop("exploration_id", None)
+                event["schema_version"] = 3
+        journal.write_text(
+            "".join(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n" for event in events),
+            encoding="utf-8",
+        )
+        connection = rebuild(self.root / ".project_hooks/maintenance.sqlite3", journal, preserve_active=False)
+        connection.close()
+        proof_file = self.root / "program/archive-tree-proof.md"
+        proof_file.write_text("exploration snapshot\n", encoding="utf-8")
+        self.commit_all("validated exploration with complete tree")
+        source_commit = self.git("rev-parse", "HEAD").stdout.strip()
+        source_tree = self.git("rev-parse", f"{source_commit}^{{tree}}").stdout.strip()
+
+        self.git("switch", "main")
+        self.git("merge", "--squash", branch)
+        self.commit_all("squash merge historical tree proof")
+        proof_commit = self.git("rev-parse", "HEAD").stdout.strip()
+        proof_file.write_text("later main revision\n", encoding="utf-8")
+        self.commit_all("advance main after squash integration")
+
+        unrelated_commit = self.git("commit-tree", source_tree, "-m", "rewritten branch history").stdout.strip()
+        self.git("branch", "-f", branch, unrelated_commit)
+        stable = "20261008_archive_tree_001"
+        started = self.start(stable, check=False)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.update_state("record historical tree archival")
+        result = self.hooks(
+            "exploration", "archive-validated", "archive/experiment/historical-tree-proof", check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        archived = json.loads(result.stdout)
+        self.assertEqual(archived["commit"], unrelated_commit)
+        self.assertEqual(archived["integration"], "historical-tree-equivalent")
+        self.assertEqual(archived["integration_proof_commit"], proof_commit)
+        self.assertEqual(
+            self.git("rev-parse", "refs/heads/archive/experiment/historical-tree-proof").stdout.strip(),
+            unrelated_commit,
+        )
+        events = load_events(self.root / "maintenance/events.jsonl")
+        archive_event = next(
+            event for event in events
+            if event["event_type"] == "attempt.archived"
+            and event["payload"].get("archive_branch") == "archive/experiment/historical-tree-proof"
+        )
+        self.assertEqual(archive_event["payload"]["integration"], "historical-tree-equivalent")
+        self.assertEqual(archive_event["payload"]["integration_proof_commit"], proof_commit)
+        self.end(stable)
+
     def test_validated_attempt_requires_all_evidence_fields(self) -> None:
         task_id = "20260722_missing_001"
         self.start(task_id, "--track", "research", "--topic", "missing-proof")
@@ -2116,7 +2197,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         self.assertEqual(context["state"]["goal"], "legacy")
         connection = sqlite3.connect(database)
         try:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
         finally:
             connection.close()
 

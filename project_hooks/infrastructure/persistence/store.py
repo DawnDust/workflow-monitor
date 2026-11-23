@@ -24,6 +24,7 @@ from ...core.events import (
 )
 from .active_task import ActiveTaskError, active_row_matches, active_task_path, restore_active_row
 from .transaction import mutation_lock
+from .project_registry import registry_for
 
 
 def journal_hash(path: Path) -> str:
@@ -93,6 +94,7 @@ def append_events(path: Path, state_dir: Path, additions: Iterable[dict]) -> lis
     with event_lock(state_dir):
         events = load_events(path)
         by_id = {event["event_id"]: canonical_json(event) for event in events}
+        missing = []
         for event in additions:
             encoded = canonical_json(event)
             old = by_id.get(event["event_id"])
@@ -100,14 +102,21 @@ def append_events(path: Path, state_dir: Path, additions: Iterable[dict]) -> lis
                 raise StoreError(f"事件 ID 内容冲突: {event['event_id']}")
             if old is None:
                 events.append(event)
+                missing.append(event)
                 by_id[event["event_id"]] = encoded
         validate_projection(events)
+        if not missing:
+            return events
+        original = path.read_bytes() if path.exists() else b""
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temp_name = tempfile.mkstemp(prefix="events-", suffix=".jsonl", dir=path.parent)
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-                for event in events:
-                    handle.write(canonical_json(event) + "\n")
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(original)
+                if original and not original.endswith(b"\n"):
+                    handle.write(b"\n")
+                for event in missing:
+                    handle.write((canonical_json(event) + "\n").encode("utf-8"))
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_name, path)
@@ -718,39 +727,53 @@ def ensure_database(database: Path, journal: Path) -> sqlite3.Connection:
 
 def record_events(database: Path, journal: Path, state_dir: Path, events: Iterable[dict]) -> None:
     pending = list(events)
+    root = journal.parent.parent
+    registry = registry_for(root) if (root / ".git").exists() else None
+    if registry:
+        # The authority and durable outbox commit before any checkout-local IO.
+        for event in pending:
+            event["payload"] = sanitize_public_payload(event["payload"])
+        with mutation_lock(state_dir, command="event.persist"):
+            combined = {event["event_id"]: event for event in load_events(journal)}
+            for event in pending:
+                previous = combined.get(event["event_id"])
+                if previous and canonical_json(previous) != canonical_json(event):
+                    raise StoreError("事件 ID 内容冲突: " + event["event_id"])
+                combined[event["event_id"]] = event
+            validate_projection(combined.values())
+            registry.record_events(root, pending)
+        sync_registry_events(registry)
+        return
     task_id = next((event.get("task_id") for event in pending if event.get("task_id")), None)
     with mutation_lock(state_dir, command="event.persist", task_id=task_id):
-        existed = journal.exists()
-        original = journal.read_bytes() if existed else b""
         append_events(journal, state_dir, pending)
+        connection = rebuild(database, journal)
+        connection.close()
+
+
+def sync_registry_events(registry) -> list[dict]:
+    groups = {}
+    for item in registry.pending():
+        groups.setdefault(item["path"], []).append(item)
+    failures = []
+    for root_text, items in groups.items():
+        root = Path(root_text)
+        ids = [item["event_id"] for item in items]
         try:
-            connection = rebuild(database, journal)
-            connection.close()
-        except Exception as exc:
-            descriptor, temp_name = tempfile.mkstemp(
-                prefix="events-rollback-", suffix=".jsonl", dir=journal.parent
-            )
-            try:
-                with os.fdopen(descriptor, "wb") as handle:
-                    handle.write(original)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                if existed:
-                    os.replace(temp_name, journal)
-                else:
-                    os.unlink(temp_name)
-                    journal.unlink(missing_ok=True)
-            finally:
-                if os.path.exists(temp_name):
-                    os.unlink(temp_name)
-            try:
-                rollback = rebuild(database, journal)
-                rollback.close()
-            except Exception as rollback_exc:
-                raise StoreError(
-                    f"事件写入失败且数据库回滚失败: {exc}; rollback: {rollback_exc}"
-                ) from exc
-            raise
+            if not root.is_dir() or not (root / ".git").exists():
+                raise StoreError("来源工作树路径不可用")
+            settings = json.loads((root / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
+            journal = root / settings.get("maintenance_store", {}).get("journal", "maintenance/events.jsonl")
+            database = root / settings.get("maintenance_store", {}).get("database", ".project_hooks/maintenance.sqlite3")
+            with mutation_lock(root / settings.get("state_dir", ".project_hooks"), command="events.sync", timeout=0):
+                append_events(journal, database.parent, [json.loads(item["event_json"]) for item in items])
+                connection = rebuild(database, journal)
+                connection.close()
+            registry.sync_result(ids)
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            registry.sync_result(ids, str(exc))
+            failures.append({"path": root_text, "error": str(exc), "pending": len(ids)})
+    return failures
 
 
 def rows(connection: sqlite3.Connection, query: str, parameters: tuple = ()) -> list[dict]:

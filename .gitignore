@@ -10,5 +10,6 @@ build/
 dist/
 /site/
 /workflow-monitor.exe
+/.worktrees/
 /diagnostics-export/
 # project-maintenance-hooks:end

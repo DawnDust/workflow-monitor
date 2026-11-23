@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -40,12 +41,12 @@ def is_software_input(relative: str) -> bool:
 
 def software_input_files(root: Path) -> list[Path]:
     result: list[Path] = []
-    for path in root.rglob("*"):
-        if not path.is_file() or any(part in EXCLUDED_PARTS for part in path.parts):
-            continue
-        relative = path.relative_to(root).as_posix()
-        if is_software_input(relative):
-            result.append(path)
+    for directory, children, files in os.walk(root):
+        children[:] = [name for name in children if name not in EXCLUDED_PARTS | {".worktrees"}]
+        for file in files:
+            path = Path(directory) / file
+            if path.is_file() and is_software_input(path.relative_to(root).as_posix()):
+                result.append(path)
     return sorted(result, key=lambda item: item.relative_to(root).as_posix())
 
 
@@ -72,7 +73,7 @@ def work_content_files(root: Path) -> list[Path]:
             continue
         relative = raw.decode("utf-8", errors="surrogateescape").replace("\\", "/")
         path = root / relative
-        if relative in WORK_CONTENT_EXCLUDED or not path.is_file():
+        if relative in WORK_CONTENT_EXCLUDED or relative.startswith(".worktrees/") or not path.is_file():
             continue
         result.append(path)
     return sorted(result, key=lambda item: item.relative_to(root).as_posix())

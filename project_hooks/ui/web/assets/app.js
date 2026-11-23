@@ -2,25 +2,60 @@ import { escapeHtml as esc, filterRecords, paginate, searchRecords, dispositionC
 import { renderResourceView, resourceDetails } from "./resource-view.js";
 import { glossaryText, loadLanguage, saveLanguage } from "./i18n.js";
 
+import { createWorkspacePage, workspaceSummary } from "./workspace-view.js";
+
 const pages = [
-  ["workflow","⌁","工作流","Workflow"],["overview","◫","概览","Overview"],["search","⌕","搜索","Search"],
+  ["workflow","⌁","工作流","Workflow"],["workspaces","⑂","工作区","Workspaces"],["overview","◫","概览","Overview"],["search","⌕","搜索","Search"],
   ["resources","◇","资料","Resources"],
   ["research-stages","◎","研究篇章","Research Chapters"],
 ];
-const state = {page:"overview",settingsSection:"language",language:loadLanguage(),snapshot:null,snapshotToken:null,runtime:{version:"",build_identity:{}},draftQuery:"",committedQuery:"",selectedKind:"all",selectedArchiveStatus:"unarchived",selectedMergeStatus:"all",reviewOpen:false,reviewHelpOpen:false,searchPage:1,selectedResourcePath:null,folderOpen:new Set(["resources"]),resourceNavOpen:!matchMedia("(max-width:950px)").matches,resourcePage:1,eventPage:1,searchComposing:false,pendingSearchRender:false,glossaryOpen:new Set(),advancedOpen:new Set(),stageOpen:new Set(),stageExpansionInitialized:false,records:new Map()};
+const state = {page:"overview",settingsSection:"language",language:loadLanguage(),snapshot:null,snapshotToken:null,runtime:{version:"",build_identity:{}},draftQuery:"",committedQuery:"",selectedKind:"all",selectedWorkspace:"",selectedBranch:"",selectedArchiveStatus:"unarchived",selectedMergeStatus:"all",reviewOpen:false,reviewHelpOpen:false,searchPage:1,selectedResourcePath:null,folderOpen:new Set(["resources"]),resourceNavOpen:!matchMedia("(max-width:950px)").matches,resourcePage:1,eventPage:1,searchComposing:false,pendingSearchRender:false,glossaryOpen:new Set(),advancedOpen:new Set(),stageOpen:new Set(),stageExpansionInitialized:false,records:new Map()};
 const productLinks={repository:"https://github.com/DawnDust/workflow-monitor",manual:"https://dawndust.github.io/workflow-monitor/",license:"https://github.com/DawnDust/workflow-monitor/blob/main/LICENSE",security:"https://github.com/DawnDust/workflow-monitor/security/advisories/new"};
 const $ = q => document.querySelector(q), bridge = () => window.pywebview?.api;
 const l = (zh,en) => state.language === "en" ? en : zh;
+const workspaces = createWorkspacePage({
+  container: () => $("#content"), onSearch: searchWorkspace, l, language: () => state.language,
+});
+const snapshots = new Map();
+const viewErrors = new Map();
+let currentRequest = null;
+let connected = false;
+const viewName = () => state.page === "settings" && state.settingsSection !== "advanced" ? "overview" : state.page;
 const pageLabel = page => state.language === "en" ? page[3] : page[2];
 function notice(message,tone="info"){const n=$("#notice");n.textContent=message;n.className=`notice ${tone}`;clearTimeout(notice.timer);notice.timer=setTimeout(()=>n.classList.add("hidden"),6000);}
 async function invoke(method,...args){const api=bridge();if(!api||typeof api[method]!=="function")throw new Error(l("本地桥接尚未就绪","The local bridge is not ready"));return api[method](...args);}
 function panel(title,body,kicker="LOCAL SNAPSHOT",extra=""){return `<article class="panel"><header><div><small>${kicker}</small><h2>${esc(title)}</h2></div>${extra}</header>${body}</article>`;}
 function cards(values,clickable=false){return `<div class="metrics ${clickable?"resource-cards":""}">${values.map(x=>`<article ${clickable?`class="resource-card" role="button" tabindex="0" data-resource-path="${esc(x[4])}"`:""}><span>${esc(x[0])}</span><b class="${x[3]||""}">${esc(x[1])}</b><small>${esc(x[2])}</small></article>`).join("")}</div>`;}
 function searchStatusCell(record){const badge=(zhPrefix,enPrefix,code,labels)=>`<span class="badge disposition ${esc(code)}">${esc(l(zhPrefix,enPrefix))}${esc(l(...(labels[code]||[code,code])))}</span>`;const values=[badge("合并：","Merge: ",mergeStatusCode(record),MERGE_STATUSES),badge("归档：","Archive: ",archiveStatusCode(record),ARCHIVE_STATUSES)];if(record.kind==="catalog")values.unshift(badge("资料：","Resource: ",dispositionCode(record),DISPOSITIONS));return values.join(" ");}
-function table(records,columns,kind=""){if(!records.length)return `<div class="empty">${l("暂无记录","No records")}</div>`;return `<div class="table-wrap"><table><thead><tr>${columns.map(x=>`<th>${esc(l(x[1],x[2]||x[1]))}</th>`).join("")}</tr></thead><tbody>${records.map((record,i)=>{const key=`${kind}:${record.event_id||record.item_id||record.task_id||i}`;state.records.set(key,record);return `<tr ${kind?`data-record-key="${esc(key)}" data-kind="${kind}" tabindex="0"`:""}>${columns.map(x=>`<td>${kind==="search"&&x[0]==="search_statuses"?searchStatusCell(record):esc(record[x[0]])}</td>`).join("")}</tr>`;}).join("")}</tbody></table></div>`;}
-function renderNavigation(){$("#navigation").innerHTML=pages.map(page=>`<button data-page="${page[0]}" class="${state.page===page[0]?"active":""}"><span>${page[1]}</span>${pageLabel(page)}</button>`).join("");$("#navigation").querySelectorAll("button").forEach(b=>b.onclick=()=>{state.page=b.dataset.page;renderNavigation();render();});const settings=$("#settings-button");settings.classList.toggle("active",state.page==="settings");settings.setAttribute("aria-current",state.page==="settings"?"page":"false");$("#settings-label").textContent=l("设置","Settings");}
+function table(records,columns,kind=""){if(!records.length)return `<div class="empty">${l("暂无记录","No records")}</div>`;return `<div class="table-wrap"><table><thead><tr>${columns.map(x=>`<th>${esc(l(x[1],x[2]||x[1]))}</th>`).join("")}</tr></thead><tbody>${records.map((record,i)=>{const key=`${kind}:${record.search_key||record.event_id||record.item_id||record.task_id||i}`;state.records.set(key,record);return `<tr ${kind?`data-record-key="${esc(key)}" data-kind="${kind}" tabindex="0"`:""}>${columns.map(x=>`<td>${kind==="search"&&x[0]==="search_statuses"?searchStatusCell(record):esc(record[x[0]])}</td>`).join("")}</tr>`;}).join("")}</tbody></table></div>`;}
+function renderNavigation() {
+  const navigation=$("#navigation");
+  if(navigation.dataset.language!==state.language){
+    navigation.dataset.language=state.language;
+    navigation.innerHTML=pages.map(page=>{
+      const label=esc(pageLabel(page));
+      return '<button data-page="'+page[0]+'" title="'+label+'"><span aria-hidden="true">'+page[1]+'</span>'+label+'</button>';
+    }).join("");
+    navigation.querySelectorAll("button").forEach(button=>button.onclick=()=>{state.page=button.dataset.page;render();});
+  }
+  navigation.querySelectorAll("button").forEach(button=>{
+    const active=button.dataset.page===state.page;
+    button.classList.toggle("active",active);
+    if(active)button.setAttribute("aria-current","page");else button.removeAttribute("aria-current");
+  });
+  const settings=$("#settings-button");
+  settings.classList.toggle("active",state.page==="settings");
+  settings.setAttribute("aria-current",state.page==="settings"?"page":"false");
+  $("#settings-label").textContent=l("设置","Settings");
+}
 function applyChromeLanguage(){document.documentElement.lang=state.language;$("#navigation").setAttribute("aria-label",l("主导航","Main navigation"));$("#crumb").textContent=l("本地科研工作区","LOCAL RESEARCH WORKSPACE");$("#theme-toggle").title=l("切换主题","Toggle theme");$("#theme-toggle").setAttribute("aria-label",l("切换主题","Toggle theme"));$("#refresh-button").textContent=l("↻ 刷新快照","↻ Refresh snapshot");$("#drawer-close").setAttribute("aria-label",l("关闭","Close"));}
-function statusStrip(s){const lifecycle=s.action_matrix?.state||{},step=lifecycle.lifecycle_step||{},active=lifecycle.active_task||{};$("#status-strip").className="status-strip";const label=step.label||(active.task_id?l("任务进行中","Task in progress"):l("当前无活动任务","No active task"));$("#status-strip").innerHTML=`<span class="pulse"></span><b>${esc(label)}</b><code>${esc(s.branch)}</code><span>STATE · ${esc((state.snapshotToken||"").slice(0,8).toUpperCase())}</span>`;}
+function statusStrip(s){
+  if(state.page==="workspaces"){
+    $("#status-strip").className="status-strip workspaces-status";
+    $("#status-strip").innerHTML=workspaceSummary(s?.project_monitor,l);
+    return;
+  }
+const lifecycle=s.action_matrix?.state||{},step=lifecycle.lifecycle_step||{},active=lifecycle.active_task||s.context?.active_task||snapshots.get("overview")?.snapshot.context?.active_task||{};$("#status-strip").className="status-strip";const label=step.label||(active.task_id?l("任务进行中","Task in progress"):l("当前无活动任务","No active task"));$("#status-strip").innerHTML=`<span class="pulse"></span><b>${esc(label)}</b><code>${esc(s.branch)}</code><span>STATE · ${esc((state.snapshotToken||"").slice(0,8).toUpperCase())}</span>`;}
 
 function attentionStatus(c){const count=(c.research_attention||[]).length,label=count?l("需关注","Needs attention"):l("无需关注","Clear"),explanation=count?l("下方提醒均来自已登记的结构化事实，可点击查看来源。","The signals below come from registered structured facts and link to their sources."):l("当前结构化事实未触发提醒；这不表示研究已完成，也不排除未知风险。","No structured fact currently triggers a signal; this does not mean the research is complete or free of unknown risks.");return `<details class="attention-status ${count?"needs-attention":"clear"}"><summary><span>Research Attention</span><b>${label}${count?` · ${count}`:""}</b></summary><p>${explanation}</p></details>`}
 function attentionCard(c){const items=c.research_attention||[];if(!items.length)return "";const rows=items.map(x=>{const summary=x.summary?.[state.language]||x.summary?.en||x.code,sources=(x.source_ids||[]).join(" · ")||"-";return `<button class="attention-item" data-attention-target="${esc(x.target)}"><span><b>${esc(summary)}</b><small>${esc(x.code)} · ${esc(x.source_type)} · ${esc(sources)}</small></span><em>→</em></button>`}).join("");return panel(l("研究注意事项","Research attention"),`<p class="muted">${l("仅显示由现有结构化事实推导的确定性提醒，不代表科学结论。","Deterministic signals derived only from existing structured facts; they are not scientific conclusions.")}</p><div class="attention-list">${rows}</div>`,"MAX 3 · READ ONLY")}
@@ -51,16 +86,61 @@ function dispositionLabel(code){const pair={unarchived:["未归档","Not archive
 function archiveStatusLabel(code){return l(...({all:["全部","All"],...ARCHIVE_STATUSES}[code]||[code,code]));}
 function mergeStatusLabel(code){return l(...({all:["全部","All"],...MERGE_STATUSES}[code]||[code,code]));}
 function search(s){
-  const source=s.search_index||[],types=[["all",l("全部","All")],["task",l("任务","Tasks")],["exploration",l("探索","Explorations")],["catalog",l("资料","Resources")]];
-  const result=searchRecords(source,{kind:state.selectedKind,archive:state.selectedArchiveStatus,merge:state.selectedMergeStatus,query:state.committedQuery});
+  const scopes=s.search_scopes||[];
+  const source=(s.search_index||[]).filter(record=>
+    (!state.selectedWorkspace||record.workspaces?.includes(state.selectedWorkspace))&&
+    (!state.selectedBranch||record.branches?.includes(state.selectedBranch)));
+  const types=[["all",l("全部","All")],["task",l("任务","Tasks")],["exploration",l("探索","Explorations")],["stage",l("篇章","Chapters")],["catalog",l("资料","Resources")]];
+  const result=searchRecords(source,{kind:state.selectedKind,archive:state.selectedArchiveStatus,merge:state.selectedMergeStatus,query:state.committedQuery,scopeSelected:Boolean(state.selectedWorkspace||state.selectedBranch)});
   state.selectedArchiveStatus=result.archive;state.selectedMergeStatus=result.merge;
   const counts=Object.fromEntries(types.map(([k])=>[k,k==="all"?result.scoped.length:result.scoped.filter(x=>x.kind===k).length])),page=paginate(result.items,state.searchPage,10);state.searchPage=page.page;
+  const options=(items,active)=>items.map(([id,label])=>
+    '<option value="'+esc(id)+'"'+(id===active?' selected':'')+'>'+esc(label)+'</option>').join("");
+  const branches=[...new Set(scopes.map(item=>item.branch).concat((s.search_index||[]).flatMap(record=>record.branches||[])))].sort();
+  const warnings=(s.search_warnings||[]).map(item=>'<li>'+esc(item.branch)+' · '+esc(item.message)+'</li>').join("");
+  const hasCriteria=result.hasCriteria;
   return panel(l("跨记录搜索","Cross-record search"),`<div class="type-chips" role="group" aria-label="${l("记录类型","Record types")}">${types.map(([k,label])=>`<button data-search-kind="${k}" class="${state.selectedKind===k?"active":""}" aria-pressed="${state.selectedKind===k}">${label}<span>${counts[k]}</span></button>`).join("")}</div>
-  <form id="search-form" class="search-controls"><label class="searchbox"><span>⌕</span><input id="search-input" value="${esc(state.draftQuery)}" placeholder="${l("搜索任务、探索或资料…","Search tasks, explorations, or resources…")}"></label><button class="primary-button" type="submit">${l("搜索","Search")}</button><button id="search-clear" type="button">${l("清除","Clear")}</button>
+  <form id="search-form" class="search-controls"><label class="searchbox"><span>⌕</span><input id="search-input" value="${esc(state.draftQuery)}" placeholder="${l("搜索任务、篇章、证据或资料…","Search tasks, chapters, evidence, or resources…")}"></label><button class="primary-button" type="submit">${l("搜索","Search")}</button><button id="search-clear" type="button">${l("清除","Clear")}</button>
+  <label class="disposition-control">${l("工作区","Workspace")}<select id="search-workspace">${options([["",l("全部工作区","All workspaces")],...scopes.map(item=>[item.workflow_id,item.label])],state.selectedWorkspace)}</select></label>
+  <label class="disposition-control">${l("分支","Branch")}<select id="search-branch">${options([["",l("全部分支","All branches")],...branches.map(branch=>[branch,branch])],state.selectedBranch)}</select></label>
   <label class="disposition-control">${l("归档状态","Archive status")}<select id="search-archive-status">${result.archiveOptions.map(code=>`<option value="${esc(code)}" ${code===state.selectedArchiveStatus?"selected":""}>${esc(archiveStatusLabel(code))}</option>`).join("")}</select></label>
   <label class="disposition-control">${l("合并状态","Merge status")}<select id="search-merge-status">${result.mergeOptions.map(code=>`<option value="${esc(code)}" ${code===state.selectedMergeStatus?"selected":""}>${esc(mergeStatusLabel(code))}</option>`).join("")}</select></label></form>
   <p class="muted">${l("默认隐藏已归档记录；归档筛选控制历史记录，合并筛选独立显示 Git 合并结果。","Archived records are hidden by default. Archive and merge filters work independently.")}</p>
-  ${result.hasCriteria?`<p class="count">${state.committedQuery?`“${esc(state.committedQuery)}” · `:""}${result.items.length} ${l("条结果","results")} · ${l(`第 ${page.page}/${page.pages} 页`,`Page ${page.page}/${page.pages}`)}</p>${table(page.items,[["kind_label","类型","Type"],["title","标题","Title"],["search_statuses","合并与归档状态","Merge and archive status"],["summary","摘要","Summary"],["occurred_at","记录时间","Recorded at"],["branch","分支","Branch"]],"search")}<div class="pagination"><button id="search-prev" ${page.page<=1?"disabled":""}>${l("上一页","Previous")}</button><button id="search-next" ${page.page>=page.pages?"disabled":""}>${l("下一页","Next")}</button></div>`:`<div class="empty">${l("输入关键词，或选择类型或状态浏览","Enter a keyword or select a type or status to browse")}</div>`}`,"INDEX · LOCAL");
+  ${warnings?`<ul class="notice warn">${warnings}</ul>`:""}
+  ${hasCriteria?`<p class="count">${state.committedQuery?`“${esc(state.committedQuery)}” · `:""}${result.items.length} ${l("条结果","results")} · ${l(`第 ${page.page}/${page.pages} 页`,`Page ${page.page}/${page.pages}`)}</p>${table(page.items,[["kind_label","类型","Type"],["title","标题","Title"],["search_statuses","合并与归档状态","Merge and archive status"],["summary","摘要","Summary"],["occurred_at","记录时间","Recorded at"],["branch","分支","Branch"]],"search")}<div class="pagination"><button id="search-prev" ${page.page<=1?"disabled":""}>${l("上一页","Previous")}</button><button id="search-next" ${page.page>=page.pages?"disabled":""}>${l("下一页","Next")}</button></div>`:`<div class="empty">${l("输入关键词，或选择类型或状态浏览","Enter a keyword or select a type or status to browse")}</div>`}`,"INDEX · LOCAL");
+}
+function searchWorkspace(workspaceId, archived) {
+  state.page="search";
+  state.selectedWorkspace=workspaceId;
+  state.selectedBranch="";
+  state.selectedKind="all";
+  state.selectedArchiveStatus=archived?"archived":"all";
+  state.selectedMergeStatus="all";
+  state.draftQuery=state.committedQuery="";
+  state.searchPage=1;
+  render();
+}
+function openSearchRecord(record) {
+  const detail=record.detail||{}, title=record.title||record.record_id;
+  const labels=[
+    [l("记录编号","Record ID"),record.record_id],
+    [l("来源分支","Source branch"),record.branch],
+    [l("可查工作区","Available workspaces"),(record.sources||[]).map(source=>source.label).join(" · ")],
+    [l("状态","Status"),detail.status||record.status],
+    [l("说明","Summary"),detail.note||detail.summary||record.summary],
+    [l("当前步骤","Current step"),detail.checkpoint?.current_step],
+    [l("资料路径","Resource path"),detail.path],
+    [l("篇章目标","Chapter goal"),detail.goal],
+  ];
+  const evidence=(Array.isArray(detail.evidence)?detail.evidence:[]).map(item=>'<li>'+esc(item)+'</li>').join("");
+  const checks=detail.verification||[];
+  const sheet=labels.filter(([,value])=>value).map(([label,value])=>'<dt>'+esc(label)+'</dt><dd>'+esc(value)+'</dd>').join("");
+  const receipt=checks.length?'<h3>'+l("验证回执","Verification receipts")+'</h3>'+
+    table(checks,[["suite","检查","Check"],["result","结果","Result"],["finished_at","完成时间","Finished at"],["tests","测试数","Tests"]]):"";
+  $("#drawer-body").innerHTML='<h2 id="drawer-title">'+esc(title)+'</h2><dl class="details">'+sheet+'</dl>'+
+    (evidence?'<h3>'+l("证据","Evidence")+'</h3><ul class="workspace-list">'+evidence+'</ul>':"")+receipt;
+  $("#drawer").classList.remove("hidden");
+  $("#drawer-close").focus();
 }
 function resources(s){return panel(l("目录与登记","Folders & registration"),renderResourceView(s,state,l),"READ ONLY",`<button id="search-catalog">${l("搜索全部资料","Search all materials")}</button>`);}
 function explain(s){return panel(l("中英文状态解释","Status glossary"),`<p class="muted">${l("展开类别并选择英文状态，查看中文含义、实际影响和安全下一步。","Expand a category and select a status to review its meaning, impact, and safe next step.")}</p><div class="glossary">${(s.status_glossary||[]).map(group=>{const section=glossaryText(group.section,group.items[0]||{},state.language).section;return `<details data-glossary-section="${esc(group.section)}" ${state.glossaryOpen.has(group.section)?"open":""}><summary>${esc(section)} <span>${group.items.length}</span></summary>${group.items.map(item=>{const translated=glossaryText(group.section,item,state.language);return `<button class="glossary-item" data-glossary="${esc(group.section)}:${esc(item.code)}"><b>${esc(item.code)}</b><span>${esc(translated.meaning)}</span></button>`;}).join("")}</details>`;}).join("")}</div>`,"STATUS GLOSSARY");}
@@ -86,7 +166,34 @@ function languageSettings(){return panel(l("界面语言","Interface language"),
 function productLink(key,label){return `<a class="about-link" href="${productLinks[key]}" target="_blank" rel="noopener noreferrer">${esc(label)} <span aria-hidden="true">↗</span></a>`;}
 function aboutSettings(){const identity=state.runtime.build_identity||{},commit=String(identity.source_commit||"").slice(0,12)||l("未知","Unknown"),version=state.runtime.display_version||identity.display_version||state.runtime.version||l("未知","Unknown"),build=identity.build_id||l("未知","Unknown");return panel(l("关于 Workflow Monitor","About Workflow Monitor"),`<div class="about-hero"><img src="workflow-monitor-mark.svg" alt=""><div><h3>Workflow Monitor</h3><p>${l("面向 Windows 科研 Git 项目的本地优先工作流工具。","A local-first workflow tool for research Git projects on Windows.")}</p></div></div><div class="about-links">${productLink("repository",l("打开 GitHub 仓库","Open GitHub repository"))}${productLink("manual",l("查看用户手册","Read the user manual"))}${productLink("license",l("查看 MIT License","View MIT License"))}${productLink("security",l("私密报告安全漏洞","Privately report a vulnerability"))}<button id="about-report-bug">${l("报告问题","Report an issue")}</button></div><div class="button-row"><button id="show-build-notes">${l("查看测试版说明","View test build notes")}</button></div><dl class="details about-details"><dt>${l("作者","Author")}</dt><dd>DawnDust</dd><dt>${l("版本","Version")}</dt><dd><code>v${esc(version)}</code></dd><dt>${l("构建提交","Build commit")}</dt><dd><code>${esc(commit)}</code></dd><dt>${l("构建标识","Build ID")}</dt><dd><code>${esc(build)}</code></dd><dt>${l("许可证","License")}</dt><dd>MIT</dd><dt>${l("项目仓库","Repository")}</dt><dd><code>${esc(productLinks.repository)}</code></dd></dl><p class="muted">${l("外部链接仅在你点击后打开；程序不会自动上传项目内容或诊断数据。","External links open only after you click them. The application never uploads project content or diagnostic data automatically.")}</p>`,"OPEN SOURCE · LOCAL FIRST");}
 function settings(s){const sections=[["language",l("语言","Language")],["explain",l("解释","Glossary")],["advanced",l("高级查看","Advanced")],["about",l("关于","About")]],content=state.settingsSection==="language"?languageSettings():state.settingsSection==="explain"?explain(s):state.settingsSection==="advanced"?advanced(s):aboutSettings();return `<div class="settings-layout"><nav class="settings-nav" aria-label="${l("设置分类","Settings sections")}">${sections.map(([id,label])=>`<button data-settings-section="${id}" class="${state.settingsSection===id?"active":""}" aria-current="${state.settingsSection===id?"page":"false"}">${label}</button>`).join("")}</nav><section>${content}</section></div>`;}
-function render(){const resourceFocus=document.activeElement?.dataset.resourceFocus;rememberResourceNavigation();state.records.clear();const s=state.snapshot,p=pages.find(x=>x[0]===state.page);$("#page-title").textContent=state.page==="settings"?l("设置","Settings"):(p?pageLabel(p):l("概览","Overview"));if(!s){$("#content").innerHTML=`<div class="loading-card"><span></span>${l("正在准备本地只读快照…","Preparing the local read-only snapshot…")}</div>`;return;}const views={workflow,overview,search,resources,"research-stages":stageView,settings};$("#content").innerHTML=views[state.page](s);bindDynamic(s);if(resourceFocus)restoreResourceFocus(resourceFocus);}
+function render(){
+  renderNavigation();
+  const resourceFocus=document.activeElement?.dataset.resourceFocus;
+  rememberResourceNavigation();
+  state.records.clear();
+  const scope=viewName(), previous=snapshots.get(scope);
+  const s=state.snapshot=previous?.snapshot||null,p=pages.find(x=>x[0]===state.page);
+  $("#page-title").textContent=state.page==="settings"?l("设置","Settings"):(p?pageLabel(p):l("概览","Overview"));
+  if(state.page!=="workspaces")workspaces.leave();
+  if(!s){
+    $("#status-strip").className="status-strip loading";
+    $("#status-strip").textContent=l("正在读取快照…","Loading snapshot…");
+    const error=viewErrors.get(scope);
+    $("#content").innerHTML='<div class="loading-card">'+(error?esc(error):'<span></span>'+
+      l("正在准备本地只读快照…","Preparing the local read-only snapshot…"))+'</div>';
+    if(connected&&!currentRequest&&!error)void refresh();
+    return;
+  }
+  statusStrip(s);
+  if(state.page==="workspaces"){
+    workspaces.show(s.project_monitor);
+    return;
+  }
+  const views={workflow,overview,search,resources,"research-stages":stageView,settings};
+  $("#content").innerHTML=views[state.page](s);
+  bindDynamic(s);
+  if(resourceFocus)restoreResourceFocus(resourceFocus);
+}
 function rememberResourceNavigation(){
   const navigation=$(".resource-navigation");if(navigation)state.resourceNavOpen=navigation.open;
   document.querySelectorAll("details[data-folder-path]").forEach(n=>{if(n.open)state.folderOpen.add(n.dataset.folderPath);else state.folderOpen.delete(n.dataset.folderPath);});
@@ -94,7 +201,11 @@ function rememberResourceNavigation(){
 function restoreResourceFocus(key){const node=[...document.querySelectorAll("[data-resource-focus]")].find(n=>n.dataset.resourceFocus===key)||[...document.querySelectorAll(".folder-select")].find(n=>n.dataset.resourcePath===state.selectedResourcePath);node?.focus();}
 function selectResource(path){state.selectedResourcePath=path;state.resourcePage=1;render();document.querySelectorAll("details[data-folder-path]").forEach(n=>{if(path.startsWith(n.dataset.folderPath+"/")){n.open=true;state.folderOpen.add(n.dataset.folderPath);}});restoreResourceFocus("tree:"+path);}
 function openResourceDetail(path){const entry=state.records.get("resource:"+path);if(!entry)return;state.drawerReturnFocus=document.activeElement?.dataset.resourceFocus;$("#drawer-body").innerHTML=resourceDetails(entry,state.snapshot,l);$("#drawer").classList.remove("hidden");$("#drawer-close").focus();}
-function closeDrawer(){$("#drawer").classList.add("hidden");if(state.drawerReturnFocus)restoreResourceFocus(state.drawerReturnFocus);state.drawerReturnFocus=null;}
+function closeDrawer(){$("#drawer").classList.add("hidden");if(state.drawerReturnFocus)restoreResourceFocus(state.drawerReturnFocus);state.drawerReturnFocus=null;if(state.drawerReturnSearch){
+  const key=state.drawerReturnSearch;
+  [...document.querySelectorAll("tr[data-record-key]")].find(row=>row.dataset.recordKey===key)?.focus();
+  state.drawerReturnSearch=null;
+}}
 function openDrawer(title,value){$("#drawer-body").innerHTML=`<small>DETAIL</small><h2 id="drawer-title">${esc(title)}</h2><pre>${esc(JSON.stringify(value,null,2))}</pre>`;$("#drawer").classList.remove("hidden");}
 function bindDynamic(s){
   document.querySelectorAll("[data-attention-target]").forEach(n=>n.onclick=()=>{state.page=n.dataset.attentionTarget;renderNavigation();render();});
@@ -106,8 +217,10 @@ function bindDynamic(s){
   input?.addEventListener("input",e=>state.draftQuery=e.target.value);
   input?.addEventListener("blur",()=>{if(state.pendingSearchRender&&!state.searchComposing){state.pendingSearchRender=false;render();}});
   $("#search-form")?.addEventListener("submit",e=>{e.preventDefault();state.draftQuery=input?.value||state.draftQuery;state.committedQuery=state.draftQuery.trim();state.searchPage=1;state.pendingSearchRender=false;render();});
-  $("#search-clear")?.addEventListener("click",()=>{state.draftQuery="";state.committedQuery="";state.selectedKind="all";state.selectedArchiveStatus="unarchived";state.selectedMergeStatus="all";state.searchPage=1;render();});
+  $("#search-clear")?.addEventListener("click",()=>{state.draftQuery="";state.committedQuery="";state.selectedKind="all";state.selectedWorkspace=state.selectedBranch="";state.selectedArchiveStatus="unarchived";state.selectedMergeStatus="all";state.searchPage=1;render();});
   document.querySelectorAll("[data-search-kind]").forEach(n=>n.onclick=()=>{state.selectedKind=n.dataset.searchKind;state.searchPage=1;render();});
+  $("#search-workspace")?.addEventListener("change",e=>{state.selectedWorkspace=e.target.value;state.searchPage=1;render();$("#search-workspace")?.focus({preventScroll:true});});
+  $("#search-branch")?.addEventListener("change",e=>{state.selectedBranch=e.target.value;state.searchPage=1;render();$("#search-branch")?.focus({preventScroll:true});});
   $("#search-archive-status")?.addEventListener("change",e=>{state.selectedArchiveStatus=e.target.value;state.searchPage=1;render();});
   $("#search-merge-status")?.addEventListener("change",e=>{state.selectedMergeStatus=e.target.value;state.searchPage=1;render();});
   $("#search-prev")?.addEventListener("click",()=>{state.searchPage--;render();});$("#search-next")?.addEventListener("click",()=>{state.searchPage++;render();});
@@ -120,9 +233,9 @@ function bindDynamic(s){
   $("#open-physics-research-roadmap")?.addEventListener("click",async()=>{const r=await invoke("open_physics_research_roadmap");notice(r.ok?l("已在默认应用中打开理论物理研究路线","Opened the physics research roadmap in the default app"):r.error.message,r.ok?"info":"error")});
   $("#open-understanding-guide")?.addEventListener("click",async()=>{const r=await invoke("open_research_understanding_guide");notice(r.ok?l("已打开理解指南","Opened the understanding guide"):r.error.message,r.ok?"info":"error")});
   $("#show-build-notes")?.addEventListener("click",async()=>{const r=await invoke("get_test_build_notes");if(!r.ok){notice(r.error.message,"error");return;}$("#drawer-body").innerHTML=`<small>TEST BUILD</small><h2 id="drawer-title">${l("测试版说明","Test build notes")}</h2><pre>${esc(r.data.markdown)}</pre>`;$("#drawer").classList.remove("hidden");});
-  $("#search-catalog")?.addEventListener("click",()=>{state.page="search";state.selectedKind="catalog";state.selectedArchiveStatus="unarchived";state.selectedMergeStatus="all";state.draftQuery="";state.committedQuery="";state.searchPage=1;renderNavigation();render();});
+  $("#search-catalog")?.addEventListener("click",()=>{state.page="search";state.selectedKind="catalog";state.selectedWorkspace=state.selectedBranch="";state.selectedArchiveStatus="unarchived";state.selectedMergeStatus="all";state.draftQuery="";state.committedQuery="";state.searchPage=1;renderNavigation();render();});
   $("#resource-prev")?.addEventListener("click",()=>{state.resourcePage--;render();});$("#resource-next")?.addEventListener("click",()=>{state.resourcePage++;render();});
-  document.querySelectorAll("tr[data-record-key]").forEach(row=>{const open=async()=>{const record=state.records.get(row.dataset.recordKey);if(row.dataset.kind==="catalog"){const r=await invoke("reveal_resource_file",record.item_id);notice(r.ok?l(`已定位 ${r.data.path}`,`Revealed ${r.data.path}`):r.error.message,r.ok?"info":"error");}else openDrawer(l("记录详情","Record details"),record)};row.onclick=open;row.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();open();}}});
+  document.querySelectorAll("tr[data-record-key]").forEach(row=>{const open=async()=>{const record=state.records.get(row.dataset.recordKey);if(row.dataset.kind==="search"){state.drawerReturnSearch=row.dataset.recordKey;openSearchRecord(record);return;}if(row.dataset.kind==="catalog"){const r=await invoke("reveal_resource_file",record.item_id);notice(r.ok?l(`已定位 ${r.data.path}`,`Revealed ${r.data.path}`):r.error.message,r.ok?"info":"error");}else openDrawer(l("记录详情","Record details"),record)};row.onclick=open;row.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();open();}}});
   document.querySelectorAll("details[data-glossary-section]").forEach(n=>n.addEventListener("toggle",()=>{if(n.open)state.glossaryOpen.add(n.dataset.glossarySection);else state.glossaryOpen.delete(n.dataset.glossarySection);}));
   document.querySelectorAll("[data-settings-section]").forEach(n=>n.onclick=()=>{state.settingsSection=n.dataset.settingsSection;render();});
   document.querySelectorAll('input[name="language"]').forEach(n=>n.onchange=()=>{state.language=saveLanguage(n.value);applyChromeLanguage();renderNavigation();if(state.snapshot)statusStrip(state.snapshot);render();});
@@ -132,9 +245,54 @@ function bindDynamic(s){
   document.querySelectorAll("details[data-lazy]").forEach(n=>{if(!n.dataset.bound){n.dataset.bound="1";n.addEventListener("toggle",()=>{if(n.open){state.advancedOpen.add(n.dataset.lazy);fillDisclosure(n,state.snapshot);}else state.advancedOpen.delete(n.dataset.lazy);});}if(n.open)fillDisclosure(n,s);});
   $("#export-diagnostics")?.addEventListener("click",async()=>{const r=await invoke("export_diagnostics",null);notice(r.ok?l(`诊断包已保存：${r.data.output}`,`Diagnostics bundle saved: ${r.data.output}`):r.error.message,r.ok?"info":"error")});$("#report-bug")?.addEventListener("click",async()=>{const r=await invoke("report_bug");notice(r.ok&&r.data.opened?l("已打开 Bug 报告页面","Opened the bug report page"):l("无法打开 Bug 报告页面","Could not open the bug report page"),r.ok?"info":"error")});$("#check-updates")?.addEventListener("click",async()=>openDrawer(l("更新检查","Update check"),await invoke("check_updates")));$("#software-refresh")?.addEventListener("click",async()=>openDrawer(l("软件交付状态","Software delivery status"),await invoke("refresh_software_delivery",{})));$("#event-prev")?.addEventListener("click",()=>{state.eventPage--;const n=document.querySelector('[data-lazy="events"]');n.querySelector(".lazy-body").dataset.loaded="";fillDisclosure(n,s)});$("#event-next")?.addEventListener("click",()=>{state.eventPage++;const n=document.querySelector('[data-lazy="events"]');n.querySelector(".lazy-body").dataset.loaded="";fillDisclosure(n,s)});
 }
-const pageSections={workflow:new Set(["action_matrix","context","attempt"]),overview:new Set(["context","health","attempts","research","catalog_items","catalog_relations"]),search:new Set(["search_index"]),resources:new Set(["resource_index","resource_directories","catalog_items","catalog_folders","catalog_relations"]),"research-stages":new Set(["research"]),settings:new Set(["status_glossary","context","branch","health","classification","active_task_warning","software_delivery","action_matrix","diagnostics","events"])};
-async function refresh(force=false){$("#refresh-button").disabled=true;try{const r=await invoke("refresh",state.snapshotToken,force),changed=r.data?.changed_sections||[],hasSnapshot=Boolean(r.data?.snapshot);if(hasSnapshot)state.snapshot=r.data.snapshot;if(r.data?.state_token)state.snapshotToken=r.data.state_token;if(!r.ok)notice(l(`刷新失败，继续显示最后快照：${r.error.message}`,`Refresh failed; showing the last snapshot: ${r.error.message}`),"error");statusStrip(state.snapshot);const relevant=force||(hasSnapshot&&changed.some(x=>(pageSections[state.page]||new Set()).has(x)));if(state.page==="settings"&&state.settingsSection==="advanced"&&relevant)updateAdvanced(state.snapshot,changed,force);else if(relevant&&state.page==="search"&&(state.searchComposing||document.activeElement?.id==="search-input")){state.pendingSearchRender=true;}else if(relevant)render();}catch(e){notice(e.message,"error")}finally{$("#refresh-button").disabled=false;}}
-function initialize(){const requested=new URLSearchParams(location.hash.slice(1)).get("theme"),preferred=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";$("#app").dataset.theme=["light","dark"].includes(requested)?requested:preferred;applyChromeLanguage();renderNavigation();render();$("#settings-button").onclick=()=>{state.page="settings";renderNavigation();render();};$("#refresh-button").onclick=()=>refresh(true);$("#theme-toggle").onclick=()=>{const a=$("#app");a.dataset.theme=a.dataset.theme==="dark"?"light":"dark"};$("#drawer-close").onclick=closeDrawer;document.addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer()});window.addEventListener("pywebviewready",async()=>{const ready=await invoke("ready");state.runtime=ready.data||state.runtime;$("#runtime-version").textContent=`v${ready.data.version} · bridge ready`;await refresh(true);if(ready.data.refresh_seconds>0)setInterval(()=>refresh(false),ready.data.refresh_seconds*1000);});}
+async function refresh(force=false) {
+  if(currentRequest||!connected)return;
+  const view=viewName(), previous=snapshots.get(view), button=$("#refresh-button");
+  currentRequest=view;
+  const returnFocus=document.activeElement===button;
+  button.disabled=true;
+  try {
+    const reply=bridge().refresh_view
+      ? await invoke("refresh_view",view,previous?.snapshot_revision||null,force)
+      : await invoke("refresh",previous?.snapshot_revision||null,force);
+    const data=reply.data||{};
+    if(data.snapshot) snapshots.set(view,{snapshot:data.snapshot,snapshot_revision:data.state_token,time:data.updated_at});
+    else if(previous&&data.updated_at) previous.time=data.updated_at;
+    if(view!==viewName())return;
+    state.snapshotToken=data.state_token||previous?.snapshot_revision;
+    if(!reply.ok){
+      const last=data.updated_at||previous?.time;
+      const message=l("刷新失败","Refresh failed")+" · "+reply.error.message+
+        (last?" · "+l("上次更新","Last updated")+" "+new Date(last).toLocaleString(state.language):"");
+      viewErrors.set(view,message);
+      notice(message,"error");
+      if(!previous)render();
+      return;
+    }
+    viewErrors.delete(view);
+    if(previous&&!force&&!data.changed_sections?.length)return;
+    if(view==="search"&&(state.searchComposing||document.activeElement?.id==="search-input")){
+      state.pendingSearchRender=true;
+      return;
+    }
+    render();
+  } catch(error) {
+    if(view===viewName()){
+      const last=previous?.time;
+      const message=error.message+(last?" · "+l("上次更新","Last updated")+" "+new Date(last).toLocaleString(state.language):"");
+      viewErrors.set(view,message);
+      notice(message,"error");
+      if(!previous)render();
+    }
+  } finally {
+    currentRequest=null;
+    button.disabled=false;
+    if(returnFocus&&document.activeElement===document.body)button.focus({preventScroll:true});
+    const next=viewName();
+    if(next!==view&&!snapshots.has(next)&&!viewErrors.has(next))void refresh();
+  }
+}
+function initialize(){const requested=new URLSearchParams(location.hash.slice(1)).get("theme"),preferred=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";$("#app").dataset.theme=["light","dark"].includes(requested)?requested:preferred;applyChromeLanguage();renderNavigation();render();$("#settings-button").onclick=()=>{state.page="settings";renderNavigation();render();};$("#refresh-button").onclick=()=>refresh(true);$("#theme-toggle").onclick=()=>{const a=$("#app");a.dataset.theme=a.dataset.theme==="dark"?"light":"dark"};$("#drawer-close").onclick=closeDrawer;document.addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer()});window.addEventListener("pywebviewready",async()=>{const ready=await invoke("ready");state.runtime=ready.data||state.runtime;connected=true;$("#runtime-version").textContent=`v${ready.data.version} · bridge ready`;await refresh(true);if(ready.data.refresh_seconds>0)setInterval(()=>refresh(false),ready.data.refresh_seconds*1000);});}
 const workflowBase=workflow;
 workflow=function(s){const html=workflowBase(s),step=s.action_matrix?.state?.lifecycle_step||{},labels=state.language==="en"?["Not started","Cycle started","Working","Progress recorded","Verification or review required","Gates passed","Finishing","Completed"]:["未开始","周期已建立","工作中","进展已记录","待验证或审阅","门禁已通过","正在收尾","已完成"],steps=labels.map((x,i)=>`<span class="${i===step.index?"current":""}">${x}</span>`).join("<i>→</i>"),warning=step.warning?`<div class="notice warn lifecycle-warning"><b>${l("进展记录需要更新","Progress checkpoint needs updating")}</b><br>${l("Checkpoint 已过期，请重新记录进展。","Checkpoint is stale. Record progress again.")} <code>${esc(step.warning.next_action||"state update")}</code></div>`:"";return html.replace(/<div class="lifecycle-steps">.*?<\/div>/,`<div class="lifecycle-steps">${steps}</div>${warning}`);};
 initialize();

@@ -14,7 +14,8 @@ def classify_branch(branch: str, policy: dict) -> dict:
         return {"kind": "stable", "track": "stable", "topic": None}
     parts = branch.split("/")
     if len(parts) == 2 and parts[0] in policy["exploration_types"] and TOPIC_RE.fullmatch(parts[1]):
-        return {"kind": "exploration", "track": parts[0], "topic": parts[1]}
+        task_topic = re.fullmatch(r"(\d{8}-\d{3,})-(.+)", parts[1])
+        return {"kind": "exploration", "track": parts[0], "topic": task_topic[2] if task_topic else parts[1], **({"task_id": task_topic[1]} if task_topic else {})}
     if (len(parts) == 3 and parts[0] == policy["archive_prefix"]
             and parts[1] in policy["exploration_types"] and TOPIC_RE.fullmatch(parts[2])):
         return {"kind": "archive", "track": parts[1], "topic": parts[2]}

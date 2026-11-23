@@ -18,8 +18,9 @@ from ..system.resource_layout import (
     resource_directory_snapshot, catalog_consistency_issues, is_legacy_program_resource,
 )
 from ..system.folder_index import folder_index
-from .store import SCHEMA_VERSION, ensure_database, journal_hash, rows
+from .store import SCHEMA_VERSION, ensure_database, journal_hash, rows, canonical_json
 from ..system.verification import changed_paths_from_baseline
+from .project_registry import registry_for
 
 
 class ReadModelError(RuntimeError):
@@ -419,7 +420,7 @@ class MaintenanceReadModel:
         ).fetchall()
         return [cls._decode_attempt(connection, row) for row in attempt_rows]
 
-    def _context(self, connection: sqlite3.Connection, branch: str) -> dict:
+    def _context(self, connection: sqlite3.Connection, branch: str, *, overview=False) -> dict:
         from ...core.stage_versions import conflicting_stages
         legacy_state = connection.execute("SELECT * FROM project_state WHERE branch=?", (branch,)).fetchone()
         state_branch = branch
@@ -485,6 +486,11 @@ class MaintenanceReadModel:
         for item in handoffs:
             item.pop("event_id", None)
         active = connection.execute("SELECT * FROM active_tasks ORDER BY started_at DESC LIMIT 1").fetchone()
+        registry = registry_for(self.repo_path) if (self.repo_path / ".git").exists() else None
+        registered = registry.active(self.repo_path) if registry else None
+        if registry:
+            state = json.loads(registered["state_json"]) if registered else {}
+            active = {"task_id": registered["task_id"], "started_at": registered["started_at"], "branch": registered["branch"], "record_json": canonical_json(state["record"]), "state_updated": state.get("checkpoint_recorded", False)} if registered and state.get("record") else None
         active_data = None
         active_record = None
         if active:
@@ -498,8 +504,8 @@ class MaintenanceReadModel:
                 "scope": active_record.get("declaration", {}).get("scope"),
                 "acceptance": active_record.get("declaration", {}).get("acceptance", []),
                 "track": active_record.get("git", {}).get("track"),
-                "lifecycle_phase": "active",
-                "changed_paths": changed_paths_from_baseline(
+                "lifecycle_phase": registered["status"] if registered else "active",
+                "changed_paths": [] if overview else changed_paths_from_baseline(
                     self.database_path.parent.parent, active_record.get("baseline", {}),
                 ),
             }
@@ -560,7 +566,7 @@ class MaintenanceReadModel:
             )]
             attempts.append(item)
         by_branch = {item["branch"]: item for item in attempts}
-        for item in self._branch_attempts():
+        for item in ([] if overview else self._branch_attempts()):
             current = by_branch.get(item["branch"])
             if current is None or item.get("updated_at", "") > current.get("updated_at", ""):
                 by_branch[item["branch"]] = item
@@ -730,7 +736,7 @@ class MaintenanceReadModel:
         preflight = None
         verification = None
         checkpoint_status = "missing"
-        if active and active_record:
+        if active and active_record and not overview:
             task_events = []
             for event in connection.execute(
                 """SELECT event_id, occurred_at, event_type, branch, task_id, payload_json
@@ -769,7 +775,7 @@ class MaintenanceReadModel:
             "finish_preflight": preflight,
             "checkpoint_status": checkpoint_status if active else "not-applicable",
             "required_actions": (preflight or {}).get("required_actions", []),
-            "git_state": self.git_state(),
+            "git_state": {} if overview else self.git_state(),
             "recent_handoffs": handoffs,
             "active_task": active_data,
             "project_profile": profile,
@@ -870,20 +876,43 @@ class MaintenanceReadModel:
         finally:
             connection.close()
 
-    @staticmethod
-    def _search_index(
-        connection: sqlite3.Connection, task_details: dict[str, dict] | None = None,
-        publication: dict | None = None,
-    ) -> list[dict]:
+    def _exploration_integration_status(self, branch: str, event_id: str) -> str:
+        source_ref = None
+        for candidate in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"):
+            result = git_client.run(
+                self.repo_path, ["show-ref", "--verify", "--quiet", candidate], check=False,
+            )
+            if result.returncode == 0:
+                source_ref = candidate
+                break
+        if source_ref is None:
+            return "merge_unknown"
+
+        statuses = []
+        for base_ref in ("refs/heads/main", "refs/remotes/origin/main"):
+            available = git_client.run(
+                self.repo_path, ["show-ref", "--verify", "--quiet", base_ref], check=False,
+            )
+            if available.returncode != 0:
+                continue
+            try:
+                journal_relative = self.journal_path.resolve().relative_to(self.repo_path.resolve()).as_posix()
+                evidence = git_client.integration_evidence(
+                    self.repo_path, base_ref, source_ref,
+                    required_path=journal_relative, required_text=event_id,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            statuses.append(evidence["state"])
+        if "merged" in statuses:
+            return "merged"
+        if "pending_merge" in statuses:
+            return "pending_merge"
+        return "merge_unknown"
+
+    def _search_index(self, connection: sqlite3.Connection) -> list[dict]:
         result: list[dict] = []
-        task_details = task_details or {}
-        publication = publication or {}
-        publication_available = publication.get("publication", {}).get("available", False)
-        published_event_ids = {
-            event_id
-            for commit in publication.get("commits", []) if commit.get("published")
-            for event_id in commit.get("event_ids", [])
-        }
+        integration_statuses: dict[str, str] = {}
         integrated_archive_event_ids: set[str] = set()
         for row in connection.execute(
             "SELECT event_id, payload_json FROM events WHERE event_type='attempt.archived'",
@@ -932,24 +961,28 @@ class MaintenanceReadModel:
                 [item["task_id"], item["summary"], item["evidence"], item["result"], item["branch"]],
                 [item["task_id"]] if item["task_id"] else [])
 
-        exploration_rows = MaintenanceReadModel._exploration_rows(connection)
+        exploration_rows = self._exploration_rows(connection)
         for item in exploration_rows:
-            publication_status = task_details.get(item.get("task_id") or "", {}).get("publication_status")
             archived = (
                 str(item.get("branch") or "").startswith("archive/")
                 or str(item.get("disposition_ref") or "").startswith("archive/")
             )
+            branch = str(item.get("branch") or "")
+            if branch not in integration_statuses:
+                integration_statuses[branch] = self._exploration_integration_status(branch, item["event_id"])
+            integration_status = integration_statuses[branch]
             if item["result"] == "abandoned":
                 disposition_status = "已遗弃"
             elif archived:
                 disposition_status = "已归档"
-            elif item["result"] == "validated" and item["event_id"] in published_event_ids:
+            elif item["result"] == "validated" and (
+                item["event_id"] in integrated_archive_event_ids or integration_status == "merged"
+            ):
                 disposition_status = "已合并"
-            elif (item["result"] == "validated" and not publication_available
-                  and publication_status != "仅记录"):
-                disposition_status = "合并状态未知"
-            elif item["result"] == "validated":
+            elif item["result"] == "validated" and integration_status == "pending_merge":
                 disposition_status = "待合并"
+            elif item["result"] == "validated":
+                disposition_status = "合并状态未知"
             elif item["result"] == "active":
                 disposition_status = "进行中"
             elif item["result"] in {"negative", "inconclusive", "paused"}:
@@ -957,12 +990,8 @@ class MaintenanceReadModel:
             else:
                 disposition_status = "未处置"
             merge_status_code = (
-                "merged" if item["result"] == "validated" and (
-                    item["event_id"] in published_event_ids or item["event_id"] in integrated_archive_event_ids
-                ) else
-                "merge_unknown" if (item["result"] == "validated" and not publication_available
-                                    and publication_status != "仅记录") else
-                "pending_merge" if item["result"] == "validated" else "not_applicable"
+                "merged" if item["result"] == "validated" and item["event_id"] in integrated_archive_event_ids
+                else integration_status if item["result"] == "validated" else "not_applicable"
             )
             add("exploration", "探索", "explorations", item["event_id"], item["occurred_at"], item["branch"],
                 item["goal"] or item["branch"], item["result"] or "",
@@ -1182,25 +1211,53 @@ class MaintenanceReadModel:
         context["publication_completed"] = publication_completed
         return context
 
-    def dashboard_snapshot(self, branch: str | None = None, *, limit: int = 1000) -> dict:
+    def dashboard_overview(self, branch: str | None = None) -> dict:
+        """Project direction and counts without scanning Git history or other trees."""
+        branch = branch or self.branch_provider()
+        connection, rebuilt = self._connection()
+        try:
+            context = self._context(connection, branch, overview=True)
+            catalog = [decode_item(item) for item in rows(connection, "SELECT * FROM catalog_items")]
+            relations = rows(connection, "SELECT * FROM catalog_relations")
+            context["research_attention"] = research_attention(
+                context, [item for item in catalog if not is_legacy_program_resource(item.get("path") or "")], relations,
+            )
+            self._review_context(connection, context, catalog, relations)
+            return {
+                "branch": branch,
+                "context": context,
+                "attempt": self._attempt(connection, branch),
+                "attempts": context["attempts"],
+                "catalog_items": catalog,
+                "catalog_relations": relations,
+                "health": {"status": "待检查", "schema_version": SCHEMA_VERSION,
+                           "events": connection.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+                           "rebuilt": rebuilt},
+            }
+        finally:
+            connection.close()
+
+    def dashboard_snapshot(self, branch: str | None = None, *, limit: int = 1000, view: str = "all") -> dict:
         branch = branch or self.branch_provider()
         connection, rebuilt = self._connection()
         try:
             integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
             context = self._context(connection, branch)
-            history = rows(connection, "SELECT event_id, occurred_at, task_id, summary, evidence, result, branch, payload_json FROM task_archive ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
-            explorations = self._exploration_rows(connection, limit)
-            events = rows(connection, "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,))
+            history = rows(connection, "SELECT event_id, occurred_at, task_id, summary, evidence, result, branch, payload_json FROM task_archive ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,)) if view == "all" else []
+            explorations = self._exploration_rows(connection, limit) if view == "all" else []
+            events = rows(connection, "SELECT event_id, occurred_at, event_type, branch, task_id, payload_json FROM events ORDER BY occurred_at DESC, event_id DESC LIMIT ?", (limit,)) if view in {"all", "settings"} else []
             events = [event for event in events if not (
                 event["event_type"] == "decision.recorded" or event["event_type"].startswith("workbench.")
             )]
             for event in events:
                 event["payload"] = json.loads(event.pop("payload_json"))
-            try:
-                publication = self._publication_projection(connection)
-            except (OSError, ReadModelError, subprocess.SubprocessError) as exc:
-                publication = {"publication": {"ref": "origin/main", "available": False}, "commits": []}
-            task_details = self._task_details(connection, publication)
+            task_details = {}
+            if view in {"all", "research-stages", "overview"}:
+                try:
+                    publication = self._publication_projection(connection)
+                except (OSError, ReadModelError, subprocess.SubprocessError):
+                    publication = {"publication": {"ref": "origin/main", "available": False}, "commits": []}
+                task_details = self._task_details(connection, publication)
             context = self._apply_overview_state(context, task_details)
             catalog_items = [
                 decode_item(item) for item in rows(
@@ -1235,7 +1292,7 @@ class MaintenanceReadModel:
                 "attempt": self._attempt(connection, branch),
                 "attempts": self._attempts(connection),
                 "events": events,
-                "search_index": self._search_index(connection, task_details, publication),
+                "search_index": self._search_index(connection) if view == "all" else [],
                 "task_details": task_details,
                 "catalog_items": catalog_items,
                 "catalog_relations": catalog_relations,

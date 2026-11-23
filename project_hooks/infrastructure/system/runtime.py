@@ -31,13 +31,23 @@ def configure_utf8_stdio() -> None:
 
 
 def runtime_root(project_root: Path) -> Path:
+    from ..git.worktrees import repository_context
+    from ..persistence.project_registry import registry_for
+    if (project_root / ".git").exists():
+        registry = registry_for(project_root)
+        if registry and registry.setting("unified"):
+            return repository_context(project_root).shared_dir / "runtime"
+    return legacy_runtime_root(project_root)
+
+
+def legacy_runtime_root(project_root: Path) -> Path:
     return project_root.resolve() / ".project_hooks" / "runtime"
 
 
-def cached_executable(project_root: Path, version: str, build_id: str | None = None) -> Path:
+def cached_executable(project_root: Path, version: str, build_id: str | None = None, *, legacy=False) -> Path:
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("非法缓存版本")
-    folder = runtime_root(project_root) / "executables" / version
+    folder = (legacy_runtime_root(project_root) if legacy else runtime_root(project_root)) / "executables" / version
     if build_id is not None:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", build_id):
             raise ValueError("非法缓存构建 ID")
@@ -45,11 +55,11 @@ def cached_executable(project_root: Path, version: str, build_id: str | None = N
     return folder / EXECUTABLE_NAME
 
 
-def write_pointer(version: str, project_root: Path, executable: Path, *, build_id: str | None = None) -> None:
+def write_pointer(version: str, project_root: Path, executable: Path, *, build_id: str | None = None, legacy=False) -> None:
     from ..git.build_identity import build_identity
-    runtime = runtime_root(project_root)
+    runtime = legacy_runtime_root(project_root) if legacy else runtime_root(project_root)
     pointer_executable = Path(executable).resolve()
-    expected = cached_executable(project_root, version, build_id).resolve()
+    expected = cached_executable(project_root, version, build_id, legacy=legacy).resolve()
     if pointer_executable != expected or not pointer_executable.is_file():
         raise ValueError("更新版本指针只能指向已缓存并校验的版本化 EXE")
     runtime.mkdir(parents=True, exist_ok=True)
@@ -72,14 +82,24 @@ def write_pointer(version: str, project_root: Path, executable: Path, *, build_i
 
 
 def selected_executable(project_root: Path) -> Path | None:
+    marker = project_root / ".git"
+    old_pointer = legacy_runtime_root(project_root) / "current.json"
+    if marker.is_dir() and not (marker / "commondir").exists() and not old_pointer.is_file():
+        pointer = marker / "workflow-monitor" / "runtime" / "current.json"
+        if not pointer.is_file():
+            return None
     runtime = runtime_root(project_root)
     pointer = runtime / "current.json"
+    legacy = False
+    if not pointer.is_file() and runtime != legacy_runtime_root(project_root):
+        pointer = legacy_runtime_root(project_root) / "current.json"
+        legacy = True
     if not pointer.is_file():
         return None
     try:
         data = json.loads(pointer.read_text(encoding="utf-8"))
         selected = str(data["version"])
-        expected = cached_executable(project_root, selected, data.get("build_id")).resolve()
+        expected = cached_executable(project_root, selected, data.get("build_id"), legacy=legacy).resolve()
         executable = Path(str(data.get("executable") or expected)).resolve()
         if executable != expected:
             return None
@@ -111,8 +131,13 @@ def selected_executable(project_root: Path) -> Path | None:
 
 
 def run_selected_executable(args: list[str], *, portable_root: Path) -> int | None:
-    if not is_frozen() or os.environ.get(ACTIVE_ENV) or "--from-exe" in args or "build-notes" in args:
+    if (not is_frozen() or os.environ.get(UPDATE_CHILD_ENV) or "_apply-update" in args
+            or "--from-exe" in args or "build-notes" in args):
         return None
+    if os.environ.get(ACTIVE_ENV):
+        # Version probes set ACTIVE without a launched project's context.
+        if not os.environ.get(PORTABLE_ROOT_ENV) or runtime_root(portable_root) == legacy_runtime_root(portable_root):
+            return None
     executable = selected_executable(portable_root)
     if executable is None:
         return None
@@ -121,3 +146,20 @@ def run_selected_executable(args: list[str], *, portable_root: Path) -> int | No
     env[PORTABLE_ROOT_ENV] = str(portable_root.resolve())
     completed = subprocess.run([str(executable), *args], env=env, check=False)
     return completed.returncode
+
+
+def shared_entrypoint(root: Path) -> Path:
+    """Find the project's stable launcher for hooks and event merges."""
+    import shutil
+    from ..git.worktrees import list_worktrees
+    primary = Path(list_worktrees(root)[0]["path"])
+    launcher = primary / EXECUTABLE_NAME
+    if not launcher.is_file():
+        descriptor, temporary = tempfile.mkstemp(prefix="launcher-", suffix=".tmp", dir=primary)
+        os.close(descriptor)
+        try:
+            shutil.copy2(sys.executable, temporary)
+            os.replace(temporary, launcher)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    return launcher

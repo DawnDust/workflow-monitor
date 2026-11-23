@@ -163,10 +163,34 @@ def show_error(message: str) -> None:
             pass
 
 
-def run_portable_dashboard(
-    root: Path | None = None, refresh_seconds: float = 3.0,
-) -> int:
+def _open_dashboard(project: Path, refresh_seconds: float) -> int:
+    from project_hooks.ui.web.bridge import launch_web_dashboard
+
+    marker = project / ".git"
+    if marker.exists() and (not marker.is_dir() or (marker / "commondir").exists()):
+        from project_hooks.infrastructure.system.workflow_views import primary_root
+        project = primary_root(project)
+
+    def provider():
+        from project_hooks.cli import classify_branch, dashboard_action_service, read_model, set_project_root
+        from project_hooks.composition import build_web_data_provider
+
+        set_project_root(project)
+        return build_web_data_provider(read_model(), classify_branch, action_service=dashboard_action_service())
+
+    def diagnostics():
+        from project_hooks.cli import diagnostic_check_snapshot
+        return diagnostic_check_snapshot()
+
+    launch_web_dashboard(provider, refresh_seconds, project_root=project, diagnostic_checks=diagnostics)
+    return 0
+
+
+def run_portable_dashboard(root: Path | None = None, refresh_seconds: float = 3.0) -> int:
     project = (root or portable_root()).resolve()
+    if (project / CONFIG_PATH).is_file():
+        return _open_dashboard(project, refresh_seconds)
+
     import tkinter as tk
     from tkinter import ttk
 
@@ -188,32 +212,9 @@ def run_portable_dashboard(
     root_window.update()
     try:
         prepare_portable_project(project)
-        from project_hooks.cli import (
-            check_repository, classify_branch, dashboard_action_service,
-            diagnostic_check_snapshot, read_model, set_project_root,
-        )
-        from project_hooks.composition import build_web_data_provider
-        from project_hooks.ui.web.bridge import launch_web_dashboard
-
-        set_project_root(project)
-        # The Dashboard itself explains version/install/health blockers and
-        # keeps read-only diagnostics/update checks available.
-        check_repository(raise_on_error=False)
-        for child in root_window.winfo_children():
-            child.destroy()
-        provider = build_web_data_provider(
-            read_model(), classify_branch, branch=None,
-            action_service=dashboard_action_service(),
-        )
         loader_handle = root_window.winfo_id()
-        # pywebview's frozen WindowsForms loop blocks Python callbacks and
-        # monitor threads. Hide the fully prepared loading shell synchronously
-        # before transferring the main thread to WebView2.
         _hide_loader_window(loader_handle)
-        launch_web_dashboard(
-            provider, refresh_seconds, diagnostic_checks=diagnostic_check_snapshot,
-        )
-        return 0
+        return _open_dashboard(project, refresh_seconds)
     finally:
         if root_window.winfo_exists():
             root_window.destroy()
@@ -227,7 +228,12 @@ def main(argv: list[str] | None = None) -> int:
 
         return launcher_main(args)
     project = portable_root()
-    delegated = run_selected_executable(args, portable_root=project)
+    runtime_project = project
+    if args and args[0] == "--project" and len(args) > 1:
+        runtime_project = Path(args[1]).resolve()
+    elif args and args[0].startswith("--project="):
+        runtime_project = Path(args[0].split("=", 1)[1]).resolve()
+    delegated = run_selected_executable(args, portable_root=runtime_project)
     if delegated is not None:
         return delegated
     if args:
@@ -238,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
         # project containing the shell's working directory. Keep portable-root
         # behavior when no project is discoverable, and let `init <path>` use
         # its own target path.
-        has_project = "--project" in args
+        has_project = args[0] == "--project" or args[0].startswith("--project=")
         is_init = bool(args and args[0] == "init")
         if not has_project and not is_init:
             selected_project = discover_project_root() or project

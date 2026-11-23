@@ -89,7 +89,7 @@ def classify_failure(exc: BaseException) -> tuple[str, str, str]:
         return "external_dependency", "PH-X400", "检查本地文件或外部服务状态后重试；持续失败时导出诊断。"
     expected_names = {
         "workflowerror", "catalogerror", "projectmanagererror", "valueerror",
-        "actionblockederror",
+        "actionblockederror", "registryerror",
     }
     if name in expected_names or isinstance(exc, ValueError):
         return "validation", "PH-E100", "按错误提示修正输入或前置条件后重试。"
