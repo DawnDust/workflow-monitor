@@ -191,7 +191,7 @@ class DistributionTests(unittest.TestCase):
             if str(command[0]).endswith(".exe"):
                 self.assertEqual(kwargs["env"]["PROJECT_HOOKS_EXE_ACTIVE"], "1")
                 if command[-1] == "version":
-                    self.assertEqual(Path(command[0]), exe)
+                    self.assertTrue(Path(command[0]).samefile(exe))
                     return subprocess.CompletedProcess(command, 0, json.dumps(report), "")
                 selected = Path(command[command.index("--executable-path")+1])
                 with patch("project_hooks.infrastructure.system.project_manager.build_identity", return_value=identity):
