@@ -297,7 +297,7 @@ class MultiWorktreeTests(unittest.TestCase):
         migrate_project(self.root)
         first = self.start()
         path = Path(first["worktree"])
-        self.assertEqual(path.parent, self.root / ".worktrees")
+        self.assertTrue(path.parent.samefile(self.root / ".worktrees"))
         self.assertFalse((path / "workflow-monitor.exe").exists())
         self.assertFalse(self.command(self.root, "workflow", "list")[0]["current_task"])
         self.assertEqual(self.command(self.root, "workflow", "show", first["workflow_id"])["task"]["task_id"],

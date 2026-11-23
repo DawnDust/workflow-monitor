@@ -177,4 +177,3 @@ class ProjectSearch:
         if result.returncode:
             raise RuntimeError("无法读取保存的分支审计记录")
         return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-
