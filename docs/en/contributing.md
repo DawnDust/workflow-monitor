@@ -21,4 +21,10 @@ Do not commit the generated `site/` directory.
 
 ## Release preparation
 
+Build a local test executable with `python scripts/build_windows_exe.py --channel test`. Keep its filename fixed as `workflow-monitor.exe`; the `version` command and About page identify it as `<app-version>-test.<YYYYMMDD>.<short-build-id>`. Stable release builds use `--channel stable` and keep the same filename. Test-channel builds cannot produce a release manifest.
+
 Update the application version and changelog, run fast and full tests, build the documentation strictly, then run the release suite. A `v*` tag triggers the Windows release workflow, but creating a tag or Release requires explicit maintainer approval.
+
+## Test build delivery
+
+Test builds read `TEST_BUILD_NOTES.md` by default or accept `--notes <path>`; required sections must contain text. Notes are embedded and also generated as `dist/test-build-notes.md`, with automatic build identity and an end-of-build input check. `build-notes --format markdown|json` works outside projects. Report source, running executable and project-template state separately; a binary alone does not synchronize source. Preview a local project upgrade with `update --from-exe <path> --check`, then omit `--check` to apply under the existing preconditions. Preserve customized files and report conflicts.

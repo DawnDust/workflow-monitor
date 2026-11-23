@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .resource_layout import (
-    RESOURCE_KIND_LABELS, bundle_contains, is_simulation_bundle,
+    RESOURCE_KIND_LABELS, bundle_contains, is_legacy_program_resource, is_simulation_bundle,
     resource_directory_snapshot, resource_for_path,
 )
 from .resource_reconciliation import project_inventory
@@ -18,7 +18,8 @@ def folder_index(root: Path, items: list[dict], folders: list[dict]) -> dict:
     except ValueError:
         return {"folders": [], "entries": {}, "error": "resources 指向项目外，请先修复目录位置"}
     directories = resource_directory_snapshot(root, items, folders)
-    active = [item for item in items if item.get("path") and item.get("status") != "archived"]
+    active = [item for item in items if item.get("path") and item.get("status") != "archived"
+              and not is_legacy_program_resource(item["path"])]
     bundles = [item for item in active if is_simulation_bundle(item)]
     by_path = {item["path"].casefold(): item for item in active}
     by_directory = {directory["path"]: directory for directory in directories}
@@ -48,7 +49,8 @@ def folder_index(root: Path, items: list[dict], folders: list[dict]) -> dict:
     files, physical_directories = project_inventory(resource_root) if resource_root.is_dir() else ([], [])
     file_paths = {path.relative_to(root).as_posix(): path for path in files}
     for item in active:
-        if not is_simulation_bundle(item) and item["path"].startswith("resources/"):
+        if (not is_simulation_bundle(item) and item["path"].startswith("resources/")
+                and not is_legacy_program_resource(item["path"])):
             file_paths.setdefault(item["path"], root / item["path"])
     for relative, path in sorted(file_paths.items()):
         try:

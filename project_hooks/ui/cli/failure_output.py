@@ -6,6 +6,9 @@ def failure_result(c, exc, diagnostic, root, before_events):
     result = {"result": "failed", "code": diagnostic.get("code", "WORKFLOW_ERROR"),
               "reason": str(exc), "task_id": None, "saved": "unknown",
               "saved_events": [], "retry": "inspect", "next_action": diagnostic.get("suggestion") or "context --view verification"}
+    for key in ("retryable", "retry_after_seconds", "lock_owner"):
+        if key in diagnostic:
+            result[key] = diagnostic[key]
     if before_events is None:
         result["saved"] = "not-started"
     if root is None:
@@ -30,8 +33,13 @@ def failure_result(c, exc, diagnostic, root, before_events):
             result["retry"] = "recover-first" if pending else "fix-then-retry"
             result["next_action"] = "task recover" if pending else result["next_action"]
             result["logs"] = [str(p) for p in sorted((root / ".project_hooks/verification-logs" / active["task_id"]).glob("*")) if p.is_file()]
-        if result["code"] in {"WRITER_LOCKED", "WORKSPACE_BUSY"}:
+        if result["code"] in {"WRITER_LOCKED", "WORKSPACE_BUSY", "PH-W100"}:
             result["retry"] = "retry-after-writer"
+            result["retryable"] = True
+            result["retry_after_seconds"] = diagnostic.get("retry_after_seconds", 1)
+            if diagnostic.get("lock_owner"):
+                result["lock_owner"] = diagnostic["lock_owner"]
+            result["next_action"] = diagnostic.get("suggestion") or result["next_action"]
     except Exception:
         result["saved"] = "unknown"
         result["next_action"] = "context --view verification"

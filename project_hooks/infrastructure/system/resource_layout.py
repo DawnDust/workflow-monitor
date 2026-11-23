@@ -23,12 +23,15 @@ class ResourceDirectory:
         return f"resources/{self.name}"
 
 
+PROGRAM_DIRECTORY = "program"
+LEGACY_PROGRAM_RESOURCE_PATH = "resources/analysis"
+
+
 RESOURCE_DIRECTORIES = (
     ResourceDirectory("source", "literature", "文献", "外部原始资料与来源证据", "source"),
     ResourceDirectory("data", "data", "数据", "原始、过程和处理后数据", "data"),
     ResourceDirectory("theory", "theory", "理论", "理论、假设、定义和推导", "theory"),
-    ResourceDirectory("analysis", "simulation", "分析与程序", "分析代码、Notebook、实验与过程记录", "analysis"),
-    ResourceDirectory("outputs", "output", "输出", "兼容既有输出；新程序使用各自的输出子目录", "outputs", False),
+    ResourceDirectory("outputs", "output", "输出", "兼容既有登记；程序运行输出放在根目录 program/", "outputs", False),
     ResourceDirectory("others", "other", "其他", "暂时无法可靠分类的资料"),
     ResourceDirectory("reports", "report", "报告", "面向外部受众的项目总结与报告"),
     ResourceDirectory("sparks", "spark", "灵感", "自由记录点子、问题、猜想和偶然发现"),
@@ -48,6 +51,7 @@ LEGACY_BY_PATH = {
 }
 RESOURCE_KINDS = tuple(item.kind for item in RESOURCE_DIRECTORIES)
 RESOURCE_KIND_LABELS = {item.kind: item.label for item in RESOURCE_DIRECTORIES}
+RESOURCE_KIND_LABELS["simulation"] = "分析与程序（旧版）"
 
 IGNORED_DIRECTORY_NAMES = {
     ".git", ".project_hooks", "__pycache__", ".pytest_cache", "node_modules", ".venv",
@@ -74,8 +78,16 @@ def ensure_resource_directories(root: Path) -> list[str]:
     return created
 
 
+def is_legacy_program_resource(relative: str | Path) -> bool:
+    value = Path(relative).as_posix().strip("/").casefold()
+    prefix = LEGACY_PROGRAM_RESOURCE_PATH.casefold()
+    return value == prefix or value.startswith(prefix + "/")
+
+
 def resource_for_path(relative: str | Path) -> ResourceDirectory | None:
     value = Path(relative).as_posix().strip("/")
+    if is_legacy_program_resource(value):
+        return None
     folded = value.casefold()
     for prefix, item in RESOURCE_BY_PATH.items():
         if folded == prefix or folded.startswith(prefix + "/"):
@@ -114,6 +126,11 @@ def files_under(root: Path, relative_directory: str) -> list[Path]:
     for path in directory.rglob("*"):
         if not path.is_file() or not is_indexable_resource_file(path, base=directory):
             continue
+        try:
+            if is_legacy_program_resource(path.relative_to(root)):
+                continue
+        except ValueError:
+            pass
         try:
             path.resolve().relative_to(project_root)
         except ValueError:
@@ -184,8 +201,10 @@ def simulation_bundle_metadata(directory: Path, entrypoint: str | None = None) -
 
 def resource_directory_snapshot(root: Path, items: list[dict], folders: list[dict] | None = None) -> list[dict]:
     presets = {d.relative_path: d for d in RESOURCE_DIRECTORIES if d.required or (root / d.relative_path).is_dir()}
-    registered = {f["path"]: f for f in folders or [] if f["status"] != "archived"}
-    bundles = [i for i in items if is_simulation_bundle(i) and i.get("status") != "archived"]
+    registered = {f["path"]: f for f in folders or [] if f["status"] != "archived"
+                  and not is_legacy_program_resource(f["path"])}
+    bundles = [i for i in items if is_simulation_bundle(i) and i.get("status") != "archived"
+               and not is_legacy_program_resource(i.get("path", ""))]
     paths = set(presets) | set(registered)
     base = root / "resources"
     if base.is_dir():
@@ -193,6 +212,7 @@ def resource_directory_snapshot(root: Path, items: list[dict], folders: list[dic
         for current, names, _files in os.walk(base, followlinks=False):
             directory = Path(current)
             names[:] = [name for name in names if name.casefold() not in IGNORED_DIRECTORY_NAMES
+                        and not (directory == base and name.casefold() == "analysis")
                         and not (directory / name).is_symlink() and not (directory / name).is_junction()]
             for name in names:
                 relative = (directory / name).relative_to(root).as_posix()
@@ -203,6 +223,7 @@ def resource_directory_snapshot(root: Path, items: list[dict], folders: list[dic
         preset, folder = presets.get(relative), registered.get(relative)
         directory = root / relative
         selected = [i for i in items if i.get("path") and i.get("status") != "archived"
+                    and not is_legacy_program_resource(i["path"])
                     and bundle_contains(relative, i["path"])]
         files = files_under(root, relative)
         indexed = {str(i.get("path")).casefold() for i in selected}
@@ -246,6 +267,8 @@ def catalog_consistency_issues(root: Path, items: list[dict], folders: list[dict
         relative = item.get("path")
         if not relative:
             continue
+        if is_legacy_program_resource(relative):
+            continue
         folded = relative.casefold()
         if folded in indexed:
             add("DUPLICATE_RESOURCE_PATH", f"资料路径大小写冲突或重复登记: {relative}", relative, item, hard=True)
@@ -282,6 +305,8 @@ def catalog_consistency_issues(root: Path, items: list[dict], folders: list[dict
             add("BUNDLE_DUPLICATE_ITEM", f"模拟资料包内文件不得重复登记: {relative}", relative, item, hard=True)
     for folder in folders or []:
         if folder["status"] == "archived":
+            continue
+        if is_legacy_program_resource(folder["path"]):
             continue
         target = root / folder["path"]
         try:

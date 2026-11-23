@@ -7,7 +7,10 @@ from pathlib import Path
 
 from ...core.events import resolve_timezone
 from ...core.reviews import digest, project_review
-from .resource_layout import files_under, resource_for_path, is_simulation_bundle, bundle_contains
+from .resource_layout import (
+    files_under, resource_for_path, is_legacy_program_resource,
+    is_simulation_bundle, bundle_contains,
+)
 
 
 def inventory(root, branch, events, context, catalog_items, catalog_relations, config, *, now=None):
@@ -67,6 +70,8 @@ def inventory(root, branch, events, context, catalog_items, catalog_relations, c
 
     registered = {}
     for item in catalog_items:
+        if item.get("status") == "archived" or is_legacy_program_resource(item.get("path") or ""):
+            continue
         target = obj("resource:" + item["item_id"], item.get("title"))
         target["status"] = item.get("status", "active")
         target["path"] = item.get("path")

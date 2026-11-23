@@ -29,6 +29,7 @@ from .catalog_commands import (
     catalog_command,
     configure_catalog_parser,
     decode_item,
+    migrate_analysis,
 )
 from ...infrastructure.system.diagnostics import (
     cleanup_resolved_diagnostics,
@@ -93,7 +94,7 @@ from ...infrastructure.git.build_identity import build_identity
 from ...application.action_service import ActionProgress, WorkflowActionService, action_spec
 from ...composition import build_action_service
 from ...core.branches import classify_branch as classify_branch_with_policy
-from ...core.privacy import sensitive_categories
+from ...core.privacy import added_json_findings, added_line_categories, sanitize_public_payload
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -125,7 +126,7 @@ STATE_ARGUMENTS = (
     "goal", "current_step", "judgment", "breakpoint", "blocker", "status", "main_goal_version",
 )
 DAILY_HELP = """\
-usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,report,end,diagnostics} ...
+usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,report,end,diagnostics,privacy} ...
 
 项目内维护入口。冻结 EXE 无参数启动桌面界面；Codex 使用显式子命令。
 
@@ -135,6 +136,7 @@ usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,report
   report      按需填报进展、证据与审阅结果
   end         完成任务生命周期
   diagnostics 查看或导出本地脱敏诊断
+  privacy     安全脱敏基线之后的事件差量
 
 Codex 常用:
   context --view brief --format markdown
@@ -160,11 +162,14 @@ usage: workflow-monitor [-h] [--help-all] [--project PATH] <command> ...
 状态与记录:
   project, stage, state, history, explorations, catalog
 
+程序目录:
+  program migrate-analysis  预览或迁移旧 resources/analysis 内容
+
 探索流程:
   attempt, exploration, prepare-pr, archive-attempt
 
 数据维护:
-  db, diagnostics
+  db, diagnostics, privacy
 
 内部 Git Hook 命令不显示。
 使用 <命令> --help 查看详细参数。
@@ -251,12 +256,19 @@ def command_is_read_only(args: argparse.Namespace) -> bool:
         or (args.catalog_command == "migrate-layout" and args.dry_run)
     ):
         return True
+    if args.command == "program" and args.program_command == "migrate-analysis" and not args.apply:
+        return True
     return False
+
+
+def command_requires_project_lock(args: argparse.Namespace) -> bool:
+    """The update parent stages a verified EXE; its migration child owns writes."""
+    return not command_is_read_only(args) and args.command != "update"
 
 
 def assert_project_version_compatible(args: argparse.Namespace) -> None:
     installed = installed_project_version()
-    if (installed and installed != __version__ and args.command != "_apply-update"
+    if (installed and installed != __version__ and args.command not in {"_apply-update", "update"}
             and not command_is_read_only(args)):
         raise WorkflowError(
             f"项目模板版本为 {installed}，当前 EXE 为 {__version__}；"
@@ -888,6 +900,7 @@ def start_task(args: argparse.Namespace) -> dict:
     except ValueError as exc:
         raise WorkflowError(str(exc)) from exc
     created_branch = False
+    initialize_attempt = False
     head_result = run_git(["rev-parse", "--verify", "HEAD"], check=False)
     base_head = head_result.stdout.strip() if head_result.returncode == 0 else None
     if classification["kind"] == "stable":
@@ -914,8 +927,8 @@ def start_task(args: argparse.Namespace) -> dict:
         requested_track = requested_track or classification["track"]
         if requested_track != classification["track"] or (requested_topic and requested_topic != classification["topic"]):
             raise WorkflowError(f"start 参数与当前探索分支 {original_branch} 不一致")
-        if not get_attempt(original_branch):
-            raise WorkflowError(f"当前探索分支缺少数据库尝试记录: {original_branch}")
+        attempt = get_attempt(original_branch)
+        initialize_attempt = attempt is None
     else:
         raise WorkflowError(f"不支持在分支 {original_branch} 启动任务")
     branch = current_branch()
@@ -941,7 +954,7 @@ def start_task(args: argparse.Namespace) -> dict:
                    payload={**record["declaration"], "resource_baseline": resource_baseline})]
     events.extend(emit(kind, branch=branch, task_id=args.task_id, payload=payload)
                   for kind, payload in stage_events_payloads)
-    if classification["kind"] == "exploration" and created_branch:
+    if classification["kind"] == "exploration" and (created_branch or initialize_attempt):
         events.append(emit("attempt.started", branch=branch, task_id=args.task_id, payload={
             "attempt_id": args.task_id, "track": classification["track"], "topic": classification["topic"],
             "base_commit": base_head, "source_task_id": args.task_id,
@@ -1202,24 +1215,171 @@ def attempt_update(args: argparse.Namespace) -> dict:
     return get_attempt(branch) or {}
 
 
-def check_staged_privacy() -> None:
-    """Check added lines only; historical journal content is handled by migration."""
-    diff = run_git(["diff", "--cached", "--no-ext-diff", "--no-color", "--unified=0", "--"]).stdout
-    current_path = "unknown"
-    findings: set[str] = set()
+def _staged_changed_paths() -> list[str]:
+    fields = run_git(["diff", "--cached", "--name-status", "-z", "--"]).stdout.split("\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if not status:
+            continue
+        count = 2 if status.startswith(("R", "C")) else 1
+        changed = fields[index:index + count]
+        index += count
+        if status[0] in {"A", "M", "R", "C", "T"} and changed:
+            paths.append(changed[-1])
+    return paths
+
+
+_DIFF_HUNK_START = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _added_diff_lines(diff: str):
+    """Yield destination line numbers and content from a zero-context diff."""
+    destination_line: int | None = None
     for line in diff.splitlines():
-        if line.startswith("+++ b/"):
-            current_path = line[6:]
-        elif line.startswith("+") and not line.startswith("+++"):
-            categories = sensitive_categories(line[1:])
-            for category in categories:
-                findings.add(f"{current_path}: {category}")
-    added = run_git(["diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--"]).stdout
-    for path in added.split("\0"):
+        hunk = _DIFF_HUNK_START.match(line)
+        if hunk:
+            destination_line = int(hunk.group(1))
+        elif destination_line is None:
+            continue
+        elif line.startswith("+"):
+            yield destination_line, line[1:]
+            destination_line += 1
+        elif line.startswith("-"):
+            continue
+        elif line.startswith(" "):
+            destination_line += 1
+        else:
+            destination_line = None
+
+
+def check_staged_privacy() -> None:
+    """Check added lines with NUL-safe paths and report their destination lines."""
+    findings: set[str] = set()
+    paths = _staged_changed_paths()
+    for path in paths:
         if re.search(r"(?i)(?:^|/)(?:\.env(?:\..*)?|id_rsa|id_ed25519|credentials(?:\..*)?|secrets(?:\..*)?)$|\.(?:pem|p12|pfx|key|sqlite3?|db)$", path):
             findings.add(f"{path}: sensitive_filename")
+        pathspec = ":(literal)" + path
+        diff = run_git([
+            "diff", "--cached", "--no-ext-diff", "--no-color", "--unified=0",
+            "--", pathspec,
+        ]).stdout
+        changed_lines: dict[int, str] = {}
+        for line_number, added in _added_diff_lines(diff):
+            changed_lines[line_number] = added
+            for category in added_line_categories(added, path):
+                findings.add(f"{path}:{line_number}: {category}")
+        if path.lower().endswith(".json") and changed_lines:
+            staged = run_git(["show", f":./{path}"], check=False)
+            if staged.returncode == 0:
+                findings.update(
+                    f"{path}:{line_number}: {category}"
+                    for line_number, category in added_json_findings(staged.stdout, changed_lines)
+                )
     if findings:
         raise WorkflowError("暂存内容包含需要脱敏的信息:\n- " + "\n- ".join(sorted(findings)))
+
+
+def sanitize_uncommitted_events(base_ref: str | None = None, *, apply: bool = False) -> dict:
+    """Redact event additions relative to a trusted ref without touching its history."""
+    ref = clean_text(base_ref or branch_policy()["default_branch"], "基线分支", 300)
+    assert ref is not None
+    verified_ref = run_git(["rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"], check=False)
+    if verified_ref.returncode != 0:
+        raise WorkflowError("找不到指定的已提交基线分支或提交")
+
+    relative_journal = journal_path().relative_to(ROOT).as_posix()
+    base_result = run_git(["show", f"{verified_ref.stdout.strip()}:{relative_journal}"], check=False)
+    if base_result.returncode != 0:
+        raise WorkflowError("指定基线中没有维护事件账本")
+
+    def parse_journal(document: str) -> list[dict]:
+        result = []
+        try:
+            for line_number, line in enumerate(document.splitlines(), 1):
+                if line.strip():
+                    result.append(validate_event(json.loads(line), line=line_number))
+        except (ValueError, StoreError) as exc:
+            raise WorkflowError("事件账本无法解析；未执行脱敏迁移") from exc
+        return result
+
+    baseline = parse_journal(base_result.stdout)
+    head_result = run_git(["show", f"HEAD:{relative_journal}"], check=False)
+    if head_result.returncode != 0:
+        raise WorkflowError("当前 HEAD 中没有维护事件账本")
+    committed = parse_journal(head_result.stdout)
+    current = load_events(journal_path())
+    baseline_by_id = {event["event_id"]: event for event in baseline}
+    committed_by_id = {event["event_id"]: event for event in committed}
+    current_by_id = {event["event_id"]: event for event in current}
+    for event_id, event in baseline_by_id.items():
+        existing = current_by_id.get(event_id)
+        if existing is None or canonical_json(existing) != canonical_json(event):
+            raise WorkflowError("当前账本缺少或修改了基线事件；拒绝覆盖历史记录")
+
+    sanitized_ids: list[str] = []
+    output_events: list[dict] = []
+    for event in current:
+        candidate = json.loads(canonical_json(event))
+        if event["event_id"] not in baseline_by_id:
+            if event["event_id"] in committed_by_id:
+                if added_line_categories(canonical_json(event), relative_journal):
+                    raise WorkflowError("已提交的分支事件包含隐私值；拒绝改写历史事件，请使用专门的历史迁移流程")
+            else:
+                candidate["payload"] = sanitize_public_payload(candidate["payload"])
+                if canonical_json(candidate) != canonical_json(event):
+                    sanitized_ids.append(event["event_id"])
+        output_events.append(candidate)
+
+    if not sanitized_ids:
+        return {"sanitized": False, "base_ref": ref,
+                "message": "基线之后的事件无需脱敏；账本和暂存区未更改。"}
+
+    task_id = None
+    try:
+        task_id = read_active()["task_id"]
+    except Exception:
+        pass
+    output_events.append(emit(
+        "privacy.events_sanitized", branch=current_branch(), task_id=task_id,
+        payload={"base_ref": ref, "event_ids": sorted(sanitized_ids),
+                 "event_count": len(sanitized_ids),
+                 "note": "已脱敏基线之后的未发布事件内容；事件标识和非敏感证据保持不变。"},
+    ))
+
+    # Validate every rewritten addition before writing anything; errors never echo values.
+    for event in output_events:
+        if event["event_id"] in baseline_by_id:
+            continue
+        line = canonical_json(event)
+        if added_line_categories(line, relative_journal):
+            raise WorkflowError("脱敏后的新增事件仍触发隐私扫描；未更改账本")
+
+    if not apply:
+        return {"sanitized": False, "preview": True, "base_ref": ref,
+                "event_count": len(sanitized_ids), "event_ids": sorted(sanitized_ids),
+                "next": "审阅受影响事件后，使用相同基线并添加 --apply 执行迁移。"}
+
+    path = journal_path()
+    descriptor, temp_name = tempfile.mkstemp(prefix="events-sanitized-", suffix=".jsonl", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            for event in output_events:
+                handle.write(canonical_json(event) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+    run_git(["add", "--", relative_journal])
+    return {"sanitized": True, "base_ref": ref, "event_count": len(sanitized_ids),
+            "event_ids": sorted(sanitized_ids), "audit_event_added": True,
+            "staged_path": relative_journal,
+            "next": "审阅脱敏差异并运行 pre-commit 隐私检查；仅用 squash 集成，避免带入旧分支提交对象。"}
 
 
 def pre_commit_check(finish_record: dict | None = None) -> None:
@@ -1677,14 +1837,21 @@ def prepare_pr() -> dict:
 
 def archive_attempt() -> dict:
     assert_no_active_task()
-    check_repository(raise_on_error=True)
-    assert_clean_worktree()
     branch = current_branch()
     attempt = get_attempt(branch)
     if classify_branch(branch)["kind"] != "exploration" or not attempt:
         raise WorkflowError("archive-attempt 只能在有效探索分支运行")
-    if attempt["state"] not in {"negative", "inconclusive", "paused"} or not has_finished_receipt(branch, attempt["state"]):
+    if attempt["state"] == "validated":
+        raise WorkflowError(
+            "validated 探索不能使用 archive-attempt；成功合入 main 后请运行 "
+            f"exploration archive-validated {branch}"
+        )
+    if attempt["state"] not in {"negative", "inconclusive", "paused"}:
         raise WorkflowError("尝试必须先通过 end 记录 negative、inconclusive 或 paused")
+    if not has_finished_receipt(branch, attempt["state"]):
+        raise WorkflowError("尝试必须先通过 end 记录对应的结束回执")
+    check_repository(raise_on_error=True)
+    assert_clean_worktree()
     target = f"archive/{attempt['track']}/{attempt['topic']}"
     if ref_exists(f"refs/heads/{target}") or ref_exists(f"refs/remotes/origin/{target}"):
         raise WorkflowError(f"归档分支已存在或与远程冲突: {target}")
@@ -1693,6 +1860,80 @@ def archive_attempt() -> dict:
     return {"archived": True, "from": branch, "branch": target, "network_actions_performed": False,
             "next": [f"提交 maintenance/events.jsonl 后执行 git push -u origin {target}",
                      f"回到 main 的稳定任务运行 project_hooks exploration import {target}"]}
+
+
+def archive_validated_exploration(branch_ref: str) -> dict:
+    record = read_active()
+    current = assert_active_branch(record)
+    default = branch_policy()["default_branch"]
+    if current != default or record["git"]["track"] != "stable":
+        raise WorkflowError(f"成功探索归档必须在 {default} 的 stable 活动任务中运行")
+
+    requested = clean_text(branch_ref, "探索分支", 300)
+    assert requested is not None
+    classification = classify_branch(requested)
+    if classification["kind"] == "exploration":
+        source = requested
+        target = f"archive/{classification['track']}/{classification['topic']}"
+    elif classification["kind"] == "archive":
+        source = f"{classification['track']}/{classification['topic']}"
+        target = requested
+    else:
+        raise WorkflowError("参数必须是 research/experiment/sandbox 探索分支或对应 archive 分支")
+
+    source_ref, target_ref = f"refs/heads/{source}", f"refs/heads/{target}"
+    has_source, has_target = ref_exists(source_ref), ref_exists(target_ref)
+    if not has_source and not has_target:
+        raise WorkflowError("找不到该探索分支或其本地 archive 分支")
+    if has_source and has_target:
+        raise WorkflowError(f"源分支和归档分支同时存在，需先人工消除引用冲突: {target}")
+
+    checked_out: set[str] = set()
+    for line in run_git(["worktree", "list", "--porcelain"]).stdout.splitlines():
+        if line.startswith("branch refs/heads/"):
+            checked_out.add(line.removeprefix("branch refs/heads/"))
+    if source in checked_out or target in checked_out:
+        raise WorkflowError("探索分支仍被 worktree 检出；先从对应 worktree 切出或移除后重试")
+
+    ref = source if has_source else target
+    commit = run_git(["rev-parse", f"{ref}^{{commit}}"]).stdout.strip()
+    main_commit = run_git(["rev-parse", f"{default}^{{commit}}"]).stdout.strip()
+    attempt = get_attempt(source)
+    if not attempt or attempt["state"] != "validated":
+        state = attempt["state"] if attempt else "无有效探索记录"
+        raise WorkflowError(f"成功归档仅适用于状态为 validated 的探索；当前状态：{state}")
+    if not has_finished_receipt(source, "validated"):
+        raise WorkflowError("探索缺少 validated 结束回执；拒绝归档")
+
+    matching = [event for event in load_events(journal_path())
+                if event["event_type"] == "attempt.archived"
+                and event["payload"].get("attempt_id") == attempt["attempt_id"]
+                and event["payload"].get("archive_branch") == target]
+    if matching:
+        return {"archived": True, "already_recorded": True, "source": source,
+                "branch": target, "commit": commit, "state": "validated"}
+
+    if run_git(["merge-base", "--is-ancestor", commit, main_commit], check=False).returncode == 0:
+        integration = "ancestor"
+    else:
+        merged = run_git(["merge-tree", "--write-tree", default, ref], check=False)
+        main_tree = run_git(["rev-parse", f"{default}^{{tree}}"]).stdout.strip()
+        merged_tree = merged.stdout.splitlines()[0].strip() if merged.stdout.splitlines() else ""
+        if merged.returncode != 0 or merged_tree != main_tree:
+            raise WorkflowError(f"探索分支提交尚未完整包含在 {default} 中；拒绝归档")
+        integration = "squash-equivalent"
+
+    if has_source:
+        run_git(["branch", "-m", source, target])
+    persist([emit(
+        "attempt.archived", branch=source, task_id=record["task_id"],
+        payload={"attempt_id": attempt["attempt_id"], "archive_branch": target,
+                 "disposition": "validated-integrated", "integrated_commit": commit,
+                 "integration": integration},
+    )])
+    return {"archived": True, "already_recorded": False, "source": source,
+            "branch": target, "commit": commit, "state": "validated",
+            "next": "结束当前 stable 任务；此命令不推送分支或修改探索判决。"}
 
 
 def context_data(branch: str | None = None) -> dict:
@@ -1889,6 +2130,12 @@ def catalog_runtime() -> CatalogRuntime:
         auto_start=catalog_auto_start,
         auto_finish=catalog_auto_finish,
     )
+
+
+def program_command(args: argparse.Namespace) -> dict:
+    if args.program_command == "migrate-analysis":
+        return migrate_analysis(args, catalog_runtime())
+    raise WorkflowError(f"未知程序管理命令: {args.program_command}")
 
 
 def exploration_import(args: argparse.Namespace) -> dict:
@@ -2396,7 +2643,7 @@ def cli_shared_action(args: argparse.Namespace) -> tuple[str, dict] | None:
         action_id = "exploration.prepare_pr"
     elif args.command == "archive-attempt":
         action_id = "exploration.archive"
-    elif args.command == "exploration":
+    elif args.command == "exploration" and args.exploration_command == "import":
         action_id = "exploration.import"
     if action_id is None:
         return None

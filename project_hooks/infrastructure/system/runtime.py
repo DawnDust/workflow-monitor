@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from ... import EXECUTABLE_NAME, __version__
@@ -13,6 +16,7 @@ from ... import EXECUTABLE_NAME, __version__
 
 ACTIVE_ENV = "PROJECT_HOOKS_EXE_ACTIVE"
 PORTABLE_ROOT_ENV = "PROJECT_HOOKS_PORTABLE_ROOT"
+UPDATE_CHILD_ENV = "PROJECT_HOOKS_UPDATE_CHILD"
 
 
 def is_frozen() -> bool:
@@ -30,6 +34,43 @@ def runtime_root(project_root: Path) -> Path:
     return project_root.resolve() / ".project_hooks" / "runtime"
 
 
+def cached_executable(project_root: Path, version: str, build_id: str | None = None) -> Path:
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ValueError("非法缓存版本")
+    folder = runtime_root(project_root) / "executables" / version
+    if build_id is not None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", build_id):
+            raise ValueError("非法缓存构建 ID")
+        folder = folder / "builds" / build_id
+    return folder / EXECUTABLE_NAME
+
+
+def write_pointer(version: str, project_root: Path, executable: Path, *, build_id: str | None = None) -> None:
+    from ..git.build_identity import build_identity
+    runtime = runtime_root(project_root)
+    pointer_executable = Path(executable).resolve()
+    expected = cached_executable(project_root, version, build_id).resolve()
+    if pointer_executable != expected or not pointer_executable.is_file():
+        raise ValueError("更新版本指针只能指向已缓存并校验的版本化 EXE")
+    runtime.mkdir(parents=True, exist_ok=True)
+    pointer = runtime / "current.json"
+    descriptor, name = tempfile.mkstemp(prefix="current-", suffix=".json", dir=runtime)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(
+                {"version": version, "executable": str(pointer_executable), "build_id": build_id,
+                 "built_at": build_identity().get("built_at")},
+                handle, ensure_ascii=False, indent=2,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, pointer)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
 def selected_executable(project_root: Path) -> Path | None:
     runtime = runtime_root(project_root)
     pointer = runtime / "current.json"
@@ -38,15 +79,29 @@ def selected_executable(project_root: Path) -> Path | None:
     try:
         data = json.loads(pointer.read_text(encoding="utf-8"))
         selected = str(data["version"])
-        executable = Path(str(data.get("executable") or (
-            runtime / "executables" / selected / EXECUTABLE_NAME
-        ))).resolve()
+        expected = cached_executable(project_root, selected, data.get("build_id")).resolve()
+        executable = Path(str(data.get("executable") or expected)).resolve()
+        if executable != expected:
+            return None
         selected_key = tuple(int(part) for part in selected.split("."))
         bundled_key = tuple(int(part) for part in __version__.split("."))
     except (KeyError, OSError, ValueError, TypeError):
         return None
     if selected_key < bundled_key or not executable.is_file():
         return None
+    if selected_key == bundled_key:
+        from ..git.build_identity import build_identity
+        bundled = build_identity()
+        if (bundled.get("channel") == "test" and bundled.get("built_at")
+                and str(data.get("built_at") or "") < bundled["built_at"]):
+            return None
+    if data.get("build_id"):
+        try:
+            digest = (executable.parent / ".exe-sha256").read_text(encoding="ascii").strip()
+            if hashlib.sha256(executable.read_bytes()).hexdigest() != digest:
+                return None
+        except OSError:
+            return None
     try:
         if executable.samefile(Path(sys.executable)):
             return None
@@ -56,7 +111,7 @@ def selected_executable(project_root: Path) -> Path | None:
 
 
 def run_selected_executable(args: list[str], *, portable_root: Path) -> int | None:
-    if not is_frozen() or os.environ.get(ACTIVE_ENV):
+    if not is_frozen() or os.environ.get(ACTIVE_ENV) or "--from-exe" in args or "build-notes" in args:
         return None
     executable = selected_executable(portable_root)
     if executable is None:

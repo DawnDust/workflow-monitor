@@ -13,6 +13,7 @@
 - 已启动的任务通过 `report` 一次更新进度和科研证据，完成时运行 `end`。只有 `validated` 尝试可准备 Squash PR，合并必须等待用户明确确认。
 - 项目总目标使用 `project update`；科研进展、证据和关联篇章修订统一通过 `report` 填报，程序生成记录。新证据改变判断时必须提供修订说明、概况和证据；旧 `stage`、`attempt update` 继续兼容。
 - 科研资料文件放在 `resources/` 的预设或已登记自定义文件夹，并通过 `catalog` 指令登记；`resources/sparks/` 中未登记的 Markdown 灵感除外。`check` 必须保持通过。
+- 理论物理任务涉及研究方向与问题收窄、模型分析、理论推导、数值验证、反例压力测试或文献查新时，按需阅读 `maintenance/PHYSICS_RESEARCH_ROADMAP.md`。它只提供研究思路，不是强制阶段、验收项或门禁。
 - 仅当用户明确要求纯 Git 发布，且 `main` 没有活动任务、不再编辑、改动已经结束并验证通过时，才可直接检查、暂存、提交和推送。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态、绕过 `end`、在 `main` 试改、自动合并。
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
@@ -26,6 +27,8 @@
 - 精简显示不改变测试、篇章审阅和授权门禁；失败与警告必须处理。不要用无参 EXE 获取上下文，无参冻结 EXE 会启动桌面界面。
 - 科研审阅按篇章、探索、资料分类；`review list --kind ...` 可筛选，`review show` 默认给出精简变化，`--full` 才展开完整来源。正式研究使用变化触发和 14 天提醒，稳定参考不作周期提醒，示例仅提示完整性问题。AI 自主处理当前任务有关事项，无关事项延后；无变化不改写内容，延期不替代门禁。
 - 审阅状态与完整覆盖由程序从事件自动判定和记录；AI 只选择必要的科研审阅结果，不重复填报整体状态。完整性问题不能靠审阅或延期清除。
+- 消化科研结果、阅读长证明或整理理解卡点时，按需阅读 `maintenance/RESEARCH_UNDERSTANDING_GUIDE.md`；它不设置理解评分、强制阶段或完成门禁。
+- 收到测试 EXE 时分别核对源码同步、实际运行构建和项目模板升级。源码仓库先比较构建指纹；一致则报告已一致，无需源码修改，不一致须有对应提交或补丁。科研项目使用 `update --from-exe <路径> --check` 预览，再在授权范围内实际升级；文件替换不等于模板升级。存在定制冲突时报告需要处理，不能笼统宣称更新完成。测试构建提供 `build-notes`，构建成功不代表功能测试通过。
 <!-- project-maintenance-hooks:end -->
 
 ## 软件维护测试
@@ -36,6 +39,9 @@
 
 ## 资料登记与目录用途
 
+- 灵感和未成形的问题放入 `resources/sparks/`；已经形成下一步行动或研究方案的内容放入 `resources/plans/`；基于来源整理的成型讲解与学习材料放入 `resources/tutorials/`。
+- 新建程序、实验代码、Notebook、依赖和运行输出统一放在仓库根目录 `program/`；不要放入 `resources/`，也不要登记为资料。程序仍由 Git 跟踪。
+- 移动已登记资料时保留原 catalog ID 并更新其路径；操作前刷新 `catalog folder index`。目录归属不能从内容和现有用途可靠判断时，先询问用户。
 - 资料路径失效先运行 `catalog reconcile` 搜索可能的移动位置；唯一内容哈希匹配可通过 `--apply` 修复原登记，保留资料身份和关系。歧义、无历史哈希或范围外位置需要用户选择新位置或确认归档，不自动删除或归档。
 - 文件夹导航登记使用 `catalog folder add/update/list/archive/restore`。教程、翻译用于文献加工，plans 用于 Sparks 的下一步；登记文件夹不替代内部文件登记。
 - `start` 保存既有资料问题；AI 在 start/report/end 用 depends_on、deliverable 登记直接依赖和交付物（catalog:ID 或 path:相对路径）。无关且未恶化的既有资料问题保留待处理，不阻止 completed；任务交付物和直接依赖缺失仍阻止完成。全局 check 继续报告全部问题。

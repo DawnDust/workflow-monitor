@@ -23,6 +23,8 @@ from project_hooks.infrastructure.system.diagnostics import (
     resolve_diagnostic,
     sanitize_text,
 )
+from project_hooks.infrastructure.persistence.transaction import MutationLockError
+from project_hooks.infrastructure.system.updater import UpdateApplyError
 
 
 class DiagnosticsTests(unittest.TestCase):
@@ -59,6 +61,52 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(first["code"], "PH-E100")
         self.assertEqual(first["fingerprint"], second["fingerprint"])
         self.assertNotEqual(first["incident_id"], second["incident_id"])
+
+    def test_writer_lock_conflict_is_structured_and_retryable(self) -> None:
+        error = MutationLockError(
+            "项目正被另一个写命令占用",
+            owner={
+                "status": "active", "pid": 4242, "command": "catalog.ingest",
+                "task_id": "task-7", "acquired_at": "2026-10-05T10:00:00+00:00",
+                "path": "must-not-be-copied",
+            },
+        )
+        record = record_failure(
+            self.root, error, command="catalog.ingest", application_version="1.5.0",
+            schema_version=3, execution_mode="source",
+        )
+
+        self.assertEqual(record["schema_version"], 2)
+        self.assertEqual(record["category"], "busy")
+        self.assertEqual(record["code"], "PH-W100")
+        self.assertTrue(record["retryable"])
+        self.assertEqual(record["retry_after_seconds"], 1)
+        self.assertEqual(record["lock_owner"]["pid"], 4242)
+        self.assertNotIn("path", record["lock_owner"])
+        overview = diagnostics_overview(self.root, application_version="1.5.0")
+        self.assertEqual(overview["issues"][0]["code"], "PH-W100")
+        self.assertTrue(overview["issues"][0]["retryable"])
+        self.assertEqual(overview["issues"][0]["lock_owner"]["command"], "catalog.ingest")
+
+    def test_child_update_lock_failure_remains_busy_in_parent_diagnostics(self) -> None:
+        child = create_failure_record(
+            self.root, MutationLockError(
+                "新版迁移等待项目写锁超时",
+                owner={"status": "active", "pid": 4242, "command": "catalog.ingest"},
+            ), command="_apply-update", application_version="2.1.0",
+            schema_version=5, execution_mode="frozen",
+        )
+        parent_error = UpdateApplyError(child)
+        record = record_failure(
+            self.root, parent_error, command="update", application_version="2.0.0",
+            schema_version=5, execution_mode="frozen",
+        )
+
+        self.assertEqual(record["category"], "busy")
+        self.assertEqual(record["code"], "PH-W100")
+        self.assertEqual(record["incident_id"], child["incident_id"])
+        self.assertEqual(record["lock_owner"]["pid"], 4242)
+        self.assertEqual(len(load_records(self.root)), 1)
 
     def test_expected_validation_is_formatted_but_not_persisted(self) -> None:
         record = record_failure(

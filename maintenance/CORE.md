@@ -17,7 +17,9 @@
 ## 资料登记与目录用途
 
 - 资料路径失效先运行 `catalog reconcile` 搜索可能的移动位置；唯一内容哈希匹配可通过 `--apply` 修复原登记，保留资料身份和关系。歧义、无历史哈希或范围外位置需要用户选择新位置或确认归档，不自动删除或归档。
+- 探索分支导入旧版本写入的隐私值时，先用 `privacy sanitize-events --base-ref main` 预览，再加 `--apply` 迁移尚未提交的事件差量。该命令保留基线事件不变、维持受影响事件 ID 并追加迁移审计事件；迁移后审阅差异并通过提交隐私检查。若敏感事件已进入当前分支提交，命令会拒绝改写；不得集成或推送含旧值的历史，需等待受支持的历史迁移流程。
 - 文件夹导航登记使用 `catalog folder add/update/list/archive/restore`。教程、翻译用于文献加工，plans 用于 Sparks 的下一步；登记文件夹不替代内部文件登记。
+- 创建程序时将代码、依赖及运行输出放在根目录 `program/`；不放入 `resources/`，不登记为资料。旧项目使用 `program migrate-analysis` 预览迁移 `resources/analysis/`，确认后加 `--apply`。
 - `start` 保存既有资料问题；AI 在 start/report/end 用 depends_on、deliverable 登记直接依赖和交付物（catalog:ID 或 path:相对路径）。无关且未恶化的既有资料问题保留待处理，不阻止 completed；任务交付物和直接依赖缺失仍阻止完成。全局 check 继续报告全部问题。
 - 确实受阻时使用 `end --result blocked --blocker <原因> --evidence <证据> --next <恢复条件>`。检查失败保留活动任务，不默认 abandon；只有用户明确放弃才运行 task abandon。所有修复通过工作流命令或结构化服务追加事件，不直接编辑 SQLite 或既有事件，历史 abandoned 不改写。
 - 每次资料创建、编辑、导入、移动、重命名或删除前，重新读取 `catalog folder index`，按目录用途选择位置；代码文件按仓库结构处理。新目录先创建并用 `catalog folder add` 登记名称和用途，再刷新索引；归属不明确时询问用户。输出导入显式指定 `--folder`，不自动重建顶层 outputs。

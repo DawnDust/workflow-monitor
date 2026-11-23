@@ -23,6 +23,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dist", type=Path, default=Path("dist"))
     parser.add_argument("--version", required=True)
+    parser.add_argument("--build-info", type=Path, default=ROOT / "build" / "build-info.json")
     parser.add_argument("--sbom", type=Path)
     parser.add_argument("--authenticode-json", type=Path)
     args = parser.parse_args()
@@ -38,11 +39,13 @@ def main() -> int:
         "https://github.com/DawnDust/workflow-monitor/"
         f"releases/download/v{args.version}/"
     )
-    build_info_path = ROOT / "build" / "build-info.json"
+    build_info_path = args.build_info.resolve()
     try:
         build_identity = json.loads(build_info_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         build_identity = {"build_id": "unknown"}
+    if build_identity.get("channel") == "test":
+        raise SystemExit("refusing to create a release manifest from a test-channel build")
     authenticode = {"status": "unsigned"}
     if args.authenticode_json:
         try:

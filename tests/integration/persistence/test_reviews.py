@@ -127,11 +127,16 @@ class ReviewIntegrationTests(unittest.TestCase):
         self.hooks("install")
         self.begin()
         (self.root / "resources/sparks/idea.md").write_text("idea", encoding="utf-8")
+        (self.root / "program").mkdir(exist_ok=True)
+        (self.root / "program/run.py").write_text("print('freeform')", encoding="utf-8")
+        (self.root / "resources/analysis").mkdir()
+        (self.root / "resources/analysis/legacy.py").write_text("print('legacy')", encoding="utf-8")
         path = self.root / "resources/theory/proof.md"
         path.write_text("proof", encoding="utf-8")
         listing = json.loads(self.hooks("review", "list", "--all").stdout)["items"]
         self.assertTrue(any(i["object"] == "path:resources/theory/proof.md" for i in listing))
         self.assertFalse(any("idea.md" in i["object"] for i in listing))
+        self.assertFalse(any("run.py" in i["object"] or "legacy.py" in i["object"] for i in listing))
         item = json.loads(self.hooks("review", "show", "path:resources/theory/proof.md").stdout)
         self.submit("report", dict(reviews=[dict(token=item["token"], result="deferred", reason="Later")]))
         self.assertNotEqual(self.hooks("check", check=False).returncode, 0)

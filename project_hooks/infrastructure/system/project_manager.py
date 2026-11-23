@@ -10,9 +10,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from ... import EXECUTABLE_NAME
 from ..git.build_identity import build_identity
 from ..git import client as git_client
-from .resource_layout import RESOURCE_DIRECTORIES, ensure_resource_directories
+from .resource_layout import PROGRAM_DIRECTORY, RESOURCE_DIRECTORIES, ensure_resource_directories
 from ..persistence.store import (
     SCHEMA_VERSION,
     append_events,
@@ -23,9 +24,10 @@ from ..persistence.store import (
     validate_projection,
 )
 from ..persistence.database import integrity_check, latest_active_task_id
+from .runtime import runtime_root, write_pointer, cached_executable
 
 
-TEMPLATE_VERSION = 13
+TEMPLATE_VERSION = 17
 INSTALLATION_PATH = Path(".codex/project-maintenance-installation.json")
 CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
 AGENTS_BEGIN = "<!-- project-maintenance-hooks:begin -->"
@@ -60,7 +62,11 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - 探索启动前必须有关联研究篇章或记录明确的无篇章理由；有关联篇章的任务结束时必须显式审阅篇章。
 - 项目资料和研究篇章只通过 `project update` 与内部 `stage` 指令记录；新证据改变判断时用 `stage update --revision ... --summary ... --evidence ...` 追加修订；探索进度使用 `attempt update` 的结构化步骤字段。
 - 科研资料放在 `resources/` 预设或已登记的自定义文件夹；文件夹通过 `catalog folder` 登记，内部资料独立登记，模拟资料包除外。`resources/sparks/` 可自由保存 Markdown。
-- 只有 `validated` 尝试可准备 Squash PR；推送和合并必须由用户明确确认。
+- 理论物理任务涉及研究方向与问题收窄、模型分析、理论推导、数值验证、反例压力测试或文献查新时，按需阅读 `maintenance/PHYSICS_RESEARCH_ROADMAP.md`。它只提供研究思路，不是强制阶段、验收项或门禁。
+- 灵感和未成形问题归入 `sparks`，可执行的下一步或研究方案归入 `plans`，成型的来源解读和学习材料归入 `tutorials`。
+- 新建程序、实验代码、Notebook、依赖和运行输出统一放在仓库根目录 `program/`；不要放入 `resources/`，也不要登记为资料。程序仍由 Git 跟踪。
+- 移动已登记资料时保留原 catalog ID 并更新路径；资料操作前刷新 `catalog folder index`，分类无法可靠判断时先询问用户。
+- 只有 `validated` 尝试可准备 Squash PR；推送和合并必须由用户明确确认。成功探索合入 `main` 后，在 `main` 稳定任务中使用 `exploration archive-validated <分支>` 记录归档；失败、未决和暂停探索使用 `archive-attempt`。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态或绕过 `end`。
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
 - 遇到故障时使用 `diagnostics status/export` 生成脱敏本地诊断；程序不自动上传数据。
@@ -110,8 +116,8 @@ MAINTENANCE_README = """# Workflow Monitor 项目维护索引
 
 - [CORE.md](CORE.md)：新会话、上下文丢失或规范变更时读取的生命周期、轨道、安全、测试和篇章契约。
 - [RESEARCH.md](RESEARCH.md)：研究篇章、探索、Catalog 与 Sparks。
+- [PHYSICS_RESEARCH_ROADMAP.md](PHYSICS_RESEARCH_ROADMAP.md)：理论物理研究路线参考；相关研究任务按需阅读，不作为门禁。
 - [OPERATIONS.md](OPERATIONS.md)：安装、升级、恢复、诊断、交付与发布。
-- `ARCHITECTURE.md`：代码边界和读写模型架构。
 
 `maintenance/events.jsonl` 只追加且不得改写历史行；`.project_hooks/maintenance.sqlite3` 和测试回执均为本地生成物。
 """
@@ -139,9 +145,9 @@ MAINTENANCE_RESEARCH = """# 科研与研究篇章规范
 
 探索启动使用 `--stage auto|new|none|篇章ID`；新篇章通过 `--new-stage` 同次创建，无需额外维护周期。已有活动篇章时必须明确暂停原因，不自动替换。维护默认不关联篇章，探索不关联时须填写 `--without-stage-reason`。
 
-科研资料放在 `resources/source|data|theory|analysis|others|reports|sparks|tutorials|translations|plans/` 或已登记的 resources 自定义文件夹。outputs 仅兼容保留，不默认创建。Sparks 可自由保存 Markdown，登记到 `catalog` 是可选的；其他资料通过 `catalog` 登记。Markdown 公式使用 Markdown/LaTeX 语法。
+科研资料放在 `resources/` 的资料预设或已登记自定义文件夹。新建程序、实验代码、Notebook、依赖和运行输出统一放在仓库根目录 `program/`；不登记为资料，也不纳入资料页、catalog、资料完整性检查或资料审阅，程序仍由 Git 跟踪。旧项目可用 `program migrate-analysis` 预览迁移 `resources/analysis/`，确认后加 `--apply`；迁移保留旧资料 ID 和关联历史，冲突时不覆盖。灵感和未成形问题放入 `sparks`，形成下一步行动或研究方案后放入 `plans`，成型的来源解读和学习材料放入 `tutorials`。顶层 `outputs` 仅兼容保留，不默认创建。移动已登记资料时保留 catalog ID 并更新路径；操作前刷新 `catalog folder index`，分类不明确时先询问用户。Sparks 可自由保存 Markdown，登记到 `catalog` 是可选的；其他资料通过 `catalog` 登记。Markdown 公式使用 Markdown/LaTeX 语法。
 
-只有证据完整且状态为 `validated` 的探索可准备 Squash PR；合并等待用户明确确认。
+只有证据完整且状态为 `validated` 的探索可准备 Squash PR；合并等待用户明确确认。成功合入 `main` 后，使用 `exploration archive-validated <分支>` 记录归档。
 """
 
 MAINTENANCE_OPERATIONS = """# 安装、恢复与交付
@@ -187,8 +193,8 @@ Squash PR，合并必须等待用户明确确认。分支名是稳定的探索�
 | `resources/source/` | 外部资料和来源证据 |
 | `resources/data/` | 原始、过程和处理后数据 |
 | `resources/theory/` | 理论、假设、定义和推导 |
-| `resources/analysis/` | 分析代码、Notebook 和实验 |
-| `resources/outputs/` | 兼容旧登记，不默认创建；程序输出使用其子目录 |
+| `program/` | 程序、实验代码、Notebook、依赖和运行输出；不纳入资料管理 |
+| `resources/outputs/` | 兼容旧登记，不默认创建 |
 | `resources/others/` | 暂时无法可靠分类的资料 |
 | `resources/reports/` | 面向外部受众的项目总结与报告 |
 | `resources/sparks/` | 自由 Markdown 灵感；可选择性登记 |
@@ -197,7 +203,7 @@ Squash PR，合并必须等待用户明确确认。分支名是稳定的探索�
 | `resources/plans/` | 灵感的下一步行动计划 |
 
 原始资料不覆盖；过程与成果分开。Markdown 文件中的公式使用 Markdown/LaTeX 语法。
-`catalog scan` 扫描 resources 内的预设和自定义目录，Sparks 默认不强制登记。目录用于默认分类，移动修复保留资料原类型。统一 outputs 为兼容目录，不默认创建；程序输出放在各自程序子目录。
+`catalog scan` 扫描 resources 内的预设和自定义目录，Sparks 默认不强制登记。根目录 `program/` 不扫描、不登记、不参与资料完整性或审阅；程序输出留在对应程序目录。旧项目可运行 `program migrate-analysis` 预览迁移旧 `resources/analysis/`，确认后加 `--apply`。
 `check` 会报告缺失目录、错位条目和未索引文件。旧项目先运行
 `.\\workflow-monitor.exe catalog migrate-layout --dry-run`，确认无冲突后再执行实际迁移。
 事件日志只追加，不得手工修改既有行；SQLite 不纳入 Git，也不是唯一备份。
@@ -266,7 +272,8 @@ def default_config() -> dict:
 MAINTENANCE_CORE += """\n
 - 资料路径失效先运行 `catalog reconcile` 搜索可能的移动位置；唯一内容哈希匹配可通过 `--apply` 修复原登记，保留资料身份和关系。歧义、无历史哈希或范围外位置需要用户选择新位置或确认归档，不自动删除或归档。
 - 文件夹导航登记使用 `catalog folder add/update/list/archive/restore`。教程、翻译用于文献加工，plans 用于 Sparks 的下一步；登记文件夹不替代内部文件登记。
-- 每次资料创建、编辑、导入、移动、重命名或删除前，重新读取 `catalog folder index`，按目录用途选择位置；代码文件按仓库结构处理。新目录先创建并用 `catalog folder add` 登记名称和用途，再刷新索引；归属不明确时询问用户。输出导入显式指定 `--folder`，不自动重建顶层 outputs。
+- 创建或调整程序代码时统一放在仓库根目录 `program/`；不放入 `resources/`，不登记为资料。旧项目用 `program migrate-analysis` 预览迁移 `resources/analysis/`，确认后加 `--apply`。
+- 每次资料创建、编辑、导入、移动、重命名或删除前，重新读取 `catalog folder index`，按目录用途选择位置。新目录先创建并用 `catalog folder add` 登记名称和用途，再刷新索引；归属不明确时询问用户。输出导入显式指定 `--folder`，不自动重建顶层 outputs。
 - `start` 保存既有资料问题；AI 在 start/report/end 用 depends_on、deliverable 登记直接依赖和交付物（catalog:ID 或 path:相对路径）。无关且未恶化的既有资料问题保留待处理，不阻止 completed；任务交付物和直接依赖缺失仍阻止完成。全局 check 继续报告全部问题。
 - 确实受阻时使用 `end --result blocked --blocker <原因> --evidence <证据> --next <恢复条件>`。检查失败保留活动任务，不默认 abandon；只有用户明确放弃才运行 task abandon。所有修复通过工作流命令或结构化服务追加事件，不直接编辑 SQLite 或既有事件，历史 abandoned 不改写。
 
@@ -285,16 +292,30 @@ MAINTENANCE_AUTOMATION += ('\nDashboard 固定展示「当前正常／建议审�
                            '不从历史单项时间推算或补写；新变化保留旧记录。AI 不另填整体状态。\n')
 
 
+UNDERSTANDING_HINT = "- 消化科研结果、阅读长证明或整理理解卡点时，按需阅读 `maintenance/RESEARCH_UNDERSTANDING_GUIDE.md`；它不设置理解评分、强制阶段或完成门禁。"
+EXE_HANDOFF_HINT = "- 收到测试 EXE 时分别核对源码同步、实际运行构建和项目模板升级。源码仓库先比较构建指纹；一致则报告已一致，无需源码修改，不一致须有对应提交或补丁。科研项目使用 `update --from-exe <路径> --check` 预览，再在授权范围内实际升级；文件替换不等于模板升级。存在定制冲突时报告需要处理，不能笼统宣称更新完成。测试构建提供 `build-notes`，构建成功不代表功能测试通过。"
+AGENTS_BLOCK = AGENTS_BLOCK.replace(AGENTS_END, UNDERSTANDING_HINT + "\n" + EXE_HANDOFF_HINT + "\n" + AGENTS_END)
+MAINTENANCE_README = MAINTENANCE_README.replace("- [OPERATIONS.md]", "- [RESEARCH_UNDERSTANDING_GUIDE.md](RESEARCH_UNDERSTANDING_GUIDE.md)：科研结果理解与证明阅读参考，按需使用，不作为门禁。\n- [OPERATIONS.md]")
+MAINTENANCE_OPERATIONS += "\n## 本地测试 EXE 交付\n\n" + EXE_HANDOFF_HINT + "\n\n- 测试版说明包含待测变化、步骤与预期、已知限制、升级注意事项和源码依据；`build-notes --format markdown|json` 在项目外也可读取。正式更新日志记录功能变化，不重复记录每次构建。\n- 实际升级保留 main、无活动任务、干净且同步工作树的前置检查；先处理阻塞，不强制覆盖定制文件。\n"
+
+
 def template_files() -> dict[str, str]:
+    template_root = Path(__file__).resolve().parents[3]
+    roadmap_source = template_root / "maintenance" / "PHYSICS_RESEARCH_ROADMAP.md"
+    physics_roadmap = roadmap_source.read_text(encoding="utf-8")
+    understanding_guide = (template_root / "maintenance" / "RESEARCH_UNDERSTANDING_GUIDE.md").read_text(encoding="utf-8")
     files = {
         ".githooks/pre-commit": HOOK_TEMPLATE,
         "maintenance/README.md": MAINTENANCE_README,
         "maintenance/CORE.md": MAINTENANCE_CORE,
         "maintenance/AUTOMATION.md": MAINTENANCE_AUTOMATION,
         "maintenance/RESEARCH.md": MAINTENANCE_RESEARCH,
+        "maintenance/PHYSICS_RESEARCH_ROADMAP.md": physics_roadmap,
+        "maintenance/RESEARCH_UNDERSTANDING_GUIDE.md": understanding_guide,
         "maintenance/OPERATIONS.md": MAINTENANCE_OPERATIONS,
     }
     files.update({f"{item.relative_path}/.gitkeep": "\n" for item in RESOURCE_DIRECTORIES if item.required})
+    files[f"{PROGRAM_DIRECTORY}/.gitkeep"] = "\n"
     return files
 
 
@@ -506,6 +527,8 @@ def validate_project(root: Path) -> None:
         Path("maintenance/README.md"),
         Path("maintenance/CORE.md"),
         Path("maintenance/RESEARCH.md"),
+        Path("maintenance/PHYSICS_RESEARCH_ROADMAP.md"),
+        Path("maintenance/RESEARCH_UNDERSTANDING_GUIDE.md"),
         Path("maintenance/OPERATIONS.md"),
         Path("maintenance/events.jsonl"),
     ):
@@ -514,6 +537,8 @@ def validate_project(root: Path) -> None:
     for item in RESOURCE_DIRECTORIES:
         if item.required and not (root / item.relative_path).is_dir():
             raise ProjectManagerError(f"升级后缺少资源目录: {item.relative_path}")
+    if not (root / PROGRAM_DIRECTORY).is_dir():
+        raise ProjectManagerError(f"升级后缺少程序目录: {PROGRAM_DIRECTORY}")
     load_events(root / "maintenance/events.jsonl")
     configured = git(root, "config", "--local", "--get", "core.hooksPath").stdout.strip()
     if configured != ".githooks":
@@ -568,15 +593,33 @@ def profile_authority_migration(events: list[dict], timezone: str) -> dict | Non
     )
 
 
-def apply_project_update(root: Path, target_version: str) -> dict:
+def apply_project_update(
+    root: Path, target_version: str, *, executable_path: Path | None = None,
+    cache_build_id: str | None = None,
+) -> dict:
     root = root.resolve()
     preflight_update(root)
+    if executable_path is not None:
+        expected_executable = cached_executable(root, target_version, cache_build_id).resolve()
+        executable_path = Path(executable_path).resolve()
+        if executable_path != expected_executable or not executable_path.is_file():
+            raise ProjectManagerError("迁移 EXE 不在目标版本的本地缓存位置")
+        digest_file = executable_path.parent / ".exe-sha256"
+        try:
+            expected_digest = digest_file.read_text(encoding="ascii").strip()
+        except OSError as exc:
+            raise ProjectManagerError("迁移 EXE 缺少本地验签摘要") from exc
+        if not expected_digest or sha256_bytes(executable_path.read_bytes()) != expected_digest:
+            raise ProjectManagerError("迁移 EXE 与本地验签摘要不匹配")
+        if cache_build_id and build_identity().get("build_id") != cache_build_id:
+            raise ProjectManagerError("实际运行构建与目标缓存构建不一致")
     install_path = root / INSTALLATION_PATH
     installation = json.loads(install_path.read_text(encoding="utf-8"))
     old_version = installation.get("application_version", installation.get("core_version"))
     old_records = installation.get("managed_files", {})
     database = root / ".project_hooks/maintenance.sqlite3"
     paths = [root / CONFIG_PATH, install_path, root / "maintenance/events.jsonl",
+             runtime_root(root) / "current.json",
              database, Path(str(database) + "-wal"), Path(str(database) + "-shm")]
     paths.extend(root / item for item in template_files())
     paths.extend((root / "AGENTS.md", root / ".gitignore", root / ".gitattributes"))
@@ -645,6 +688,7 @@ def apply_project_update(root: Path, target_version: str) -> dict:
                 "from_version": old_version,
                 "to_version": target_version,
                 "template_version": TEMPLATE_VERSION,
+                "build_id": build_identity().get("build_id"),
                 "conflicts": conflicts,
             },
             timezone=timezone,
@@ -660,6 +704,8 @@ def apply_project_update(root: Path, target_version: str) -> dict:
         if integrity != "ok":
             raise ProjectManagerError(f"SQLite integrity_check: {integrity}")
         validate_project(root)
+        if executable_path is not None:
+            write_pointer(target_version, root, executable_path, build_id=cache_build_id)
         try:
             from .diagnostics import cleanup_after_update
             diagnostic_cleanup = cleanup_after_update(
@@ -668,11 +714,14 @@ def apply_project_update(root: Path, target_version: str) -> dict:
         except Exception as exc:
             diagnostic_cleanup = {"status": "failed", "error_type": type(exc).__name__, "records": 0}
         return {
-            "status": "updated",
+            "status": "needs-attention" if conflicts else "updated",
             "project": str(root),
             "application_version": target_version,
             "changed": sorted(set(changed)),
             "conflicts": conflicts,
+            "running_build_id": build_identity().get("build_id"),
+            "template_version": TEMPLATE_VERSION,
+            "verification": {"database": "ok", "project": "passed", "templates": "conflicts" if conflicts else "updated"},
             "diagnostic_cleanup": diagnostic_cleanup,
             "commit": "请检查变更后自行执行 git add、git commit 和 git push",
         }

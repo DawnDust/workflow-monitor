@@ -11,12 +11,17 @@ from unittest.mock import patch
 
 from project_hooks import EXECUTABLE_NAME, __version__ as CURRENT_VERSION
 from project_hooks.ui.windows.icon import PNG_ICON
-from project_hooks.infrastructure.git.build_identity import exe_matches_repository, repository_source_identity
+from project_hooks.infrastructure.git.build_identity import (
+    display_version,
+    exe_matches_repository,
+    repository_source_identity,
+)
 from project_hooks.cli import discover_project_root
 from project_hooks.infrastructure.system.project_manager import (
     ProjectManagerError,
     apply_project_update,
     initialize_project,
+    TEMPLATE_VERSION,
 )
 from project_hooks.infrastructure.persistence.store import append_events, load_events, new_event
 from project_hooks.infrastructure.system.updater import (
@@ -25,16 +30,179 @@ from project_hooks.infrastructure.system.updater import (
     check_latest_update,
     check_update,
     run_update,
+    version_report,
     software_changes_since_release,
     verify_digest,
 )
+from project_hooks.ui.cli import commands as cli_commands
+from project_hooks.ui.cli.parser import build_parser
+from project_hooks.ui.windows import main as windows_main
 from project_hooks.ui.windows.main import PortableBootstrapError, prepare_portable_project
+from scripts.build_windows_exe import build_parser as build_exe_parser
 from scripts.run_tests import validate_release_tag
 
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
 
 class DistributionTests(unittest.TestCase):
+    def test_build_notes_only_claim_current_accepted_receipts(self):
+        from project_hooks.infrastructure.system.build_notes import build_verification
+        from project_hooks.infrastructure.system.verification import write_test_receipt
+        self.init()
+        runner = self.root / "scripts/run_tests.py"
+        runner.parent.mkdir()
+        runner.write_text("# test runner", encoding="utf-8")
+        with patch("project_hooks.infrastructure.system.verification.active_task", return_value={"task_id":"notes-test"}):
+            write_test_receipt(self.root, suite="fast", result="passed", tests=1, failures=0,
+                               coverage=None, started_at="start", finished_at="finish")
+            result = build_verification(self.root)
+            self.assertEqual([x["status"] for x in result["suites"]], ["passed", "unverified"])
+            runner.write_text("# changed runner", encoding="utf-8")
+            self.assertEqual(build_verification(self.root)["suites"][0]["status"], "unverified")
+
+    def test_local_update_flags_preserve_remote_manifest_compatibility(self):
+        from project_hooks.ui.cli.parser import build_parser
+        from project_hooks.ui.cli.entrypoint import main
+        import io
+        args = build_parser().parse_args(["update", "--to", CURRENT_VERSION, "--manifest-url", "file:///manifest.json"])
+        self.assertEqual(args.to, CURRENT_VERSION)
+        with patch("sys.stderr", new_callable=io.StringIO) as error:
+            self.assertEqual(main(["update", "--from-exe", "test.exe", "--manifest-url", "file:///manifest.json"]), 1)
+        self.assertIn("--from-exe", error.getvalue())
+
+    def test_understanding_guide_install_update_and_customization(self):
+        self.init()
+        guide = self.root / "maintenance/RESEARCH_UNDERSTANDING_GUIDE.md"
+        original = guide.read_text(encoding="utf-8")
+        self.assertIn("不设置必经阶段", original)
+        self.commit()
+        self.assertEqual(apply_project_update(self.root, CURRENT_VERSION)["conflicts"], [])
+        guide.write_text(original + "\n我的学习方法\n", encoding="utf-8")
+        self.commit("custom guide")
+        result = apply_project_update(self.root, CURRENT_VERSION)
+        self.assertEqual(result["status"], "needs-attention")
+        self.assertIn("maintenance/RESEARCH_UNDERSTANDING_GUIDE.md", result["conflicts"])
+        self.assertIn("我的学习方法", guide.read_text(encoding="utf-8"))
+
+    def test_packaged_guides_and_notes_change_fingerprint(self):
+        self.init()
+        self.commit()
+        identity = repository_source_identity(self.root)
+        guide = self.root / "maintenance/RESEARCH_UNDERSTANDING_GUIDE.md"
+        guide.write_text(guide.read_text(encoding="utf-8") + "\nnew guidance\n", encoding="utf-8")
+        self.assertNotEqual(identity["build_input_fingerprint"], repository_source_identity(self.root)["build_input_fingerprint"])
+        notes = self.root / "TEST_BUILD_NOTES.md"
+        before = repository_source_identity(self.root)
+        notes.write_text("test notes", encoding="utf-8")
+        self.assertNotEqual(before["build_input_fingerprint"], repository_source_identity(self.root)["build_input_fingerprint"])
+
+    def test_test_notes_validate_embed_and_legacy_absence(self):
+        from scripts.build_windows_exe import write_build_info
+        from project_hooks.infrastructure.system.build_notes import read_build_notes, validate_notes
+        with self.assertRaises(FileNotFoundError):
+            write_build_info(self.root)
+        with self.assertRaises(ValueError):
+            validate_notes("## 待测变化\n\n## 已知限制\n")
+        notes = self.root / "TEST_BUILD_NOTES.md"
+        notes.write_text((SOURCE_ROOT / "TEST_BUILD_NOTES.md").read_text(encoding="utf-8"), encoding="utf-8")
+        identity = json.loads(write_build_info(self.root).read_text(encoding="utf-8"))
+        with patch("sys._MEIPASS", str(self.root / "build"), create=True), patch(
+            "project_hooks.infrastructure.system.build_notes.build_identity", return_value=identity
+        ):
+            payload = read_build_notes()
+            self.assertTrue(payload["available"])
+            self.assertEqual(payload["build_id"], identity["build_id"])
+            self.assertIn(identity["build_input_fingerprint"], payload["markdown"])
+            (self.root / "build/test-build-notes.json").unlink()
+            self.assertFalse(read_build_notes()["available"])
+
+    def test_local_exe_caches_are_separate_and_old_pointers_work(self):
+        from project_hooks.infrastructure.system.updater import cache_executable
+        from project_hooks.infrastructure.system.runtime import write_pointer, selected_executable
+        first = cache_executable(b"first", CURRENT_VERSION, self.root, build_id="first")
+        second = cache_executable(b"second", CURRENT_VERSION, self.root, build_id="second")
+        self.assertNotEqual(first, second)
+        write_pointer(CURRENT_VERSION, self.root, second, build_id="second")
+        self.assertEqual(selected_executable(self.root), second.resolve())
+        with patch("project_hooks.infrastructure.git.build_identity.build_identity", return_value={
+            "channel":"test", "built_at":"2026-10-07T12:00:00+00:00"
+        }):
+            self.assertIsNone(selected_executable(self.root))
+        second.write_bytes(b"corrupt")
+        self.assertIsNone(selected_executable(self.root))
+        self.assertEqual(cache_executable(b"second", CURRENT_VERSION, self.root, build_id="second").read_bytes(), b"second")
+        legacy = cache_executable(b"legacy", CURRENT_VERSION, self.root)
+        write_pointer(CURRENT_VERSION, self.root, legacy)
+        self.assertEqual(selected_executable(self.root), legacy.resolve())
+        with self.assertRaises(ValueError):
+            cache_executable(b"x", CURRENT_VERSION, self.root, build_id="../escape")
+
+    def test_update_failure_restores_templates_journal_and_runtime_pointer(self):
+        from project_hooks.infrastructure.system.updater import cache_executable
+        from project_hooks.infrastructure.system.runtime import write_pointer, runtime_root
+        self.init()
+        self.commit()
+        old = cache_executable(b"old", CURRENT_VERSION, self.root, build_id="old")
+        new = cache_executable(b"new", CURRENT_VERSION, self.root, build_id="new")
+        write_pointer(CURRENT_VERSION, self.root, old, build_id="old")
+        pointer = runtime_root(self.root) / "current.json"
+        before = {p:p.read_bytes() for p in (pointer, self.root / "maintenance/events.jsonl", self.root / ".codex/project-maintenance-installation.json")}
+        with patch("project_hooks.infrastructure.system.project_manager.build_identity", return_value={"build_id":"new"}), patch(
+            "project_hooks.infrastructure.system.project_manager.validate_project", side_effect=RuntimeError("validation failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "validation failed"):
+                apply_project_update(self.root, CURRENT_VERSION, executable_path=new, cache_build_id="new")
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
+
+    def test_local_update_preview_readonly_and_source_mismatch_blocked(self):
+        from project_hooks.infrastructure.system.updater import run_local_update, template_hashes
+        self.init()
+        self.commit()
+        exe = Path(self.temp.name) / "candidate.exe"
+        exe.write_bytes(b"candidate")
+        report = {"application_version":CURRENT_VERSION,"build_identity":{"build_id":"candidate","mode":"frozen"},
+                  "template_version":TEMPLATE_VERSION,"template_hashes":template_hashes(),"event_schema":{"minimum":1,"maximum":5},"schema_version":5}
+        journal = self.root / "maintenance/events.jsonl"
+        before = journal.read_bytes()
+        with patch("project_hooks.infrastructure.system.updater.inspect_executable", return_value=report):
+            preview = run_local_update(self.root, exe, check_only=True)
+            self.assertEqual(preview["status"], "ready")
+            self.assertEqual(preview["source_sync"], "not-applicable")
+            self.assertEqual(journal.read_bytes(), before)
+            self.assertFalse((self.root / ".project_hooks/runtime").exists())
+            with patch("project_hooks.infrastructure.system.updater.exe_matches_repository", return_value=False):
+                preview = run_local_update(self.root, exe, check_only=True)
+                self.assertEqual(preview["source_sync"], "source-required")
+                with self.assertRaisesRegex(UpdateError, "源码"):
+                    run_local_update(self.root, exe)
+
+    def test_local_update_queries_exact_file_and_applies_candidate(self):
+        from project_hooks.infrastructure.system.updater import run_local_update, template_hashes
+        self.init()
+        self.commit()
+        exe = Path(self.temp.name) / "candidate.exe"
+        exe.write_bytes(b"candidate")
+        identity = {"build_id":"candidate","mode":"frozen","channel":"test"}
+        report = {"application_version":CURRENT_VERSION,"build_identity":identity,"template_version":TEMPLATE_VERSION,
+                  "template_hashes":template_hashes(),"event_schema":{"minimum":1,"maximum":5},"schema_version":5}
+        real_run = subprocess.run
+        def run(command, *args, **kwargs):
+            if str(command[0]).endswith(".exe"):
+                self.assertEqual(kwargs["env"]["PROJECT_HOOKS_EXE_ACTIVE"], "1")
+                if command[-1] == "version":
+                    self.assertTrue(Path(command[0]).samefile(exe))
+                    return subprocess.CompletedProcess(command, 0, json.dumps(report), "")
+                selected = Path(command[command.index("--executable-path")+1])
+                with patch("project_hooks.infrastructure.system.project_manager.build_identity", return_value=identity):
+                    result = apply_project_update(self.root, CURRENT_VERSION, executable_path=selected, cache_build_id="candidate")
+                return subprocess.CompletedProcess(command, 0, json.dumps(result), "")
+            return real_run(command, *args, **kwargs)
+        with patch("subprocess.run", side_effect=run):
+            result = run_local_update(self.root, exe)
+        self.assertEqual(result["running_build_id"], "candidate")
+        self.assertEqual(result["verification"]["project"], "passed")
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / "research"
@@ -66,6 +234,11 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(PNG_ICON.is_file())
         self.assertTrue(PNG_ICON.with_suffix(".ico").is_file())
 
+    def test_frozen_builder_embeds_physics_roadmap_template(self) -> None:
+        build_script = (SOURCE_ROOT / "scripts/build_windows_exe.py").read_text(encoding="utf-8")
+        self.assertIn('root / "maintenance" / "PHYSICS_RESEARCH_ROADMAP.md"', build_script)
+        self.assertIn('f"{physics_roadmap}{os.pathsep}maintenance"', build_script)
+
     def exe_release(self, *, digest_override: str | None = None, build_id: str | None = None) -> Path:
         release = Path(self.temp.name) / "release"
         release.mkdir(exist_ok=True)
@@ -86,6 +259,41 @@ class DistributionTests(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         return manifest_path
 
+    def stable_build_info(self) -> Path:
+        path = Path(self.temp.name) / "build-info.json"
+        path.write_text(json.dumps({"build_id": "stable-build", "channel": "stable"}), encoding="utf-8")
+        return path
+
+    def test_test_build_version_label_uses_channel_date_and_short_id(self) -> None:
+        identity = {
+            "channel": "test",
+            "build_id": "ff977aed87179638",
+            "built_at": "2026-10-06T12:33:51+00:00",
+        }
+        self.assertEqual(
+            display_version(CURRENT_VERSION, identity),
+            f"{CURRENT_VERSION}-test.20261006.ff977aed",
+        )
+        self.assertEqual(
+            display_version(CURRENT_VERSION, {"channel": "stable", "build_id": "test"}),
+            CURRENT_VERSION,
+        )
+        with patch(
+            "project_hooks.infrastructure.system.updater.build_identity",
+            return_value=identity,
+        ):
+            report = version_report(None)
+        self.assertEqual(report["application_version"], CURRENT_VERSION)
+        self.assertEqual(report["display_version"], f"{CURRENT_VERSION}-test.20261006.ff977aed")
+        self.assertEqual(report["build_channel"], "test")
+
+    def test_build_channel_defaults_to_test_and_stable_is_explicit(self) -> None:
+        parser = build_exe_parser()
+        self.assertEqual(parser.parse_args([]).channel, "test")
+        self.assertEqual(parser.parse_args(["--channel", "stable"]).channel, "stable")
+        build_script = (SOURCE_ROOT / "scripts/build_windows_exe.py").read_text(encoding="utf-8")
+        self.assertIn('"--name", "workflow-monitor"', build_script)
+
     def test_init_creates_project_without_copying_software_source(self) -> None:
         result = initialize_project(self.root, CURRENT_VERSION)
         self.assertEqual(result["status"], "initialized")
@@ -94,17 +302,25 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue((self.root / ".codex/project-maintenance-installation.json").is_file())
         config = json.loads((self.root / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
         self.assertEqual(config["core_read_order"], ["maintenance/CORE.md"])
-        for name in ("README.md", "CORE.md", "RESEARCH.md", "OPERATIONS.md"):
+        for name in ("README.md", "CORE.md", "RESEARCH.md", "PHYSICS_RESEARCH_ROADMAP.md", "OPERATIONS.md"):
             self.assertTrue((self.root / "maintenance" / name).is_file())
         self.assertIn("workflow.initialized", (self.root / "maintenance/events.jsonl").read_text(encoding="utf-8"))
-        for name in ("source", "data", "theory", "analysis", "others", "reports", "sparks", "tutorials", "translations", "plans"):
+        for name in ("source", "data", "theory", "others", "reports", "sparks", "tutorials", "translations", "plans"):
             self.assertTrue((self.root / "resources" / name / ".gitkeep").is_file())
+        self.assertTrue((self.root / "program" / ".gitkeep").is_file())
         self.assertEqual(
             self.git("config", "--local", "--get", "core.hooksPath").stdout.strip(),
             ".githooks",
         )
         with self.assertRaises(ProjectManagerError):
             initialize_project(self.root, CURRENT_VERSION)
+
+    def test_generated_maintenance_index_only_lists_installed_guides(self) -> None:
+        self.init()
+        readme = (self.root / "maintenance/README.md").read_text(encoding="utf-8")
+        self.assertNotIn("ARCHITECTURE.md", readme)
+        for name in ("CORE.md", "RESEARCH.md", "PHYSICS_RESEARCH_ROADMAP.md", "OPERATIONS.md"):
+            self.assertTrue((self.root / "maintenance" / name).is_file())
 
     def test_release_manifest_contains_only_executable_asset(self) -> None:
         dist = Path(self.temp.name) / "dist"
@@ -116,6 +332,7 @@ class DistributionTests(unittest.TestCase):
             [
                 sys.executable, str(SOURCE_ROOT / "scripts/build_release.py"),
                 "--version", CURRENT_VERSION, "--dist", str(dist),
+                "--build-info", str(self.stable_build_info()),
             ],
             cwd=SOURCE_ROOT, check=True, capture_output=True,
         )
@@ -127,6 +344,7 @@ class DistributionTests(unittest.TestCase):
         )
         self.assertEqual(manifest["authenticode"], {"status": "unsigned"})
         self.assertIn("build_id", manifest["build_identity"])
+        self.assertEqual(manifest["build_identity"]["channel"], "stable")
         self.assertEqual(manifest["windows_exe"]["file"], EXECUTABLE_NAME)
         self.assertEqual(
             manifest["windows_exe"]["url"],
@@ -147,6 +365,7 @@ class DistributionTests(unittest.TestCase):
         subprocess.run([
             sys.executable, str(SOURCE_ROOT / "scripts/build_release.py"),
             "--version", CURRENT_VERSION, "--dist", str(dist),
+            "--build-info", str(self.stable_build_info()),
             "--sbom", str(sbom), "--authenticode-json", str(signature),
         ], cwd=SOURCE_ROOT, check=True, capture_output=True)
         manifest = json.loads((dist / "release-manifest.json").read_text(encoding="utf-8"))
@@ -154,6 +373,24 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(manifest["sbom"]["file"], sbom.name)
         self.assertEqual(manifest["sbom"]["format"], "spdx-json")
         self.assertEqual(manifest["authenticode"]["status"], "signed")
+
+    def test_release_manifest_rejects_test_channel_build(self) -> None:
+        dist = Path(self.temp.name) / "test-dist"
+        dist.mkdir()
+        (dist / EXECUTABLE_NAME).write_bytes(b"test executable")
+        build_info = Path(self.temp.name) / "test-build-info.json"
+        build_info.write_text(json.dumps({"build_id": "test-build", "channel": "test"}), encoding="utf-8")
+        result = subprocess.run(
+            [
+                sys.executable, str(SOURCE_ROOT / "scripts/build_release.py"),
+                "--version", CURRENT_VERSION, "--dist", str(dist),
+                "--build-info", str(build_info),
+            ],
+            cwd=SOURCE_ROOT, capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("test-channel build", result.stderr)
+        self.assertFalse((dist / "release-manifest.json").exists())
 
     def test_release_tag_must_match_application_version(self) -> None:
         validate_release_tag(CURRENT_VERSION, f"v{CURRENT_VERSION}")
@@ -261,6 +498,59 @@ class DistributionTests(unittest.TestCase):
         nested = self.root / "resources/analysis/deep"
         nested.mkdir(parents=True)
         self.assertEqual(discover_project_root(nested), self.root.resolve())
+
+    def test_frozen_cli_prefers_working_project_over_executable_directory(self) -> None:
+        portable = self.root / "dist"
+        portable.mkdir()
+        args = ["program", "migrate-analysis"]
+        with (
+            patch.object(windows_main, "is_frozen", return_value=True),
+            patch.object(windows_main, "portable_root", return_value=portable),
+            patch.object(windows_main, "run_selected_executable", return_value=None),
+            patch("project_hooks.cli.discover_project_root", return_value=self.root),
+            patch("project_hooks.cli.main", return_value=0) as cli_main,
+        ):
+            self.assertEqual(windows_main.main(args), 0)
+        cli_main.assert_called_once_with(["--project", str(self.root), *args])
+
+    def test_frozen_cli_keeps_explicit_project_and_portable_fallback(self) -> None:
+        portable = self.root / "portable"
+        portable.mkdir()
+        explicit = self.root / "explicit"
+        explicit.mkdir()
+        with (
+            patch.object(windows_main, "is_frozen", return_value=True),
+            patch.object(windows_main, "portable_root", return_value=portable),
+            patch.object(windows_main, "run_selected_executable", return_value=None),
+            patch("project_hooks.cli.discover_project_root", return_value=None),
+            patch("project_hooks.cli.main", return_value=0) as cli_main,
+        ):
+            self.assertEqual(
+                windows_main.main(["--project", str(explicit), "context"]), 0,
+            )
+            cli_main.assert_called_once_with(["--project", str(explicit), "context"])
+
+        with (
+            patch.object(windows_main, "is_frozen", return_value=True),
+            patch.object(windows_main, "portable_root", return_value=portable),
+            patch.object(windows_main, "run_selected_executable", return_value=None),
+            patch("project_hooks.cli.discover_project_root", return_value=None),
+            patch("project_hooks.cli.main", return_value=0) as cli_main,
+        ):
+            self.assertEqual(windows_main.main(["context"]), 0)
+            cli_main.assert_called_once_with(["--project", str(portable), "context"])
+
+    def test_frozen_init_uses_requested_path_without_portable_override(self) -> None:
+        portable = self.root / "portable"
+        target = self.root / "new-project"
+        with (
+            patch.object(windows_main, "is_frozen", return_value=True),
+            patch.object(windows_main, "portable_root", return_value=portable),
+            patch.object(windows_main, "run_selected_executable", return_value=None),
+            patch("project_hooks.cli.main", return_value=0) as cli_main,
+        ):
+            self.assertEqual(windows_main.main(["init", str(target)]), 0)
+        cli_main.assert_called_once_with(["init", str(target)])
 
     def test_portable_bootstrap_initializes_empty_folder_and_local_hook(self) -> None:
         portable = Path(self.temp.name) / "portable"
@@ -439,17 +729,74 @@ class DistributionTests(unittest.TestCase):
         readme = self.root / "maintenance/README.md"
         readme.write_text(readme.read_text(encoding="utf-8") + "\n项目自定义内容。\n", encoding="utf-8")
         customized = readme.read_bytes()
+        roadmap = self.root / "maintenance/PHYSICS_RESEARCH_ROADMAP.md"
+        roadmap.write_text(roadmap.read_text(encoding="utf-8") + "\n项目自定义路线图说明。\n", encoding="utf-8")
+        customized_roadmap = roadmap.read_bytes()
         self.commit()
         result = apply_project_update(self.root, CURRENT_VERSION)
         self.assertEqual(readme.read_bytes(), customized)
+        self.assertEqual(roadmap.read_bytes(), customized_roadmap)
         self.assertIn("maintenance/README.md", result["conflicts"])
+        self.assertIn("maintenance/PHYSICS_RESEARCH_ROADMAP.md", result["conflicts"])
         self.assertTrue(
             (self.root / f".project_hooks/update-conflicts/{CURRENT_VERSION}/maintenance/README.md").is_file()
+        )
+        self.assertTrue(
+            (self.root / f".project_hooks/update-conflicts/{CURRENT_VERSION}/maintenance/PHYSICS_RESEARCH_ROADMAP.md").is_file()
         )
         self.commit("record customized template")
         repeated = apply_project_update(self.root, CURRENT_VERSION)
         self.assertEqual(readme.read_bytes(), customized)
+        self.assertEqual(roadmap.read_bytes(), customized_roadmap)
         self.assertIn("maintenance/README.md", repeated["conflicts"])
+        self.assertIn("maintenance/PHYSICS_RESEARCH_ROADMAP.md", repeated["conflicts"])
+
+    def test_update_installs_and_records_new_physics_roadmap_template(self) -> None:
+        self.init("2.0.0")
+        roadmap = self.root / "maintenance/PHYSICS_RESEARCH_ROADMAP.md"
+        roadmap.unlink()
+        installation_path = self.root / ".codex/project-maintenance-installation.json"
+        installation = json.loads(installation_path.read_text(encoding="utf-8"))
+        installation["template_version"] = 13
+        installation["managed_files"].pop("maintenance/PHYSICS_RESEARCH_ROADMAP.md")
+        installation_path.write_text(json.dumps(installation, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.commit()
+
+        result = apply_project_update(self.root, CURRENT_VERSION)
+
+        installation = json.loads((self.root / ".codex/project-maintenance-installation.json").read_text(encoding="utf-8"))
+        self.assertIn("maintenance/PHYSICS_RESEARCH_ROADMAP.md", result["changed"])
+        self.assertTrue(roadmap.is_file())
+        self.assertEqual(
+            installation["managed_files"]["maintenance/PHYSICS_RESEARCH_ROADMAP.md"]["hash"],
+            hashlib.sha256(roadmap.read_bytes()).hexdigest(),
+        )
+
+    def test_update_removes_source_only_architecture_entry_from_default_index(self) -> None:
+        self.init("2.0.0")
+        readme = self.root / "maintenance/README.md"
+        previous = readme.read_text(encoding="utf-8").replace(
+            "- [OPERATIONS.md](OPERATIONS.md)：安装、升级、恢复、诊断、交付与发布。\n",
+            "- [OPERATIONS.md](OPERATIONS.md)：安装、升级、恢复、诊断、交付与发布。\n"
+            "- `ARCHITECTURE.md`：代码边界和读写模型架构。\n",
+        )
+        readme.write_text(previous, encoding="utf-8", newline="\n")
+        installation_path = self.root / ".codex/project-maintenance-installation.json"
+        installation = json.loads(installation_path.read_text(encoding="utf-8"))
+        installation["template_version"] = 14
+        installation["managed_files"]["maintenance/README.md"] = {
+            "hash": hashlib.sha256(previous.encode("utf-8")).hexdigest(),
+            "customized": False,
+        }
+        installation_path.write_text(json.dumps(installation, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.commit()
+
+        result = apply_project_update(self.root, CURRENT_VERSION)
+
+        updated = json.loads(installation_path.read_text(encoding="utf-8"))
+        self.assertIn("maintenance/README.md", result["changed"])
+        self.assertEqual(updated["template_version"], TEMPLATE_VERSION)
+        self.assertNotIn("ARCHITECTURE.md", readme.read_text(encoding="utf-8"))
 
     def test_update_migrates_default_and_preserves_custom_core_read_order(self) -> None:
         self.init("1.6.1")
@@ -524,24 +871,43 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(result["status"], "current")
         self.assertEqual((self.root / "maintenance/events.jsonl").read_bytes(), before)
 
+    def test_update_is_the_only_write_command_allowed_across_template_versions(self) -> None:
+        update = build_parser().parse_args(["update"])
+        check = build_parser().parse_args(["update", "--check"])
+        start = build_parser().parse_args([
+            "start", "--kind", "code", "--scope", "test", "--acceptance", "works",
+        ])
+        with patch.object(cli_commands, "ROOT", self.root):
+            with patch.object(cli_commands, "installed_project_version", return_value="2.0.0"):
+                cli_commands.assert_project_version_compatible(update)
+                cli_commands.assert_project_version_compatible(check)
+                self.assertFalse(cli_commands.command_requires_project_lock(update))
+                self.assertFalse(cli_commands.command_requires_project_lock(check))
+                self.assertTrue(cli_commands.command_requires_project_lock(start))
+                with self.assertRaisesRegex(cli_commands.WorkflowError, "模板版本为 2.0.0"):
+                    cli_commands.assert_project_version_compatible(start)
+
     def test_frozen_update_caches_versioned_executable_and_writes_pointer(self) -> None:
         self.init("0.9.0")
         self.commit()
         manifest = self.exe_release()
-        migration = subprocess.CompletedProcess(
-            args=[], returncode=0,
-            stdout=json.dumps({"status": "updated", "changed": [], "conflicts": []}),
-            stderr="",
-        )
         real_run = subprocess.run
 
         def run_portable(command, *args, **kwargs):
             if str(command[0]).endswith(EXECUTABLE_NAME):
-                return migration
+                self.assertEqual(kwargs["env"].get("PROJECT_HOOKS_UPDATE_CHILD"), "1")
+                self.assertIn("--minimum-event-schema", command)
+                child_commands.append(command)
+                selected = Path(command[command.index("--executable-path") + 1])
+                result = apply_project_update(self.root, CURRENT_VERSION, executable_path=selected)
+                return subprocess.CompletedProcess(
+                    args=command, returncode=0, stdout=json.dumps(result), stderr="",
+                )
             return real_run(command, *args, **kwargs)
 
+        child_commands = []
         with patch("project_hooks.infrastructure.system.updater.is_frozen", return_value=True):
-            with patch("project_hooks.infrastructure.system.updater.subprocess.run", side_effect=run_portable) as run:
+            with patch("project_hooks.infrastructure.system.updater.subprocess.run", side_effect=run_portable):
                 result = run_update(self.root, manifest_url=manifest.as_uri())
 
         pointer = json.loads((
@@ -552,22 +918,22 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(selected.is_file())
         self.assertEqual(selected.read_bytes(), b"test executable")
         self.assertTrue(selected.is_relative_to((self.root / ".project_hooks/runtime").resolve()))
-        self.assertEqual(run.call_args.args[0][0], str(selected))
+        self.assertEqual(child_commands[0][0], str(selected))
+        self.assertIn("--executable-path", child_commands[0])
 
     def test_same_version_different_build_is_reinstalled(self) -> None:
         self.init()
         self.commit()
         manifest = self.exe_release(build_id="release-build")
-        migration = subprocess.CompletedProcess(
-            args=[], returncode=0,
-            stdout=json.dumps({"status": "updated", "changed": [], "conflicts": []}),
-            stderr="",
-        )
         real_run = subprocess.run
 
         def run_portable(command, *args, **kwargs):
             if str(command[0]).endswith(EXECUTABLE_NAME):
-                return migration
+                selected = Path(command[command.index("--executable-path") + 1])
+                result = apply_project_update(self.root, CURRENT_VERSION, executable_path=selected)
+                return subprocess.CompletedProcess(
+                    args=command, returncode=0, stdout=json.dumps(result), stderr="",
+                )
             return real_run(command, *args, **kwargs)
 
         with patch("project_hooks.infrastructure.system.updater.build_identity", return_value={"build_id": "local-build"}):

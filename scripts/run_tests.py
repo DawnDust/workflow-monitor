@@ -22,7 +22,9 @@ from project_hooks.infrastructure.system.verification import iso_now, write_test
 MODULES = (
     "tests.unit.test_resource_gate",
     "tests.unit.test_folder_index",
+    "tests.unit.test_project_templates",
     "tests.unit.test_privacy",
+    "tests.unit.test_transaction",
     "tests.unit.test_reviews",
     "tests.integration.persistence.test_reviews",
     "tests.unit.test_automation",
@@ -40,7 +42,9 @@ MODULES = (
 FAST_CLASSES = (
     "tests.unit.test_resource_gate.ResourceGateTests",
     "tests.unit.test_folder_index.FolderIndexTests",
+    "tests.unit.test_project_templates.ProjectTemplateTests",
     "tests.unit.test_privacy.PrivacyTests",
+    "tests.unit.test_transaction.MutationLockTests",
     "tests.unit.test_reviews.ReviewTests",
     "tests.integration.persistence.test_reviews.ReviewIntegrationTests",
     "tests.unit.test_automation.AutomationTests",
@@ -303,7 +307,11 @@ def stop_smoke_process(process: subprocess.Popen) -> None:
 def release_smoke() -> int:
     from project_hooks import __version__
     validate_release_tag(__version__)
-    subprocess.run([sys.executable, "scripts/build_windows_exe.py"], cwd=ROOT, check=True)
+    subprocess.run(
+        [sys.executable, "scripts/build_windows_exe.py", "--channel", "stable"],
+        cwd=ROOT,
+        check=True,
+    )
     subprocess.run(
         [sys.executable, "scripts/build_release.py", "--version", __version__], cwd=ROOT, check=True,
     )
@@ -315,6 +323,8 @@ def release_smoke() -> int:
     version_data = json.loads(version_text)
     if version_data["application_version"] != __version__ or not version_data["build_identity"].get("build_id"):
         raise RuntimeError("frozen version/build identity smoke failed")
+    if version_data.get("build_channel") != "stable":
+        raise RuntimeError("release smoke did not produce a stable-channel executable")
     manifest = json.loads((ROOT / "dist/release-manifest.json").read_text(encoding="utf-8"))
     if manifest["build_identity"].get("build_id") != version_data["build_identity"].get("build_id"):
         raise RuntimeError("release manifest build identity does not match executable")

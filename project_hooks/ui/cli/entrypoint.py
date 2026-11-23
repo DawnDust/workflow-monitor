@@ -11,6 +11,11 @@ from ... import __version__
 from .commands import *
 from .parser import build_parser
 from .agent_output import brief_context, verification_view, markdown_view, compact_result
+from ...infrastructure.system.diagnostics import create_failure_record
+from ...infrastructure.system.runtime import UPDATE_CHILD_ENV
+from ...infrastructure.system.updater import validate_project_event_schema
+from ...infrastructure.system.updater import run_local_update
+from ...infrastructure.system.build_notes import read_build_notes
 
 def main(argv: list[str] | None = None) -> int:
     raw_args = list(os.sys.argv[1:] if argv is None else argv)
@@ -25,8 +30,14 @@ def main(argv: list[str] | None = None) -> int:
         from .structured_input import expand
         expanded_args = expand(raw_args)
         args = build_parser().parse_args(expanded_args)
+        if args.command == "update" and args.from_exe and args.manifest_url:
+            raise WorkflowError("--from-exe 不能与远程版本选择参数 --manifest-url 同时使用")
         if args.command == "end" and not args.check_only and (not args.result or not args.note):
             raise WorkflowError("结束任务必须填写 --result 和 --note；只检查使用 end --check-only")
+        if args.command == "build-notes":
+            notes = read_build_notes()
+            print(notes["markdown"] if args.format == "markdown" else json.dumps(notes, ensure_ascii=False, indent=2))
+            return 0
         if args.command == "init":
             root = (args.project or args.path).resolve()
         else:
@@ -35,16 +46,19 @@ def main(argv: list[str] | None = None) -> int:
             set_project_root(root)
             assert_project_version_compatible(args)
             shared_action = cli_shared_action(args)
-            if not command_is_read_only(args):
+            if command_requires_project_lock(args):
                 lock_state_dir = root / ".project_hooks" if args.command == "init" else state_dir()
-                writer_context = mutation_lock(
+                pending_writer_context = mutation_lock(
                     lock_state_dir,
                     command=".".join(filter(None, [args.command, getattr(args, f"{args.command}_command", None)])),
                     task_id=getattr(args, "task_id", None),
                     timeout=0.25,
                 )
-                writer_context.__enter__()
+                pending_writer_context.__enter__()
+                writer_context = pending_writer_context
                 before_events = set() if args.command == "init" else {e["event_id"] for e in load_events(journal_path())}
+            elif args.command == "update" and not args.check:
+                before_events = {e["event_id"] for e in load_events(journal_path())}
         if args.basic_help:
             output = DAILY_HELP
         elif args.help_all:
@@ -58,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
                 "当前目录不在 Workflow Monitor 科研项目中；请先运行 `.\\workflow-monitor.exe init .`，"
                 "或使用 `--project <path>`"
             )
+        elif args.command == "update" and args.from_exe:
+            output = run_local_update(ROOT, args.from_exe, check_only=args.check)
         elif shared_action is not None:
             if getattr(args, "compact", False) and args.command != "start":
                 receipt_task_id = read_active()["task_id"]
@@ -76,7 +92,13 @@ def main(argv: list[str] | None = None) -> int:
                 raise WorkflowError(
                     f"核心版本 {__version__} 与迁移目标 {args.target_version} 不一致"
                 )
-            output = apply_project_update(ROOT, args.target_version)
+            minimum_schema = args.minimum_event_schema if args.minimum_event_schema is not None else 1
+            maximum_schema = args.maximum_event_schema if args.maximum_event_schema is not None else SCHEMA_VERSION
+            validate_project_event_schema(ROOT, minimum_schema, maximum_schema)
+            output = apply_project_update(
+                ROOT, args.target_version, executable_path=args.executable_path,
+                cache_build_id=args.cache_build_id,
+            )
         elif args.command is None:
             configured = run_git(["config", "--local", "--get", "core.hooksPath"], check=False).stdout.strip()
             if configured != TRACKED_HOOKS_DIR:
@@ -124,7 +146,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "attempt": output = get_attempt(current_branch()) if args.attempt_command == "show" else attempt_update(args)
         elif args.command in {"history", "explorations"}:
             output = render_records(query_output(args.command, args.limit), args.format)
-        elif args.command == "exploration": output = exploration_import(args)
+        elif args.command == "exploration" and args.exploration_command == "import": output = exploration_import(args)
+        elif args.command == "exploration" and args.exploration_command == "archive-validated":
+            output = archive_validated_exploration(args.branch)
+        elif args.command == "program": output = program_command(args)
+        elif args.command == "privacy" and args.privacy_command == "sanitize-events":
+            output = sanitize_uncommitted_events(args.base_ref, apply=args.apply)
         elif args.command == "catalog": output = catalog_command(args, catalog_runtime())
         elif args.command == "db": output = db_command(args)
         else: output = finish_task(args)
@@ -161,6 +188,16 @@ def main(argv: list[str] | None = None) -> int:
             }
         except Exception:
             pass
+        if os.environ.get(UPDATE_CHILD_ENV) and args is not None and args.command == "_apply-update":
+            try:
+                child_record = create_failure_record((root or ROOT).resolve(), exc, **metadata)
+                print(json.dumps({
+                    "format": "workflow-monitor-update-error",
+                    "diagnostic": child_record,
+                }, ensure_ascii=False), file=os.sys.stderr)
+            except Exception:
+                print(str(exc), file=os.sys.stderr)
+            return 1
         try:
             record = record_failure((root or ROOT).resolve(), exc, **metadata)
             message = format_failure(record)
