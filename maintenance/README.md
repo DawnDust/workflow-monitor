@@ -11,6 +11,8 @@
 
 `maintenance/events.jsonl` 只追加且不得改写历史行；`.project_hooks/maintenance.sqlite3` 和测试回执均为本地生成物。
 
+多工作树命名、续办、迁移、审计与归档见 [工作区说明](../docs/zh/worktrees.md)。
+
 ## Codex 简短调用
 
 - 默认读取 `context --view brief --format markdown`；只查结束门禁使用 `context --view verification`，追溯全部事实使用 `context --view full`。篇章和交接详情按需使用 `stage show`、`history`。

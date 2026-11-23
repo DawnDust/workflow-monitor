@@ -1,6 +1,8 @@
 # 安装、恢复与交付
 
-- 新 clone/worktree：放置根目录 EXE，运行 `.\workflow-monitor.exe install`。
+- 新 clone 在主项目根目录放置 EXE 并执行 install。项目内的工作区由统一入口管理。
+- 旧项目升级先预览 worktree migrate --check，确认未结束任务和迁移冲突已处置，再通过升级流程迁入 .worktrees/。
+- 清理前先运行 workflow close <ID> --cleanup 查看预览，确认后再带 --confirmed 执行。
 - 升级：在无活动任务、干净且同步的 main 上运行 `.\workflow-monitor.exe update`。首次写入 Schema v4 后不可降级到仅支持 v1-v3 的版本。
 - 恢复：异常中断运行 `task recover`；明确放弃运行 `task abandon --reason <原因>`。
 - 旧程序目录：运行 `program migrate-analysis` 预览；确认目标无冲突后在 main 稳定任务中加 `--apply` 迁入 `program/`。
