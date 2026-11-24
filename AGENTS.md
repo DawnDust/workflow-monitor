@@ -4,7 +4,7 @@
 ## 项目维护生命周期
 
 - 项目生命周期操作和维护状态写入使用仓库根目录的 `.\workflow-monitor.exe`；文件读取、搜索和测试使用相应工具。
-- 新 clone 或 worktree 首次写入前，将 `workflow-monitor.exe` 放到仓库根目录并运行 `.\workflow-monitor.exe install`。
+- 新 clone 在主项目根目录安装 workflow-monitor.exe。工具创建的链接工作区使用主入口 --project <工作区路径> 执行生命周期。
 - 每次任务先运行 `.\workflow-monitor.exe context --view brief --format markdown`，按 `core_read_order` 读取尚未掌握或已变更的规范；首次写入前必须运行 `start`。
 - 纯只读咨询和审查不启动写入生命周期，也不调用 `end`；准备首次写入时再判断轨道。已启动的任务必须通过 `end` 或规定的放弃流程收尾。
 - 用户只需用自然语言描述任务；AI 从对话提取目标、验收和证据，任务 ID、时间、分支、状态令牌和安全默认值由工作流代码处理，不要求用户复制提示词或命令。
@@ -18,6 +18,12 @@
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态、绕过 `end`、在 `main` 试改、自动合并。
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
 - Dashboard 只读展示当前任务、研究篇章、动作可用性和阻塞原因；生命周期写入由 AI 调用结构化服务。放弃、迁移、数据库重建和软件更新必须在对话中取得用户确认。
+
+## 多工作树并行
+
+- 探索在项目内的 .worktrees/ 检出独立分支。一个工作区最多关联一项未结束任务，后续任务可用 start --workflow <ID> 复用同一分支和目录。
+- status --all 汇总并行状态，conflict list/show 说明冲突来源。研究判断和结论取舍由用户确认，机械重复事件按 ID 去重。
+- 迁移和清理先预览并确认。暂停或阻塞任务使用 task resume，失联状态保留待核实。
 
 ## Codex 简短调用
 

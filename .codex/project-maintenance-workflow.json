@@ -63,5 +63,8 @@
       "timeout_seconds": 1800
     }
   },
-  "review_interval_days": 14
+  "review_interval_days": 14,
+  "multi_worktree": {
+    "minimum_event_schema": 6
+  }
 }

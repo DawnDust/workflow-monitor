@@ -169,7 +169,8 @@ class ReportingTests(unittest.TestCase):
             "write_test_receipt(root,suite=suite,result='failed' if failed else 'passed',tests=1,failures=int(failed),"
             "coverage=None,started_at=iso_now(),finished_at=iso_now())\n"
             "sys.exit(int(failed))\n", encoding="utf-8")
-        config_path = self.root / ".codex/project-maintenance-workflow.json"
+        from project_hooks.infrastructure.config_paths import resolve_config_path
+        config_path = resolve_config_path(self.root)
         config = json.loads(config_path.read_text(encoding="utf-8"))
         config["verification_commands"] = {suite: dict(argv=[sys.executable, "scripts/run_tests.py", suite],
                                                        timeout_seconds=30) for suite in ("fast", "full")}

@@ -18,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from project_hooks.infrastructure.config_paths import has_project_config
 from project_hooks.infrastructure.system.verification import iso_now, write_test_receipt, verification_identity
 MODULES = (
     "tests.unit.test_resource_gate",
@@ -39,6 +40,8 @@ MODULES = (
     "tests.integration.web.test_dashboard",
     "tests.unit.test_architecture",
     "tests.unit.test_research_attention",
+    "tests.unit.test_config_paths",
+    "tests.unit.test_agent_hooks",
 )
 FAST_CLASSES = (
     "tests.unit.test_resource_gate.ResourceGateTests",
@@ -56,6 +59,8 @@ FAST_CLASSES = (
     "tests.integration.web.test_dashboard.WebDashboardBridgeTests",
     "tests.integration.web.test_dashboard.WebDashboardIntegrationTests",
     "tests.unit.test_architecture.ArchitectureTests",
+    "tests.unit.test_config_paths.ConfigPathsTests",
+    "tests.unit.test_agent_hooks.AgentHooksTests",
 )
 CORE_SMOKE = (
     "tests.integration.persistence.test_multi_worktree.MultiWorktreeTests.test_three_real_worktrees_parallel_and_project_progress",
@@ -105,7 +110,14 @@ def fast_ids() -> list[str]:
     )
     distribution_changed = any(
         path.startswith(("scripts/", ".github/"))
-        or path in {"project_hooks/project_manager.py", "project_hooks/updater.py", "project_hooks/windows_entry.py"}
+        or path in {
+            "project_hooks/infrastructure/config_paths.py",
+            "project_hooks/infrastructure/system/agent_hooks.py",
+            "project_hooks/infrastructure/system/project_manager.py",
+            "project_hooks/infrastructure/system/updater.py",
+            "project_hooks/ui/windows/main.py",
+            "project_hooks/windows_entry.py",
+        }
         for path in changed
     )
     if core_changed or not changed:
@@ -338,11 +350,10 @@ def release_smoke() -> int:
         process = subprocess.Popen(
             [str(copied)], cwd=portable, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
-        marker = portable / ".codex/project-maintenance-workflow.json"
         deadline = time.monotonic() + 20
-        while not marker.is_file() and process.poll() is None and time.monotonic() < deadline:
+        while not has_project_config(portable) and process.poll() is None and time.monotonic() < deadline:
             time.sleep(0.1)
-        if not marker.is_file():
+        if not has_project_config(portable):
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=5)

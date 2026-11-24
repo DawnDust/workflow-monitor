@@ -81,6 +81,13 @@ from ...infrastructure.system.project_manager import (
 )
 from ...infrastructure.system.resource_layout import catalog_consistency_errors, catalog_consistency_issues, ensure_resource_directories
 from ...core.resource_gate import normalize_references
+from ...infrastructure.config_paths import (
+    PRIMARY_CONFIG_PATH,
+    has_project_config,
+    resolve_config_path,
+    resolve_installation_path,
+    resolve_installation_relative,
+)
 from ...infrastructure.system.updater import UpdateError, check_latest_update, run_update, version_report
 from ...infrastructure.persistence.transaction import MutationLockError, mutation_lock, read_writer_lock
 from ...infrastructure.system.runtime import is_frozen
@@ -100,9 +107,9 @@ from ...infrastructure.system import multi_worktree
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
-PROJECT_MARKER = Path(".codex/project-maintenance-workflow.json")
+PROJECT_MARKER = PRIMARY_CONFIG_PATH
 ROOT = Path.cwd().resolve()
-MARKER = ROOT / PROJECT_MARKER
+MARKER = resolve_config_path(ROOT)
 TASK_ID_RE = re.compile(r"^\d{8}_[a-z0-9][a-z0-9_-]*_\d{3}$")
 TOPIC_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 STAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -130,17 +137,17 @@ STATE_ARGUMENTS = (
 DAILY_HELP = """\
 usage: workflow-monitor [-h] [--help-all] [--project PATH] {context,start,report,end,diagnostics,privacy} ...
 
-项目内维护入口。冻结 EXE 无参数启动桌面界面；Codex 使用显式子命令。
+项目内维护入口。冻结 EXE 无参数启动桌面界面；AI 代理使用显式子命令。
 
 日常命令:
-  context     读取上下文；Codex 使用 --view brief，门禁使用 --view verification
+  context     读取上下文；AI 使用 --view brief，门禁使用 --view verification
   start       开始任务生命周期
   report      按需填报进展、证据与审阅结果
   end         完成任务生命周期
   diagnostics 查看或导出本地脱敏诊断
   privacy     安全脱敏基线之后的事件差量
 
-Codex 常用:
+AI 常用:
   context --view brief --format markdown
   start --kind code --scope "目标" --acceptance "验收" --compact
   end --result completed --note "结果" --current-step "完成步骤" --compact
@@ -199,22 +206,23 @@ def discover_project_root(start: Path | None = None) -> Path | None:
     if current.is_file():
         current = current.parent
     for candidate in (current, *current.parents):
-        if (candidate / PROJECT_MARKER).is_file():
+        if has_project_config(candidate):
             return candidate
     development = PACKAGE_ROOT.parent
-    return development if (development / PROJECT_MARKER).is_file() else None
+    return development if has_project_config(development) else None
 
 
 def set_project_root(path: Path) -> None:
     global ROOT, MARKER
     ROOT = path.resolve()
-    MARKER = ROOT / PROJECT_MARKER
+    MARKER = resolve_config_path(ROOT)
 
 
 def config() -> dict:
-    if not MARKER.is_file():
-        raise WorkflowError("缺少 .codex/project-maintenance-workflow.json")
-    data = json.loads(MARKER.read_text(encoding="utf-8"))
+    target = MARKER if MARKER.is_file() else (resolve_config_path(ROOT) if has_project_config(ROOT) else None)
+    if target is None or not target.is_file():
+        raise WorkflowError("缺少 .workflow-monitor/workflow.json（或兼容配置 .codex/project-maintenance-workflow.json）")
+    data = json.loads(target.read_text(encoding="utf-8"))
     data.setdefault("timezone", "Asia/Shanghai")
     data.setdefault("state_dir", ".project_hooks")
     data.setdefault("core_read_order", STATIC_READ_ORDER)
@@ -226,7 +234,7 @@ def config() -> dict:
 
 
 def installed_project_version() -> str | None:
-    path = ROOT / INSTALLATION_PATH
+    path = resolve_installation_path(ROOT)
     if not path.is_file():
         return None
     try:
@@ -247,7 +255,7 @@ def command_is_read_only(args: argparse.Namespace) -> bool:
     if args.command == "review" or (args.command == "end" and getattr(args, "check_only", False)):
         return True
     if args.command in {None, "version", "context", "check", "status", "branch-status",
-                        "history", "explorations", "dashboard", "diagnostics"}:
+                        "history", "explorations", "dashboard", "diagnostics", "agent-hook"}:
         return True
     if args.command == "update" and args.check:
         return True
@@ -284,7 +292,7 @@ def assert_project_version_compatible(args: argparse.Namespace) -> None:
     installed = installed_project_version()
     registry = registry_for(ROOT) if (ROOT / ".git").exists() else None
     if registry and registry.setting("unified"):
-        installation = Path(registry.setting("primary_root")) / INSTALLATION_PATH
+        installation = resolve_installation_path(Path(registry.setting("primary_root")))
         if installation.is_file():
             metadata = json.loads(installation.read_text(encoding="utf-8"))
             installed = metadata.get("application_version") or metadata.get("core_version")
@@ -452,7 +460,7 @@ def check_repository(
     except WorkflowError as exc:
         errors.append(str(exc))
     for rel in [*STATIC_READ_ORDER, "maintenance/README.md", "maintenance/events.jsonl",
-                INSTALLATION_PATH.as_posix(), f"{TRACKED_HOOKS_DIR}/pre-commit"]:
+                resolve_installation_relative(ROOT).as_posix(), f"{TRACKED_HOOKS_DIR}/pre-commit"]:
         if not (ROOT / rel).is_file():
             errors.append(f"缺少维护文件: {rel}")
     for rel in ("maintenance/current_task.md", "maintenance/change_archive.md", "maintenance/decision_log.md", "maintenance/exploration_log.md"):
@@ -1488,8 +1496,9 @@ def install_git_hook(force: bool = False) -> str:
         shared = multi_worktree.repository_context(ROOT).shared_dir / "hooks"
         if configured != shared.as_posix():
             multi_worktree.install_shared_hooks(ROOT)
-        if not (ROOT / INSTALLATION_PATH).exists():
-            write_json(ROOT / INSTALLATION_PATH, installation_record(ROOT, __version__))
+        installation = resolve_installation_path(ROOT)
+        if not installation.exists():
+            write_json(installation, installation_record(ROOT, __version__))
         return f"已连接共享提交检查，并初始化 SQLite: {database_path()}"
     if configured and configured != TRACKED_HOOKS_DIR and not force:
         raise WorkflowError(f"本仓库已有 core.hooksPath={configured}；使用 --force 前请先人工合并")
@@ -1507,7 +1516,7 @@ def install_git_hook(force: bool = False) -> str:
         pass
     if configured != TRACKED_HOOKS_DIR:
         run_git(["config", "--local", "core.hooksPath", TRACKED_HOOKS_DIR])
-    installation = ROOT / INSTALLATION_PATH
+    installation = resolve_installation_path(ROOT)
     if not installation.exists():
         write_json(installation, installation_record(ROOT, __version__))
     return f"已启用仓库内 pre-commit，并初始化 SQLite: {database_path()}"
@@ -2477,7 +2486,7 @@ def diagnostic_check_snapshot() -> dict:
             errors.append("maintenance_store")
     except Exception:
         errors.append("workflow_config_unreadable")
-    for relative in (*STATIC_READ_ORDER, "maintenance/events.jsonl", INSTALLATION_PATH.as_posix()):
+    for relative in (*STATIC_READ_ORDER, "maintenance/events.jsonl", resolve_installation_relative(ROOT).as_posix()):
         if not (ROOT / relative).is_file():
             errors.append(f"missing:{relative}")
 

@@ -13,6 +13,7 @@ import urllib.request
 from pathlib import Path
 
 from ... import EXECUTABLE_NAME, __version__
+from ..config_paths import resolve_installation_path
 from ..git.build_identity import (
     SOFTWARE_SOURCE_PATHS,
     build_identity,
@@ -132,7 +133,7 @@ def cache_executable(content: bytes, version: str, project_root: Path, *, build_
 
 
 def project_version(root: Path) -> str | None:
-    path = root / INSTALLATION_PATH
+    path = resolve_installation_path(root)
     if not path.is_file():
         return None
     try:
@@ -144,7 +145,7 @@ def project_version(root: Path) -> str | None:
 
 
 def project_template_version(root: Path) -> int | None:
-    path = root / INSTALLATION_PATH
+    path = resolve_installation_path(root)
     try:
         return int(json.loads(path.read_text(encoding="utf-8")).get("template_version"))
     except (OSError, ValueError, TypeError):
@@ -397,7 +398,7 @@ def template_hashes() -> dict[str, str]:
 
 def _template_preview(root: Path, desired: dict[str, str]) -> dict:
     try:
-        installed = json.loads((root / INSTALLATION_PATH).read_text(encoding="utf-8"))
+        installed = json.loads(resolve_installation_path(root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         installed = {}
     blocks = {"AGENTS.md:block": (AGENTS_BEGIN, AGENTS_END),
@@ -512,7 +513,7 @@ def version_report(root: Path | None) -> dict:
     project_build_input_fingerprint = None
     if root:
         try:
-            installation = json.loads((root / INSTALLATION_PATH).read_text(encoding="utf-8"))
+            installation = json.loads(resolve_installation_path(root).read_text(encoding="utf-8"))
             project_identity = installation.get("build_identity") or {}
             project_build_id = project_identity.get("build_id")
             project_build_input_fingerprint = (

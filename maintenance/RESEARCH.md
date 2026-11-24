@@ -14,6 +14,8 @@
 
 探索成功并合入 `main` 后，使用稳定任务运行 `exploration archive-validated <exploration-or-archive-branch>` 记录归档。命令确认探索为 `validated`、结束回执存在、分支未被任何 worktree 检出，并验证分支提交已集成：可由提交祖先关系、主线历史中完全相同的文件树快照或当前 squash 等价结果证明。精确文件树快照支持 squash 合并和历史重写后的分支引用；命令会记录所用证据，不修改探索判决、不推送。未找到集成证据时拒绝归档。`archive-attempt` 只用于 `negative`、`inconclusive` 和 `paused`，并在状态不适用时先报告原因。
 
+统一管理的探索通过 workflow close 查看归档和清理条件，验证通过的探索仍须有主线集成证据。阴性和未决探索保留结论、证据和归档引用。跨工作区涉及研究判断的冲突由用户确认。
+
 分支、篇章、探索和资料的审阅覆盖具体事件与文件版本，不能用无关活动刷新内容更新时间。`review list --kind ...` 分类查看，`review show` 默认返回精简变化，完整来源按需展开。正式研究使用变化触发和 14 天提醒，稳定参考不作周期提醒，示例只保留完整性检查；详见 [AUTOMATION.md](AUTOMATION.md)。
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from ...core.branches import ATTEMPT_STATES
@@ -72,8 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--verification-profile", choices=("auto", "release"), default="auto")
     start.add_argument("--without-stage-reason")
     start.add_argument("--stage", default="auto")
-    start.add_argument("--new-stage", type=__import__("json").loads)
-    start.add_argument("--previous-stage", type=__import__("json").loads)
+    start.add_argument("--new-stage", type=json.loads)
+    start.add_argument("--previous-stage", type=json.loads)
     report = sub.add_parser("report")
     report.add_argument("--depends-on", action="append")
     report.add_argument("--deliverable", action="append")
@@ -82,10 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
         report.add_argument(f"--{name}")
     report.add_argument("--evidence", action="append")
     report.add_argument("--clear", action="append")
-    report.add_argument("--stage-update", type=__import__("json").loads)
+    report.add_argument("--stage-update", type=json.loads)
     report.add_argument("--verify", choices=("fast",))
     report.add_argument("--compact", action="store_true")
-    report.add_argument("--reviews", type=__import__("json").loads)
+    report.add_argument("--reviews", type=json.loads)
     review = sub.add_parser("review", help="按需查看科研审阅范围")
     review_sub = review.add_subparsers(dest="review_command", required=True)
     review_list = review_sub.add_parser("list")
@@ -163,6 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     install = sub.add_parser("install")
     install.add_argument("--force", action="store_true")
     sub.add_parser("pre-commit", help=argparse.SUPPRESS)
+    sub.add_parser("agent-hook", help=argparse.SUPPRESS)
     context = sub.add_parser("context")
     context.add_argument("--format", choices=("markdown", "json"), default="markdown")
     context.add_argument("--view", choices=("brief", "verification", "full"), default="full")
@@ -268,7 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("hypothesis", "conclusion", "progress"):
         end.add_argument(f"--{name}")
     end.add_argument("--clear", action="append")
-    end.add_argument("--stage-update", type=__import__("json").loads)
+    end.add_argument("--stage-update", type=json.loads)
     end.add_argument("--check-only", action="store_true")
-    end.add_argument("--reviews", type=__import__("json").loads)
+    end.add_argument("--reviews", type=json.loads)
     return parser

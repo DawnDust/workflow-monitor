@@ -148,7 +148,7 @@ class DistributionTests(unittest.TestCase):
         new = cache_executable(b"new", CURRENT_VERSION, self.root, build_id="new")
         write_pointer(CURRENT_VERSION, self.root, old, build_id="old")
         pointer = runtime_root(self.root) / "current.json"
-        before = {p:p.read_bytes() for p in (pointer, self.root / "maintenance/events.jsonl", self.root / ".codex/project-maintenance-installation.json")}
+        before = {p:p.read_bytes() for p in (pointer, self.root / "maintenance/events.jsonl", self.root / ".workflow-monitor/installation.json")}
         with patch("project_hooks.infrastructure.system.project_manager.build_identity", return_value={"build_id":"new"}), patch(
             "project_hooks.infrastructure.system.project_manager.validate_project", side_effect=RuntimeError("validation failed")
         ):
@@ -300,9 +300,11 @@ class DistributionTests(unittest.TestCase):
         result = initialize_project(self.root, CURRENT_VERSION)
         self.assertEqual(result["status"], "initialized")
         self.assertFalse((self.root / "project_hooks").exists())
-        self.assertTrue((self.root / ".codex/project-maintenance-workflow.json").is_file())
-        self.assertTrue((self.root / ".codex/project-maintenance-installation.json").is_file())
-        config = json.loads((self.root / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
+        self.assertTrue((self.root / ".workflow-monitor/workflow.json").is_file())
+        self.assertTrue((self.root / ".workflow-monitor/installation.json").is_file())
+        self.assertTrue((self.root / ".agents/plugins/workflow-monitor/plugin.json").is_file())
+        self.assertTrue((self.root / ".agents/plugins/workflow-monitor/hooks.json").is_file())
+        config = json.loads((self.root / ".workflow-monitor/workflow.json").read_text(encoding="utf-8"))
         self.assertEqual(config["core_read_order"], ["maintenance/CORE.md"])
         for name in ("README.md", "CORE.md", "RESEARCH.md", "PHYSICS_RESEARCH_ROADMAP.md", "OPERATIONS.md"):
             self.assertTrue((self.root / "maintenance" / name).is_file())
@@ -565,7 +567,8 @@ class DistributionTests(unittest.TestCase):
 
         self.assertTrue(initialized)
         self.assertTrue((portable / ".git").is_dir())
-        self.assertTrue((portable / ".codex/project-maintenance-workflow.json").is_file())
+        self.assertTrue((portable / ".workflow-monitor/workflow.json").is_file())
+        self.assertTrue((portable / ".agents/plugins/workflow-monitor/plugin.json").is_file())
         self.assertIn("./workflow-monitor.exe pre-commit", (
             portable / ".githooks/pre-commit"
         ).read_text(encoding="utf-8"))
@@ -629,8 +632,8 @@ class DistributionTests(unittest.TestCase):
         executable.write_bytes(b"placeholder")
 
         def fail_after_partial_write(root: Path, version: str) -> None:
-            (root / ".codex").mkdir()
-            (root / ".codex/partial.json").write_text(version, encoding="utf-8")
+            (root / ".workflow-monitor").mkdir()
+            (root / ".workflow-monitor/partial.json").write_text(version, encoding="utf-8")
             raise ProjectManagerError("injected failure")
 
         with patch("project_hooks.ui.windows.main.initialize_project", side_effect=fail_after_partial_write):
@@ -649,7 +652,7 @@ class DistributionTests(unittest.TestCase):
         self.assertIn(b"workflow.upgraded", after[len(before):])
         self.assertEqual(result["status"], "updated")
         self.assertEqual(result["diagnostic_cleanup"]["status"], "cleaned")
-        installation = json.loads((self.root / ".codex/project-maintenance-installation.json").read_text(encoding="utf-8"))
+        installation = json.loads((self.root / ".workflow-monitor/installation.json").read_text(encoding="utf-8"))
         self.assertEqual(installation["application_version"], CURRENT_VERSION)
         self.assertTrue(installation["build_identity"]["build_id"])
         self.assertTrue((self.root / ".project_hooks/maintenance.sqlite3").is_file())
@@ -758,7 +761,7 @@ class DistributionTests(unittest.TestCase):
         self.init("2.0.0")
         roadmap = self.root / "maintenance/PHYSICS_RESEARCH_ROADMAP.md"
         roadmap.unlink()
-        installation_path = self.root / ".codex/project-maintenance-installation.json"
+        installation_path = self.root / ".workflow-monitor/installation.json"
         installation = json.loads(installation_path.read_text(encoding="utf-8"))
         installation["template_version"] = 13
         installation["managed_files"].pop("maintenance/PHYSICS_RESEARCH_ROADMAP.md")
@@ -767,7 +770,7 @@ class DistributionTests(unittest.TestCase):
 
         result = apply_project_update(self.root, CURRENT_VERSION)
 
-        installation = json.loads((self.root / ".codex/project-maintenance-installation.json").read_text(encoding="utf-8"))
+        installation = json.loads((self.root / ".workflow-monitor/installation.json").read_text(encoding="utf-8"))
         self.assertIn("maintenance/PHYSICS_RESEARCH_ROADMAP.md", result["changed"])
         self.assertTrue(roadmap.is_file())
         self.assertEqual(
@@ -784,7 +787,7 @@ class DistributionTests(unittest.TestCase):
             "- `ARCHITECTURE.md`：代码边界和读写模型架构。\n",
         )
         readme.write_text(previous, encoding="utf-8", newline="\n")
-        installation_path = self.root / ".codex/project-maintenance-installation.json"
+        installation_path = self.root / ".workflow-monitor/installation.json"
         installation = json.loads(installation_path.read_text(encoding="utf-8"))
         installation["template_version"] = 14
         installation["managed_files"]["maintenance/README.md"] = {
@@ -803,7 +806,7 @@ class DistributionTests(unittest.TestCase):
 
     def test_update_migrates_default_and_preserves_custom_core_read_order(self) -> None:
         self.init("1.6.1")
-        config_path = self.root / ".codex/project-maintenance-workflow.json"
+        config_path = self.root / ".workflow-monitor/workflow.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
         config["core_read_order"] = ["maintenance/README.md"]
         config["context_command"] = ".\\workflow-monitor.exe context --format markdown"
@@ -967,6 +970,23 @@ class DistributionTests(unittest.TestCase):
         with self.assertRaises(UpdateError):
             run_update(self.root, target_version="999.0.0", manifest_url=manifest.as_uri())
         self.assertEqual((self.root / "maintenance/events.jsonl").read_bytes(), before)
+
+    def test_legacy_codex_project_remains_discoverable_and_updatable(self) -> None:
+        self.init("1.6.1")
+        legacy_dir = self.root / ".codex"
+        legacy_dir.mkdir(exist_ok=True)
+        (self.root / ".workflow-monitor/workflow.json").replace(legacy_dir / "project-maintenance-workflow.json")
+        (self.root / ".workflow-monitor/installation.json").replace(legacy_dir / "project-maintenance-installation.json")
+        (self.root / ".workflow-monitor").rmdir()
+        self.commit("legacy codex layout")
+
+        self.assertEqual(discover_project_root(self.root), self.root.resolve())
+        result = apply_project_update(self.root, CURRENT_VERSION)
+        self.assertEqual(result["status"], "updated")
+        self.assertTrue((legacy_dir / "project-maintenance-workflow.json").is_file())
+        self.assertTrue((legacy_dir / "project-maintenance-installation.json").is_file())
+        self.assertFalse((self.root / ".workflow-monitor").exists())
+        self.assertTrue((self.root / ".agents/plugins/workflow-monitor/plugin.json").is_file())
 
 
 if __name__ == "__main__":

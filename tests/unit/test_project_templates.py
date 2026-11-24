@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 
@@ -28,6 +29,23 @@ class ProjectTemplateTests(unittest.TestCase):
         self.assertIn("program/.gitkeep", files)
         self.assertNotIn("resources/analysis/.gitkeep", files)
         self.assertEqual(research, MAINTENANCE_RESEARCH)
+        self.assertIn("## AI 代理简短调用", agents)
+        self.assertNotIn("## Codex 简短调用", agents)
+        self.assertEqual(agents.count("catalog folder index"), 1)
+
+    def test_antigravity_plugin_templates_are_valid(self):
+        files = template_files()
+        plugin = json.loads(files[".agents/plugins/workflow-monitor/plugin.json"])
+        hooks = json.loads(files[".agents/plugins/workflow-monitor/hooks.json"])
+        self.assertEqual(plugin["name"], "workflow-monitor")
+        guard = hooks["workflow-monitor-guard"]
+        self.assertIn("SessionStart", guard)
+        self.assertIn("PreToolUse", guard)
+        for skill_name in ("workflow-lifecycle", "research-catalog", "multi-worktree-review"):
+            skill_text = files[f".agents/plugins/workflow-monitor/skills/{skill_name}/SKILL.md"]
+            self.assertTrue(skill_text.startswith("---\n"))
+            self.assertIn(f"name: {skill_name}", skill_text)
+            self.assertIn("description:", skill_text)
 
     def test_physics_roadmap_is_optional_guidance_and_managed_template(self):
         files = template_files()

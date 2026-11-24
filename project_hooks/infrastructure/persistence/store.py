@@ -22,6 +22,7 @@ from ...core.events import (
     resolve_timezone,
     validate_event,
 )
+from ..config_paths import read_project_config
 from .active_task import ActiveTaskError, active_row_matches, active_task_path, restore_active_row
 from .transaction import mutation_lock
 from .project_registry import registry_for
@@ -762,7 +763,7 @@ def sync_registry_events(registry) -> list[dict]:
         try:
             if not root.is_dir() or not (root / ".git").exists():
                 raise StoreError("来源工作树路径不可用")
-            settings = json.loads((root / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
+            settings = read_project_config(root)
             journal = root / settings.get("maintenance_store", {}).get("journal", "maintenance/events.jsonl")
             database = root / settings.get("maintenance_store", {}).get("database", ".project_hooks/maintenance.sqlite3")
             with mutation_lock(root / settings.get("state_dir", ".project_hooks"), command="events.sync", timeout=0):
