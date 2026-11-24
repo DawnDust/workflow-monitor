@@ -2,18 +2,18 @@
   "format": 1,
   "application_version": "2.1.0",
   "build_identity": {
-    "build_id": "9fa83c5e364f719d",
-    "source_commit": "7bd6f1a109b731e06a92a984476a4401aec4a0e0",
-    "build_input_fingerprint": "52440c66a60f5d370cfec3b2e6bb196fb468293b36fa91e0e6499fabbe836085",
-    "source_tree": "52440c66a60f5d370cfec3b2e6bb196fb468293b36fa91e0e6499fabbe836085",
+    "build_id": "294c55dfa1cc35c4",
+    "source_commit": "c88f804533fc55d74a69026863395e330ba6d4c0",
+    "build_input_fingerprint": "2a2f7576c737d2b0bae61cb243696c21752162f4c352afd0c328788fe41045b3",
+    "source_tree": "2a2f7576c737d2b0bae61cb243696c21752162f4c352afd0c328788fe41045b3",
     "source_tree_algorithm": "build-input-content-v3",
-    "built_at": "2026-11-24T03:08:55+00:00",
+    "built_at": "2026-11-24T04:11:07+00:00",
     "dirty": false,
     "mode": "frozen",
     "channel": "test",
     "test_notes_sha256": "c2f13fffa2432c94151300791f9f0e80e56895a8ddf3e91fd29ae73db095040f"
   },
-  "template_version": 20,
+  "template_version": 21,
   "managed_files": {
     ".githooks/pre-commit": {
       "hash": "8af91d4fc439a2efb3797bbd138f1a185039dda73ee4369feed97fb30b1be5f1",
@@ -52,7 +52,11 @@
       "customized": false
     },
     ".agents/plugins/workflow-monitor/hooks.json": {
-      "hash": "d29819189e98caefaed450526401e3df62dd73c00faba9be60134c7fa737ba24",
+      "hash": "a4cb65ca564da4917119269cf82ad8d59b3cb0e0083180d825b1019cf15035f5",
+      "customized": false
+    },
+    ".agents/plugins/workflow-monitor/hooks/pre-tool-guard.ps1": {
+      "hash": "52472208b911051dc97b96144d93a54342cb4a765e7b9841acaddec324548a5e",
       "customized": false
     },
     ".agents/plugins/workflow-monitor/skills/workflow-lifecycle/SKILL.md": {
@@ -108,7 +112,7 @@
       "customized": false
     },
     "AGENTS.md:block": {
-      "hash": "89a70b1b101fea3f77d294e3a71af4fce45620fbb04ddce9341bf2f8293ca648",
+      "hash": "18890d8a0fdc443b0ff58868a4b276466049ea713b1ebebbad0a672cc62f8426",
       "customized": true
     },
     ".gitignore:block": {
@@ -116,7 +120,7 @@
       "customized": true
     },
     ".gitattributes:block": {
-      "hash": "df7d84e65dda36940e02131bb80ff2761e096db2ec51474701c6a50be482c3fb",
+      "hash": "deffa1536eb09cc9f47188cf5dd782a227361af546c67e12aedb898eeeacb4f1",
       "customized": true
     }
   }
