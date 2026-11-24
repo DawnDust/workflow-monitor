@@ -25,7 +25,7 @@
 - status --all 汇总并行状态，conflict list/show 说明冲突来源。研究判断和结论取舍由用户确认，机械重复事件按 ID 去重。
 - 迁移和清理先预览并确认。暂停或阻塞任务使用 task resume，失联状态保留待核实。
 
-## Codex 简短调用
+## AI 代理简短调用
 
 - 默认读取 `context --view brief --format markdown`；只查结束门禁使用 `context --view verification`，追溯全部事实使用 `context --view full`。篇章和交接详情按需使用 `stage show`、`history`。
 - `start` 可省略任务 ID，由工作流自动分配；`end` 可省略 ID，使用当前活动任务。两者及 `report` 可加 `--compact` 返回简短回执；复杂填报支持 `--input-json <文件或 ->`。
@@ -35,6 +35,7 @@
 - 审阅状态与完整覆盖由程序从事件自动判定和记录；AI 只选择必要的科研审阅结果，不重复填报整体状态。完整性问题不能靠审阅或延期清除。
 - 消化科研结果、阅读长证明或整理理解卡点时，按需阅读 `maintenance/RESEARCH_UNDERSTANDING_GUIDE.md`；它不设置理解评分、强制阶段或完成门禁。
 - 收到测试 EXE 时分别核对源码同步、实际运行构建和项目模板升级。源码仓库先比较构建指纹；一致则报告已一致，无需源码修改，不一致须有对应提交或补丁。科研项目使用 `update --from-exe <路径> --check` 预览，再在授权范围内实际升级；文件替换不等于模板升级。存在定制冲突时报告需要处理，不能笼统宣称更新完成。测试构建提供 `build-notes`，构建成功不代表功能测试通过。
+- Antigravity 原生工作区插件位于 `.agents/plugins/workflow-monitor/`（提供按需 Skills 与 `SessionStart`/`PreToolUse` 护栏）；查看完整看板仍通过无参运行或双击 `workflow-monitor.exe` 打开独立 WebView2 窗口（可运行 `Start-Process .\workflow-monitor.exe`）。
 <!-- project-maintenance-hooks:end -->
 
 ## 软件维护测试

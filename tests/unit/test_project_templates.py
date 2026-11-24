@@ -38,9 +38,17 @@ class ProjectTemplateTests(unittest.TestCase):
         plugin = json.loads(files[".agents/plugins/workflow-monitor/plugin.json"])
         hooks = json.loads(files[".agents/plugins/workflow-monitor/hooks.json"])
         self.assertEqual(plugin["name"], "workflow-monitor")
+        session = hooks["workflow-monitor-session"]
         guard = hooks["workflow-monitor-guard"]
-        self.assertIn("SessionStart", guard)
+        self.assertIn("SessionStart", session)
+        self.assertEqual(session["SessionStart"][0]["timeout"], 30)
         self.assertIn("PreToolUse", guard)
+        for group in guard["PreToolUse"]:
+            self.assertEqual(len(group["hooks"]), 1)
+            self.assertIn("hooks\\pre-tool-guard.ps1", group["hooks"][0]["command"])
+            self.assertEqual(group["hooks"][0]["timeout"], 10)
+        guard_ps1 = files[".agents/plugins/workflow-monitor/hooks/pre-tool-guard.ps1"]
+        self.assertTrue(guard_ps1.isascii())
         for skill_name in ("workflow-lifecycle", "research-catalog", "multi-worktree-review"):
             skill_text = files[f".agents/plugins/workflow-monitor/skills/{skill_name}/SKILL.md"]
             self.assertTrue(skill_text.startswith("---\n"))
