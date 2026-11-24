@@ -1,0 +1,34 @@
+{
+  "workflow-monitor-guard": {
+    "enabled": false,
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "if exist ..\\..\\..\\workflow-monitor.exe (..\\..\\..\\workflow-monitor.exe agent-hook) else if exist ..\\..\\..\\..\\..\\workflow-monitor.exe (..\\..\\..\\..\\..\\workflow-monitor.exe agent-hook) else (echo {})",
+        "timeout": 15
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "write_file|edit_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if exist ..\\..\\..\\workflow-monitor.exe (..\\..\\..\\workflow-monitor.exe agent-hook) else if exist ..\\..\\..\\..\\..\\workflow-monitor.exe (..\\..\\..\\..\\..\\workflow-monitor.exe agent-hook) else (echo {})",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if exist ..\\..\\..\\workflow-monitor.exe (..\\..\\..\\workflow-monitor.exe agent-hook) else if exist ..\\..\\..\\..\\..\\workflow-monitor.exe (..\\..\\..\\..\\..\\workflow-monitor.exe agent-hook) else (echo {})",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
