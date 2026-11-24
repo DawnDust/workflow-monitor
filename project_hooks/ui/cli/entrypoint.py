@@ -31,6 +31,20 @@ def main(argv: list[str] | None = None) -> int:
         from .structured_input import expand
         expanded_args = expand(raw_args)
         args = build_parser().parse_args(expanded_args)
+        if args.command == "agent-hook":
+            from ...infrastructure.system.agent_hooks import handle_stdin
+
+            def _hook_context(project_path: Path) -> str:
+                set_project_root(project_path)
+                return markdown_view(brief_context(context_data()), view="brief")
+
+            print(
+                json.dumps(
+                    handle_stdin(project_finder=discover_project_root, context_loader=_hook_context),
+                    ensure_ascii=False,
+                )
+            )
+            return 0
         if args.command == "events-merge":
             return multi_worktree.merge_driver_main([args.base, args.ours, args.theirs])
         if args.command == "update" and args.from_exe and args.manifest_url:

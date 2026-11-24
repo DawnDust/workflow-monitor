@@ -2,37 +2,37 @@
   "format": 1,
   "application_version": "2.1.0",
   "build_identity": {
-    "build_id": "5af0ddfb26abd773",
-    "source_commit": "6e762e5296f6c723fffb43818c5a771650777284",
-    "build_input_fingerprint": "85f4f43862152d68ab10f599a0e34b9a8fee87849c138f62cb5c5b70b17b1be1",
-    "source_tree": "85f4f43862152d68ab10f599a0e34b9a8fee87849c138f62cb5c5b70b17b1be1",
+    "build_id": "294c55dfa1cc35c4",
+    "source_commit": "c88f804533fc55d74a69026863395e330ba6d4c0",
+    "build_input_fingerprint": "2a2f7576c737d2b0bae61cb243696c21752162f4c352afd0c328788fe41045b3",
+    "source_tree": "2a2f7576c737d2b0bae61cb243696c21752162f4c352afd0c328788fe41045b3",
     "source_tree_algorithm": "build-input-content-v3",
-    "built_at": "2026-11-23T04:56:49+00:00",
-    "dirty": true,
+    "built_at": "2026-11-24T04:11:07+00:00",
+    "dirty": false,
     "mode": "frozen",
     "channel": "test",
     "test_notes_sha256": "c2f13fffa2432c94151300791f9f0e80e56895a8ddf3e91fd29ae73db095040f"
   },
-  "template_version": 19,
+  "template_version": 21,
   "managed_files": {
     ".githooks/pre-commit": {
       "hash": "8af91d4fc439a2efb3797bbd138f1a185039dda73ee4369feed97fb30b1be5f1",
       "customized": false
     },
     "maintenance/README.md": {
-      "hash": "191458f9a56dd978b65e09ba90baf6cd386843eae7df083d44a347d2c8f6b205",
+      "hash": "00335b98834d5d12e4e416502467cb31c5f11cd70a576aa4a5d711ced191bb37",
       "customized": true
     },
     "maintenance/CORE.md": {
-      "hash": "07a8cb299c2d0ee3b110f07b0e496e068e86b8c1b2072106825273b2d5fffe1b",
+      "hash": "9962fd28b66f8750f9a708c07a6e4b40ad5cf1ea25f5cc70488002a591efe88a",
       "customized": true
     },
     "maintenance/AUTOMATION.md": {
-      "hash": "bc0d22f0eaa58ab1539d3ad00c8909b41d868090289947d0afa3b58446a71d6e",
+      "hash": "c89cccced12e7641b7d8e896fc6f563664e80b0113eca73a417748e9d1bc6ec1",
       "customized": true
     },
     "maintenance/RESEARCH.md": {
-      "hash": "f0e97159bd08695271f842a8a5d46194b13d6083394b5c975dc43d0535b07e3f",
+      "hash": "c88907131cba2aa885ee1655fbdec088894d29c93b2c849a5f8193f44e3bc6ec",
       "customized": true
     },
     "maintenance/PHYSICS_RESEARCH_ROADMAP.md": {
@@ -44,8 +44,32 @@
       "customized": false
     },
     "maintenance/OPERATIONS.md": {
-      "hash": "229c91ee085097c395a9e73a4dd0bf75770e943c6f1240385c0ddc374ba7c0fd",
+      "hash": "e4ed8e72b14448b3841c6770bcbb56fff8fff121bdde321bc80963a07d110e01",
       "customized": true
+    },
+    ".agents/plugins/workflow-monitor/plugin.json": {
+      "hash": "0fbf1ac29142fffbe27277abdcfa674346d93a5320989dbe9222d66049fc921a",
+      "customized": false
+    },
+    ".agents/plugins/workflow-monitor/hooks.json": {
+      "hash": "a4cb65ca564da4917119269cf82ad8d59b3cb0e0083180d825b1019cf15035f5",
+      "customized": false
+    },
+    ".agents/plugins/workflow-monitor/hooks/pre-tool-guard.ps1": {
+      "hash": "52472208b911051dc97b96144d93a54342cb4a765e7b9841acaddec324548a5e",
+      "customized": false
+    },
+    ".agents/plugins/workflow-monitor/skills/workflow-lifecycle/SKILL.md": {
+      "hash": "71259cd6b66fd2e3f3b2d61f4e32fca883c9e19900b92ad3ae885c8e6a9d15c4",
+      "customized": false
+    },
+    ".agents/plugins/workflow-monitor/skills/research-catalog/SKILL.md": {
+      "hash": "0ed298fc4dacf9aa313546e1276befa5830d25e78090e6ae865059c37a7af077",
+      "customized": false
+    },
+    ".agents/plugins/workflow-monitor/skills/multi-worktree-review/SKILL.md": {
+      "hash": "b635ea2f4d443dfc7066a2add5349ca0a3c7c640c44de898bf78bf94444fab43",
+      "customized": false
     },
     "resources/source/.gitkeep": {
       "hash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
@@ -88,7 +112,7 @@
       "customized": false
     },
     "AGENTS.md:block": {
-      "hash": "ae0c27ff1f5c2b34430838660c8ab102953ec2c94e2c7906a40fc372bf038d73",
+      "hash": "18890d8a0fdc443b0ff58868a4b276466049ea713b1ebebbad0a672cc62f8426",
       "customized": true
     },
     ".gitignore:block": {
@@ -96,7 +120,7 @@
       "customized": true
     },
     ".gitattributes:block": {
-      "hash": "df7d84e65dda36940e02131bb80ff2761e096db2ec51474701c6a50be482c3fb",
+      "hash": "deffa1536eb09cc9f47188cf5dd782a227361af546c67e12aedb898eeeacb4f1",
       "customized": true
     }
   }

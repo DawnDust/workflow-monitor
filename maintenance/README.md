@@ -13,7 +13,7 @@
 
 多工作树命名、续办、迁移、审计与归档见 [工作区说明](../docs/zh/worktrees.md)。
 
-## Codex 简短调用
+## AI 代理简短调用
 
 - 默认读取 `context --view brief --format markdown`；只查结束门禁使用 `context --view verification`，追溯全部事实使用 `context --view full`。篇章和交接详情按需使用 `stage show`、`history`。
 - `start` 可省略任务 ID，由工作流自动分配；`end` 可省略 ID，使用当前活动任务。两者及 `report` 可加 `--compact` 返回简短回执；复杂填报支持 `--input-json <文件或 ->`。

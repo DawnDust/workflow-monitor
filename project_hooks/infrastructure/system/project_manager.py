@@ -11,6 +11,16 @@ import tempfile
 from pathlib import Path
 
 from ... import EXECUTABLE_NAME
+from ..config_paths import (
+    PRIMARY_CONFIG_PATH,
+    PRIMARY_INSTALLATION_PATH,
+    has_project_config,
+    read_project_config,
+    resolve_config_path,
+    resolve_config_relative,
+    resolve_installation_path,
+    resolve_installation_relative,
+)
 from ..git.build_identity import build_identity
 from ..git import client as git_client
 from .resource_layout import PROGRAM_DIRECTORY, RESOURCE_DIRECTORIES, ensure_resource_directories
@@ -27,9 +37,9 @@ from ..persistence.database import integrity_check, latest_active_task_id
 from .runtime import write_pointer, cached_executable, legacy_runtime_root
 
 
-TEMPLATE_VERSION = 19
-INSTALLATION_PATH = Path(".codex/project-maintenance-installation.json")
-CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
+TEMPLATE_VERSION = 21
+INSTALLATION_PATH = PRIMARY_INSTALLATION_PATH
+CONFIG_PATH = PRIMARY_CONFIG_PATH
 AGENTS_BEGIN = "<!-- project-maintenance-hooks:begin -->"
 AGENTS_END = "<!-- project-maintenance-hooks:end -->"
 GITIGNORE_BEGIN = "# project-maintenance-hooks:begin"
@@ -61,21 +71,17 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - 完成一批相关代码修改后运行 fast；结束时程序按实际门禁自动补齐同一软件输入指纹的回执：软件改动要求 fast/full，release profile 要求 fast/release；纯文档和治理改动由 `end` 内置检查验证。
 - 探索启动前必须有关联研究篇章或记录明确的无篇章理由；有关联篇章的任务结束时必须显式审阅篇章。
 - 项目资料和研究篇章只通过 `project update` 与内部 `stage` 指令记录；新证据改变判断时用 `stage update --revision ... --summary ... --evidence ...` 追加修订；探索进度使用 `attempt update` 的结构化步骤字段。
-- 科研资料放在 `resources/` 预设或已登记的自定义文件夹；文件夹通过 `catalog folder` 登记，内部资料独立登记，模拟资料包除外。`resources/sparks/` 可自由保存 Markdown。
+- 科研资料放在 `resources/` 预设或已登记的自定义文件夹；文件夹通过 `catalog folder add/update/list/archive/restore` 登记（教程、翻译用于文献加工，plans 用于 Sparks 的下一步；登记文件夹不替代内部文件登记），模拟资料包除外。`resources/sparks/` 可自由保存 Markdown。
 - 理论物理任务涉及研究方向与问题收窄、模型分析、理论推导、数值验证、反例压力测试或文献查新时，按需阅读 `maintenance/PHYSICS_RESEARCH_ROADMAP.md`。它只提供研究思路，不是强制阶段、验收项或门禁。
 - 灵感和未成形问题归入 `sparks`，可执行的下一步或研究方案归入 `plans`，成型的来源解读和学习材料归入 `tutorials`。
-- 新建程序、实验代码、Notebook、依赖和运行输出统一放在仓库根目录 `program/`；不要放入 `resources/`，也不要登记为资料。程序仍由 Git 跟踪。
-- 移动已登记资料时保留原 catalog ID 并更新路径；资料操作前刷新 `catalog folder index`，分类无法可靠判断时先询问用户。
+- 新建程序、实验代码、Notebook、依赖和运行输出统一放在仓库根目录 `program/`；不要放入 `resources/`，不要登记为资料。程序仍由 Git 跟踪。
+- 每次资料创建、编辑、导入、移动、重命名或删除前，重新读取 `catalog folder index`，按目录用途选择位置；移动已登记资料时保留原 catalog ID 并更新路径，分类无法可靠判断时先询问用户。新目录先创建并用 `catalog folder add` 登记名称和用途再刷新索引；输出导入显式指定 `--folder`，不自动重建顶层 outputs。
+- 资料路径失效先运行 `catalog reconcile` 搜索可能的移动位置；唯一内容哈希匹配可通过 `--apply` 修复原登记，保留资料身份和关系。歧义、无历史哈希或范围外位置需要用户选择新位置或确认归档，不自动删除或归档。
 - 只有 `validated` 尝试可准备 Squash PR；推送和合并必须由用户明确确认。成功探索合入 `main` 后，在 `main` 稳定任务中使用 `exploration archive-validated <分支>` 记录归档；失败、未决和暂停探索使用 `archive-attempt`。
 - 禁止改写既有 `maintenance/events.jsonl` 行、直接编辑 SQLite、删除活动状态或绕过 `end`。
 - 崩溃后运行 `task recover`；明确放弃时运行 `task abandon --reason <原因>`，不得手工删除 sidecar 或活动任务行。
 - 遇到故障时使用 `diagnostics status/export` 生成脱敏本地诊断；程序不自动上传数据。
 - Dashboard 只读展示任务、研究篇章、动作可用性和阻塞原因；生命周期写入由 AI 调用结构化服务，高风险动作必须在对话中取得用户确认。
-
-
-- 资料路径失效先运行 `catalog reconcile` 搜索可能的移动位置；唯一内容哈希匹配可通过 `--apply` 修复原登记，保留资料身份和关系。歧义、无历史哈希或范围外位置需要用户选择新位置或确认归档，不自动删除或归档。
-- 文件夹导航登记使用 `catalog folder add/update/list/archive/restore`。教程、翻译用于文献加工，plans 用于 Sparks 的下一步；登记文件夹不替代内部文件登记。
-- 每次资料创建、编辑、导入、移动、重命名或删除前，重新读取 `catalog folder index`，按目录用途选择位置；代码文件按仓库结构处理。新目录先创建并用 `catalog folder add` 登记名称和用途，再刷新索引；归属不明确时询问用户。输出导入显式指定 `--folder`，不自动重建顶层 outputs。
 - `start` 保存既有资料问题；AI 在 start/report/end 用 depends_on、deliverable 登记直接依赖和交付物（catalog:ID 或 path:相对路径）。无关且未恶化的既有资料问题保留待处理，不阻止 completed；任务交付物和直接依赖缺失仍阻止完成。全局 check 继续报告全部问题。
 - 确实受阻时使用 `end --result blocked --blocker <原因> --evidence <证据> --next <恢复条件>`。检查失败保留活动任务，不默认 abandon；只有用户明确放弃才运行 task abandon。所有修复通过工作流命令或结构化服务追加事件，不直接编辑 SQLite 或既有事件，历史 abandoned 不改写。
 
@@ -86,12 +92,13 @@ AGENTS_BLOCK = """<!-- project-maintenance-hooks:begin -->
 - `status --all` 与 Dashboard 汇总项目任务；`conflict list/show` 提供文件、篇章和资料的重叠来源。AI 比较证据并提出方案，研究判断及结论取舍由用户本人最终确认。
 - 同 ID 同内容事件机械去重；分歧保留版本，不按更新时间选结论。清理、迁移和正式合并继续取得用户确认。
 
-## Codex 简短调用
+## AI 代理简短调用
 
 - 默认读取 `context --view brief --format markdown`；只查结束门禁使用 `context --view verification`，追溯全部事实使用 `context --view full`。篇章和交接详情按需使用 `stage show`、`history`。
 - `start` 可省略任务 ID，由工作流自动分配；`end` 可省略 ID，使用当前活动任务。两者及 `report` 可加 `--compact` 返回简短回执；复杂填报支持 `--input-json <文件或 ->`。
 - 中途仅在阶段完成、判断变化、阻塞或交接时保存 checkpoint。短任务可通过 `end --current-step ... --next ...` 同时保存最终进展，不在结束前重复调用内容相同的 `state update`。
 - 精简显示不改变测试、篇章审阅和授权门禁；失败与警告必须处理。不要用无参 EXE 获取上下文，无参冻结 EXE 会启动桌面界面。
+- Antigravity 原生工作区插件位于 `.agents/plugins/workflow-monitor/`（提供按需 Skills 与 `SessionStart`/`PreToolUse` 护栏）；查看完整看板仍通过无参运行或双击 `workflow-monitor.exe` 打开独立 WebView2 窗口（可运行 `Start-Process .\\workflow-monitor.exe`）。
 <!-- project-maintenance-hooks:end -->"""
 
 GITIGNORE_BLOCK = """# project-maintenance-hooks:begin
@@ -114,6 +121,7 @@ GITATTRIBUTES_BLOCK = """# project-maintenance-hooks:begin
 .gitignore text eol=lf
 .gitattributes text eol=lf
 AGENTS.md text eol=lf
+.agents/plugins/workflow-monitor/** text eol=lf
 maintenance/*.md text eol=lf
 maintenance/events.jsonl text eol=lf merge=union
 # project-maintenance-hooks:end"""
@@ -307,6 +315,281 @@ MAINTENANCE_README = MAINTENANCE_README.replace("- [OPERATIONS.md]", "- [RESEARC
 MAINTENANCE_OPERATIONS += "\n## 本地测试 EXE 交付\n\n" + EXE_HANDOFF_HINT + "\n\n- 测试版说明包含待测变化、步骤与预期、已知限制、升级注意事项和源码依据；`build-notes --format markdown|json` 在项目外也可读取。正式更新日志记录功能变化，不重复记录每次构建。\n- 实际升级保留 main、无活动任务、干净且同步工作树的前置检查；先处理阻塞，不强制覆盖定制文件。\n"
 
 
+PLUGIN_JSON = (
+    '{\n'
+    '  "name": "workflow-monitor",\n'
+    '  "description": "Workflow Monitor lifecycle skills and safety guard hooks for research Git repositories."\n'
+    '}\n'
+)
+
+_SESSION_START_HOOK_CMD = (
+    "if exist ..\\..\\..\\workflow-monitor.exe (..\\..\\..\\workflow-monitor.exe agent-hook) "
+    "else if exist ..\\..\\..\\..\\..\\workflow-monitor.exe (..\\..\\..\\..\\..\\workflow-monitor.exe agent-hook) "
+    "else (echo {})"
+)
+
+_PRE_TOOL_GUARD_PS1_CMD = (
+    "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File hooks\\pre-tool-guard.ps1"
+)
+
+PLUGIN_PRE_TOOL_GUARD_PS1 = r"""$ErrorActionPreference = 'Stop'
+$ask = '{"decision":"ask"}'
+
+function Get-Prop($obj, [string]$name) {
+    if ($null -eq $obj) { return $null }
+    $prop = $obj.PSObject.Properties[$name]
+    if ($null -eq $prop) { return $null }
+    return $prop.Value
+}
+
+function Find-WorkflowProjectRoot([object]$payload) {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $cwd = Get-Prop $payload 'cwd'
+    if ($cwd -is [string] -and -not [string]::IsNullOrWhiteSpace($cwd)) {
+        $candidates.Add($cwd)
+    }
+    $workspacePaths = Get-Prop $payload 'workspacePaths'
+    if ($workspacePaths -is [System.Collections.IEnumerable] -and -not ($workspacePaths -is [string])) {
+        foreach ($item in $workspacePaths) {
+            if ($item -is [string] -and -not [string]::IsNullOrWhiteSpace($item)) {
+                $candidates.Add($item)
+            }
+        }
+    }
+    foreach ($raw in $candidates) {
+        try {
+            $dir = New-Object System.IO.DirectoryInfo ([System.IO.Path]::GetFullPath($raw))
+        } catch {
+            continue
+        }
+        while ($null -ne $dir) {
+            $primary = Join-Path $dir.FullName '.workflow-monitor\workflow.json'
+            $legacy = Join-Path $dir.FullName '.codex\project-maintenance-workflow.json'
+            if ((Test-Path -LiteralPath $primary -PathType Leaf) -or (Test-Path -LiteralPath $legacy -PathType Leaf)) {
+                return $dir.FullName
+            }
+            $dir = $dir.Parent
+        }
+    }
+    return $null
+}
+
+function Test-ProtectedRelative([string]$relative) {
+    $norm = $relative.Replace('\', '/').Trim().ToLowerInvariant()
+    $list = @($norm)
+    if ($norm -match '^\.worktrees/[^/]+/(.+)$') {
+        $list += $Matches[1]
+    }
+    foreach ($cand in $list) {
+        if ($cand -eq 'maintenance/events.jsonl') { return $true }
+        if ($cand.StartsWith('.git/workflow-monitor/')) { return $true }
+        if ($cand.StartsWith('.project_hooks/') -and ($cand.Contains('.sqlite3') -or $cand.StartsWith('.project_hooks/active-task'))) {
+            return $true
+        }
+    }
+    return $false
+}
+
+try {
+    $rawInput = [Console]::In.ReadToEnd()
+    if ([string]::IsNullOrWhiteSpace($rawInput)) {
+        Write-Output $ask
+        exit 0
+    }
+    $payload = $rawInput | ConvertFrom-Json
+    if ($null -eq $payload) {
+        Write-Output $ask
+        exit 0
+    }
+    $projectRoot = Find-WorkflowProjectRoot $payload
+    if ($null -eq $projectRoot) {
+        Write-Output $ask
+        exit 0
+    }
+    $toolCall = Get-Prop $payload 'toolCall'
+    $name = [string](Get-Prop $toolCall 'name')
+    $toolArgs = Get-Prop $toolCall 'args'
+    if ($null -eq $toolArgs) {
+        Write-Output $ask
+        exit 0
+    }
+
+    if ($name -eq 'write_file' -or $name -eq 'edit_file') {
+        $rawPath = Get-Prop $toolArgs 'Path'
+        if (-not ($rawPath -is [string]) -or [string]::IsNullOrWhiteSpace($rawPath)) {
+            $rawPath = Get-Prop $toolArgs 'path'
+        }
+        if (-not ($rawPath -is [string]) -or [string]::IsNullOrWhiteSpace($rawPath)) {
+            Write-Output $ask
+            exit 0
+        }
+        $cwd = Get-Prop $payload 'cwd'
+        $baseDir = if ($cwd -is [string] -and -not [string]::IsNullOrWhiteSpace($cwd)) { $cwd } else { $projectRoot }
+        $targetFull = if ([System.IO.Path]::IsPathRooted($rawPath)) {
+            [System.IO.Path]::GetFullPath($rawPath)
+        } else {
+            [System.IO.Path]::GetFullPath([System.IO.Path]::Combine([string]$baseDir, $rawPath))
+        }
+        $rootFull = [System.IO.Path]::GetFullPath($projectRoot).Replace('\', '/').TrimEnd('/')
+        $targetNorm = $targetFull.Replace('\', '/').TrimEnd('/')
+        $rootPrefix = $rootFull + '/'
+        $rel = $null
+        if ($targetNorm.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $rel = $targetNorm.Substring($rootPrefix.Length)
+        } elseif ($targetNorm.Equals($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $rel = ''
+        } else {
+            Write-Output $ask
+            exit 0
+        }
+        if (Test-ProtectedRelative $rel) {
+            Write-Output '{"decision":"deny","reason":"\u7981\u6b62\u76f4\u63a5\u4fee\u6539\u7ef4\u62a4\u4e8b\u4ef6\u65e5\u5fd7\u3001\u6d3b\u52a8\u72b6\u6001\u6216 SQLite \u6570\u636e\u5e93\uff1b\u8bf7\u4f7f\u7528 workflow-monitor.exe \u751f\u547d\u5468\u671f\u547d\u4ee4\u3002"}'
+            exit 0
+        }
+        Write-Output '{"decision":"allow"}'
+        exit 0
+    }
+
+    if ($name -eq 'run_command') {
+        $cmdLine = Get-Prop $toolArgs 'CommandLine'
+        if ($null -eq $cmdLine) { $cmdLine = Get-Prop $toolArgs 'command' }
+        $command = ([string]$cmdLine).Trim()
+        if ([string]::IsNullOrWhiteSpace($command)) {
+            Write-Output $ask
+            exit 0
+        }
+        $wfRe = '\bworkflow-monitor(?:\.exe)?\b'
+        $targetRe = '(?:maintenance[\\/]events\.jsonl|\.project_hooks[\\/]active-task(?:\.json)?|\.project_hooks[\\/]maintenance\.sqlite3(?:-wal|-shm)?|\.git[\\/]workflow-monitor[\\/]registry\.sqlite3(?:-wal|-shm)?)'
+        $opRe = '(?:\b(?:rm|rmdir|del|erase|remove-item|ri|clear-content|set-content|out-file|truncate|sqlite3)\b|>>?)'
+        $highRiskRe = '(?:\bgit\s+(?:push|merge)\b|\bgh\s+pr\s+merge\b|\btask\s+abandon\b|\bdb\s+rebuild\b)'
+        if ((-not ($command -match $wfRe)) -and ($command -match $targetRe) -and ($command -match $opRe)) {
+            Write-Output '{"decision":"deny","reason":"\u7981\u6b62\u901a\u8fc7\u7ec8\u7aef\u547d\u4ee4\u76f4\u63a5\u5220\u9664\u6d3b\u52a8\u72b6\u6001\u6216\u6539\u5199\u4e8b\u4ef6\u65e5\u5fd7/SQLite\uff1b\u8bf7\u4f7f\u7528 workflow-monitor.exe \u547d\u4ee4\u3002"}'
+            exit 0
+        }
+        if ($command -match $highRiskRe) {
+            Write-Output '{"decision":"force_ask","reason":"\u8be5\u547d\u4ee4\u6d89\u53ca\u5916\u90e8\u4ea4\u4ed8\u6216\u9ad8\u98ce\u9669\u7ef4\u62a4\u64cd\u4f5c\uff0c\u6309 Workflow Monitor \u89c4\u8303\u5fc5\u987b\u83b7\u5f97\u7528\u6237\u660e\u786e\u786e\u8ba4\u3002"}'
+            exit 0
+        }
+        Write-Output $ask
+        exit 0
+    }
+
+    Write-Output $ask
+    exit 0
+} catch {
+    Write-Output $ask
+    exit 0
+}
+"""
+
+PLUGIN_HOOKS_JSON = json.dumps(
+    {
+        "workflow-monitor-session": {
+            "SessionStart": [
+                {
+                    "type": "command",
+                    "command": _SESSION_START_HOOK_CMD,
+                    "timeout": 30,
+                }
+            ],
+        },
+        "workflow-monitor-guard": {
+            "PreToolUse": [
+                {
+                    "matcher": "write_file|edit_file",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": _PRE_TOOL_GUARD_PS1_CMD,
+                            "timeout": 10,
+                        }
+                    ],
+                },
+                {
+                    "matcher": "run_command",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": _PRE_TOOL_GUARD_PS1_CMD,
+                            "timeout": 10,
+                        }
+                    ],
+                },
+            ],
+        },
+    },
+    ensure_ascii=False,
+    indent=2,
+) + "\n"
+
+SKILL_LIFECYCLE = """---
+name: workflow-lifecycle
+description: >-
+  Use when starting, reporting, verifying, or finishing tasks in a Workflow
+  Monitor repository, or when opening the standalone desktop Dashboard.
+---
+
+# Workflow Monitor 任务生命周期
+
+## 日常执行顺序
+
+1. 新会话或上下文不清时先读取精简上下文：
+   `.\\workflow-monitor.exe context --view brief --format markdown`
+2. **只读咨询与审查**不运行 `start`，也不运行 `end`。
+3. **首次写入前**运行 `start`（主项目与链接工作区统一调用主目录入口）：
+   - 稳定维护（仅限 `main`）：`start --track stable --kind code --scope "..." --acceptance "..." --compact`
+   - 探索/实验/研究：`start --track experiment --topic <slug> --kind code --scope "..." --acceptance "..." --compact`
+   - 无法确定轨道时必须在对话中询问用户，不得静默选择。
+   - 探索启动返回 `worktree` 路径后，后续读写与 `--project <worktree>` 均在工作区内执行。
+4. 阶段完成、判断变化或代码批次后运行 `report`（可加 `--verify fast` 与 `--compact`）；复杂填报使用 `--input-json <文件或 ->`。
+5. 结束前检查门禁：`context --view verification --format markdown`，随后运行 `end --result completed --note "..." --current-step "..." --compact`（关联篇章需填 `--stage-review`）。
+6. 中断恢复运行 `task recover`；受阻使用 `end --result blocked ...`；仅在用户明确确认时才运行 `task abandon`、`git push` 或合并。
+
+## 查看独立桌面看板
+
+- 无参运行或双击项目根目录 `workflow-monitor.exe` 即可打开独立 WebView2 只读看板。
+- 需要从终端或对话协助打开时运行：`Start-Process .\\workflow-monitor.exe`（切勿直接无参同步阻塞执行 `workflow-monitor.exe` 获取上下文）。
+"""
+
+SKILL_CATALOG = """---
+name: research-catalog
+description: >-
+  Use when creating, moving, organizing, or reconciling research materials in
+  resources/ or placing code and outputs in program/.
+---
+
+# 科研资料与目录归属
+
+1. **资料操作前先查目录索引**：运行 `.\\workflow-monitor.exe catalog folder index` 确认现有目录用途；新增自定义目录先用 `catalog folder add` 登记。归属不明确时询问用户。
+2. **严格区分 `resources/` 与 `program/`**：
+   - `resources/sparks/`：低约束自由 Markdown 灵感，可选登记。
+   - `resources/plans/`：Sparks 形成的可执行下一步或研究方案。
+   - `resources/tutorials/`、`resources/translations/`：文献加工与学习材料。
+   - `program/`：新建程序、实验代码、Notebook、依赖及运行输出统一放在这里，**不要放入 `resources/`，也不要登记为资料**。
+3. **路径失效与移动**：移动已登记资料时保留原 catalog ID 并更新路径；路径失效先运行 `catalog reconcile` 检查内容哈希匹配，唯一匹配再加 `--apply` 修复。
+"""
+
+SKILL_WORKTREE = """---
+name: multi-worktree-review
+description: >-
+  Use when resuming linked worktrees, checking parallel task status or research
+  conflicts, or submitting change-based scientific reviews.
+---
+
+# 多工作树并行与科研审阅
+
+1. **续办与汇总**：
+   - 查看所有工作区与任务：`status --all` 或 `context --all`。
+   - 同一工作流续办任务：`start --workflow <workflow_id> ...`。
+   - 暂停/恢复任务：`task pause` / `task resume`。
+2. **分歧与冲突**：运行 `conflict list` 与 `conflict show <id>` 核对版本证据；研究判断取舍与正式合并必须由用户确认。
+3. **按变化审阅**：
+   - 查看待办：`review list`（或 `review list --all` / `--kind stage|attempt|resource`）。
+   - 查看精简变化与短令牌：`review show <object>`（需要完整来源时加 `--full`）。
+   - 审阅结果随 `report` 或 `end` 的 `--reviews` 一次性提交，无变化不改写科学结论。
+"""
+
+
 def template_files() -> dict[str, str]:
     template_root = Path(__file__).resolve().parents[3]
     roadmap_source = template_root / "maintenance" / "PHYSICS_RESEARCH_ROADMAP.md"
@@ -321,6 +604,12 @@ def template_files() -> dict[str, str]:
         "maintenance/PHYSICS_RESEARCH_ROADMAP.md": physics_roadmap,
         "maintenance/RESEARCH_UNDERSTANDING_GUIDE.md": understanding_guide,
         "maintenance/OPERATIONS.md": MAINTENANCE_OPERATIONS,
+        ".agents/plugins/workflow-monitor/plugin.json": PLUGIN_JSON,
+        ".agents/plugins/workflow-monitor/hooks.json": PLUGIN_HOOKS_JSON,
+        ".agents/plugins/workflow-monitor/hooks/pre-tool-guard.ps1": PLUGIN_PRE_TOOL_GUARD_PS1,
+        ".agents/plugins/workflow-monitor/skills/workflow-lifecycle/SKILL.md": SKILL_LIFECYCLE,
+        ".agents/plugins/workflow-monitor/skills/research-catalog/SKILL.md": SKILL_CATALOG,
+        ".agents/plugins/workflow-monitor/skills/multi-worktree-review/SKILL.md": SKILL_WORKTREE,
     }
     files.update({f"{item.relative_path}/.gitkeep": "\n" for item in RESOURCE_DIRECTORIES if item.required})
     files[f"{PROGRAM_DIRECTORY}/.gitkeep"] = "\n"
@@ -394,7 +683,7 @@ def initialize_project(root: Path, application_version: str, *, unified=True) ->
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     require_git_repository(root)
-    if (root / CONFIG_PATH).exists():
+    if has_project_config(root):
         raise ProjectManagerError("项目已经初始化；请使用 .\\workflow-monitor.exe update")
     for relative, content in template_files().items():
         path = root / relative
@@ -462,7 +751,7 @@ def preflight_update(root: Path) -> None:
     active = [item for item in registry.tasks() if item["status"] in OCCUPIED] if registry else []
     if active:
         raise ProjectManagerError("项目工作树仍有未结束任务: " + ", ".join(item["task_id"] + " @ " + item["path"] for item in active))
-    installation = root / INSTALLATION_PATH
+    installation = resolve_installation_path(root)
     if not installation.is_file():
         raise ProjectManagerError("缺少安装清单；请先使用当前 EXE执行 .\\workflow-monitor.exe install 进行接管")
     branch = git(root, "branch", "--show-current").stdout.strip()
@@ -507,7 +796,7 @@ def _restore(folder: Path, existed: dict[Path, bool], root: Path) -> None:
 
 
 def migrate_config(root: Path) -> None:
-    path = root / CONFIG_PATH
+    path = resolve_config_path(root)
     current = json.loads(path.read_text(encoding="utf-8"))
     defaults = default_config()
     current["version"] = defaults["version"]
@@ -532,13 +821,13 @@ def migrate_config(root: Path) -> None:
 
 
 def validate_project(root: Path) -> None:
-    config = json.loads((root / CONFIG_PATH).read_text(encoding="utf-8"))
+    config = read_project_config(root)
     required = default_config()
     for key in required:
         if key not in config:
             raise ProjectManagerError(f"升级后配置缺少字段: {key}")
     for relative in (
-        INSTALLATION_PATH,
+        resolve_installation_relative(root),
         Path(".githooks/pre-commit"),
         Path("maintenance/README.md"),
         Path("maintenance/CORE.md"),
@@ -547,6 +836,8 @@ def validate_project(root: Path) -> None:
         Path("maintenance/RESEARCH_UNDERSTANDING_GUIDE.md"),
         Path("maintenance/OPERATIONS.md"),
         Path("maintenance/events.jsonl"),
+        Path(".agents/plugins/workflow-monitor/plugin.json"),
+        Path(".agents/plugins/workflow-monitor/hooks.json"),
     ):
         if not (root / relative).is_file():
             raise ProjectManagerError(f"升级后缺少文件: {relative.as_posix()}")
@@ -638,12 +929,13 @@ def apply_project_update(
             raise ProjectManagerError("迁移 EXE 与本地验签摘要不匹配")
         if cache_build_id and build_identity().get("build_id") != cache_build_id:
             raise ProjectManagerError("实际运行构建与目标缓存构建不一致")
-    install_path = root / INSTALLATION_PATH
+    install_path = resolve_installation_path(root)
+    config_path = resolve_config_path(root)
     installation = json.loads(install_path.read_text(encoding="utf-8"))
     old_version = installation.get("application_version", installation.get("core_version"))
     old_records = installation.get("managed_files", {})
     database = root / ".project_hooks/maintenance.sqlite3"
-    paths = [root / CONFIG_PATH, install_path, root / "maintenance/events.jsonl",
+    paths = [config_path, install_path, root / "maintenance/events.jsonl",
              legacy_runtime_root(root) / "current.json",
              database, Path(str(database) + "-wal"), Path(str(database) + "-shm")]
     paths.extend(root / item for item in template_files())
@@ -653,7 +945,7 @@ def apply_project_update(
     conflicts: list[str] = []
     try:
         migrate_config(root)
-        changed.append(CONFIG_PATH.as_posix())
+        changed.append(resolve_config_relative(root).as_posix())
         candidates = root / ".project_hooks/update-conflicts" / target_version
         for relative, content in template_files().items():
             path = root / relative
@@ -698,7 +990,7 @@ def apply_project_update(
         write_json(install_path, installation)
         ensure_resource_directories(root)
         journal = root / "maintenance/events.jsonl"
-        timezone = json.loads((root / CONFIG_PATH).read_text(encoding="utf-8")).get("timezone", "Asia/Shanghai")
+        timezone = read_project_config(root).get("timezone", "Asia/Shanghai")
         existing_events = load_events(journal)
         profile_migration = profile_authority_migration(existing_events, timezone)
         if profile_migration:

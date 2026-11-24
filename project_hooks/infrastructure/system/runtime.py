@@ -32,11 +32,14 @@ def configure_utf8_stdio() -> None:
 
 def runtime_root(project_root: Path) -> Path:
     from ..git.worktrees import repository_context
-    from ..persistence.project_registry import registry_for
+    from ..persistence.project_registry import RegistryError, registry_for
     if (project_root / ".git").exists():
-        registry = registry_for(project_root)
-        if registry and registry.setting("unified"):
-            return repository_context(project_root).shared_dir / "runtime"
+        try:
+            registry = registry_for(project_root)
+            if registry and registry.setting("unified"):
+                return repository_context(project_root).shared_dir / "runtime"
+        except (RegistryError, OSError, RuntimeError):
+            pass
     return legacy_runtime_root(project_root)
 
 

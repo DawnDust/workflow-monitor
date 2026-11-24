@@ -11,7 +11,7 @@ from .resource_layout import (
     simulation_bundle_metadata, bundle_contains,
 )
 
-SEARCH_IGNORES = IGNORED_DIRECTORY_NAMES | {".codex", ".githooks", "diagnostics-export", "dist", "build"}
+SEARCH_IGNORES = IGNORED_DIRECTORY_NAMES | {".codex", ".workflow-monitor", ".agents", ".githooks", "diagnostics-export", "dist", "build"}
 
 
 def file_sha256(path: Path) -> str:

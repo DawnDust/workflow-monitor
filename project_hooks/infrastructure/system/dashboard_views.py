@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from ..config_paths import resolve_config_path
 from ..git import client as git
 from ..git.worktrees import repository_context
 from .workflow_views import project_snapshot
@@ -28,7 +29,7 @@ class DashboardViews:
         self.overview = None
 
     def revision(self):
-        paths = [self.model.journal_path, self.root / ".codex/project-maintenance-workflow.json"]
+        paths = [self.model.journal_path, resolve_config_path(self.root)]
         marker = self.root / ".git"
         if marker.exists():
             git_context = repository_context(self.root)

@@ -15,10 +15,11 @@ from project_hooks.ui.windows.launcher import (
     is_frozen,
     run_selected_executable,
 )
+from project_hooks.infrastructure.config_paths import PRIMARY_CONFIG_PATH, has_project_config
 from project_hooks.infrastructure.git import client as git_client
 
 
-CONFIG_PATH = Path(".codex/project-maintenance-workflow.json")
+CONFIG_PATH = PRIMARY_CONFIG_PATH
 
 
 def _hide_loader_window(handle: int, find_window=None, show_window=None) -> None:
@@ -50,6 +51,8 @@ class PortableBootstrapError(RuntimeError):
 
 
 BOOTSTRAP_PATHS = (
+    Path(".workflow-monitor"),
+    Path(".agents"),
     Path(".codex"),
     Path(".githooks"),
     Path(".project_hooks"),
@@ -108,7 +111,7 @@ def prepare_portable_project(root: Path, executable: Path | None = None) -> bool
     root = root.resolve()
     executable = (executable or Path(sys.executable)).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    if (root / CONFIG_PATH).is_file():
+    if has_project_config(root):
         return False
     if executable.name.lower() != EXECUTABLE_NAME:
         raise PortableBootstrapError(
@@ -188,7 +191,7 @@ def _open_dashboard(project: Path, refresh_seconds: float) -> int:
 
 def run_portable_dashboard(root: Path | None = None, refresh_seconds: float = 3.0) -> int:
     project = (root or portable_root()).resolve()
-    if (project / CONFIG_PATH).is_file():
+    if has_project_config(project):
         return _open_dashboard(project, refresh_seconds)
 
     import tkinter as tk
