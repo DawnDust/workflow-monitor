@@ -8,7 +8,7 @@ from .read_model import decode_item, rows
 from .store import SCHEMA, apply_event
 
 
-def search_records(model, events):
+def search_records(model, events, *, integration_statuses=None, integration_reader=None):
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
     try:
@@ -19,7 +19,7 @@ def search_records(model, events):
             stage = event["payload"].get("stage_id")
             if event["event_type"].startswith("stage.") and stage:
                 stages[stage] = event
-        records = model._search_index(connection)
+        records = model._search_index(connection, integration_statuses=integration_statuses, integration_reader=integration_reader)
         catalog = {item["item_id"]: decode_item(item) for item in rows(connection, "SELECT * FROM catalog_items")}
         archives = {row["event_id"]: row for row in rows(connection, "SELECT * FROM task_archive")}
         explorations = {row["event_id"]: row for row in model._exploration_rows(connection)}

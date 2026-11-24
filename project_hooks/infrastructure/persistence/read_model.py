@@ -876,9 +876,14 @@ class MaintenanceReadModel:
         finally:
             connection.close()
 
-    def _exploration_integration_status(self, branch: str, event_id: str) -> str:
+    def _exploration_integration_status(self, branch: str, event_id: str, *, reader=None) -> str:
         source_ref = None
         for candidate in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"):
+            if reader is not None:
+                if candidate in reader.refs:
+                    source_ref = candidate
+                    break
+                continue
             result = git_client.run(
                 self.repo_path, ["show-ref", "--verify", "--quiet", candidate], check=False,
             )
@@ -890,15 +895,20 @@ class MaintenanceReadModel:
 
         statuses = []
         for base_ref in ("refs/heads/main", "refs/remotes/origin/main"):
-            available = git_client.run(
-                self.repo_path, ["show-ref", "--verify", "--quiet", base_ref], check=False,
-            )
-            if available.returncode != 0:
-                continue
+            if reader is not None:
+                if base_ref not in reader.refs:
+                    continue
+            else:
+                available = git_client.run(
+                    self.repo_path, ["show-ref", "--verify", "--quiet", base_ref], check=False,
+                )
+                if available.returncode != 0:
+                    continue
             try:
                 journal_relative = self.journal_path.resolve().relative_to(self.repo_path.resolve()).as_posix()
-                evidence = git_client.integration_evidence(
-                    self.repo_path, base_ref, source_ref,
+                resolve = reader.evidence if reader else lambda base, source, **kwargs: git_client.integration_evidence(self.repo_path, base, source, **kwargs)
+                evidence = resolve(
+                    base_ref, source_ref,
                     required_path=journal_relative, required_text=event_id,
                 )
             except (OSError, subprocess.SubprocessError):
@@ -910,9 +920,9 @@ class MaintenanceReadModel:
             return "pending_merge"
         return "merge_unknown"
 
-    def _search_index(self, connection: sqlite3.Connection) -> list[dict]:
+    def _search_index(self, connection: sqlite3.Connection, *, integration_statuses=None, integration_reader=None) -> list[dict]:
         result: list[dict] = []
-        integration_statuses: dict[str, str] = {}
+        integration_statuses = {} if integration_statuses is None else integration_statuses
         integrated_archive_event_ids: set[str] = set()
         for row in connection.execute(
             "SELECT event_id, payload_json FROM events WHERE event_type='attempt.archived'",
@@ -968,9 +978,17 @@ class MaintenanceReadModel:
                 or str(item.get("disposition_ref") or "").startswith("archive/")
             )
             branch = str(item.get("branch") or "")
-            if branch not in integration_statuses:
-                integration_statuses[branch] = self._exploration_integration_status(branch, item["event_id"])
-            integration_status = integration_statuses[branch]
+            integration_status = "not_applicable"
+            if item["result"] == "validated":
+                key = (branch, item["event_id"])
+                if item["event_id"] in integrated_archive_event_ids:
+                    integration_status = "merged"
+                elif key in integration_statuses:
+                    integration_status = integration_statuses[key]
+                else:
+                    integration_status = self._exploration_integration_status(branch, item["event_id"], reader=integration_reader)
+                    if integration_status in {"merged", "pending_merge"}:
+                        integration_statuses[key] = integration_status
             if item["result"] == "abandoned":
                 disposition_status = "已遗弃"
             elif archived:

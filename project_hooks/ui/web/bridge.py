@@ -93,6 +93,7 @@ class WebDashboardBridge:
         self._last_token: str | None = None
         self._changed_sections: list[str] = []
         self._view_lock = threading.Lock()
+        self._view_locks: dict[str, threading.Lock] = {}
         self._views: dict[str, tuple] = {}
 
     @property
@@ -194,6 +195,8 @@ class WebDashboardBridge:
         if not isinstance(view, str) or view not in DASHBOARD_VIEWS:
             return self._error("unknown Dashboard view", code="invalid_parameters")
         with self._view_lock:
+            view_lock = self._view_locks.setdefault(view, threading.Lock())
+        with view_lock:
             previous, previous_token, previous_time = self._views.get(view, ({}, None, None))
             try:
                 loaded = self.provider.load_view(view, force=force)

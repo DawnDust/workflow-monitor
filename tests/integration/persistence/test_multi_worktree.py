@@ -22,9 +22,69 @@ from project_hooks.infrastructure.system.worktree_migration import plan_migratio
 from project_hooks.infrastructure.system.workflow_views import checkout_model, workflow_snapshot
 from project_hooks.infrastructure.system.project_search import ProjectSearch
 from project_hooks.infrastructure.system.verification import verification_fingerprint
+from project_hooks.infrastructure.persistence.search_projection import search_records
 
 
 class MultiWorktreeTests(unittest.TestCase):
+    def test_search_skips_integration_for_unvalidated_explorations(self):
+        model = checkout_model(self.root, "main")
+        events = [new_event("exploration.recorded", branch="experiment/" + result, task_id=None,
+            payload={"branch": "experiment/" + result, "goal": result, "result": result,
+                     "evidence": "saved", "disposition_ref": ""}, timezone="UTC")
+            for result in ["active", "negative", "inconclusive", "paused"]]
+        with patch.object(model, "_exploration_integration_status", side_effect=AssertionError("unneeded Git proof")):
+            records = search_records(model, events)
+        self.assertEqual(len(records), 4)
+        self.assertTrue(all(item["merge_status_code"] == "not_applicable" for item in records))
+
+    def test_integration_reader_reuses_objects_but_checks_each_event(self):
+        from project_hooks.infrastructure.git import client
+        head = git(self.root, ["rev-parse", "HEAD"]).stdout.strip()
+        reader = client.IntegrationEvidenceReader(self.root, {"refs/heads/main": head, "refs/heads/source": head})
+        event_id = load_events(self.root / "maintenance/events.jsonl")[0]["event_id"]
+        with patch.object(client, "run", wraps=client.run) as calls:
+            result = reader.evidence("refs/heads/main", "refs/heads/source",
+                required_path="maintenance/events.jsonl", required_text=event_id)
+            self.assertEqual(result["state"], "merged")
+            count = calls.call_count
+            self.assertEqual(reader.evidence("refs/heads/main", "refs/heads/source",
+                required_path="maintenance/events.jsonl", required_text=event_id), result)
+            missing = reader.evidence("refs/heads/main", "refs/heads/source",
+                required_path="maintenance/events.jsonl", required_text="missing-event")
+            self.assertEqual(missing["reason"], "source_record_missing")
+            self.assertEqual(calls.call_count, count)
+
+    def test_search_warning_cache_retries_without_rebuilding_each_refresh(self):
+        search = ProjectSearch(self.root, checkout_model(self.root, "main"))
+        events = load_events(self.root / "maintenance/events.jsonl")
+        with patch.object(search, "events", side_effect=[OSError("temporarily unavailable"), events]) as reads:
+            with patch("project_hooks.infrastructure.system.project_search.time.monotonic", return_value=100):
+                first = search.load()
+            self.assertTrue(first["search_warnings"])
+            with patch("project_hooks.infrastructure.system.project_search.time.monotonic", return_value=105):
+                self.assertIs(search.load(), first)
+            self.assertEqual(reads.call_count, 1)
+            with patch("project_hooks.infrastructure.system.project_search.time.monotonic", return_value=111):
+                recovered = search.load()
+            self.assertFalse(recovered["search_warnings"])
+            self.assertEqual(reads.call_count, 2)
+
+    def test_search_cache_invalidates_on_journal_and_ref_changes(self):
+        search = ProjectSearch(self.root, checkout_model(self.root, "main"))
+        first = search.load()
+        self.assertIs(search.load(), first)
+        append_events(self.root / "maintenance/events.jsonl", self.root / ".project_hooks", [
+            new_event("catalog.item_upserted", branch="main", task_id=None,
+                payload={"item_id": "cache-resource", "kind": "theory", "title": "New resource",
+                         "path": "resources/theory/cache.md"}, timezone="UTC")])
+        changed = search.load()
+        self.assertTrue(any(row["record_id"] == "cache-resource" for row in changed["search_index"]))
+        reader = search.integration_reader
+        git(self.root, ["branch", "new-ref"])
+        self.assertIsNot(search.load(), changed)
+        self.assertIsNot(search.integration_reader, reader)
+        self.assertIn("refs/heads/new-ref", search.integration_reader.refs)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="workflow parallel ")
         self.addCleanup(self.temp.cleanup)

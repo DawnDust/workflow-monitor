@@ -54,7 +54,7 @@ class DashboardViews:
                 self.overview_revision = self.revision()
             return dict(self.overview)
         if view == "workflow":
-            return {"branch": self.model.branch_provider()}
+            return {"branch": self.overview_branch()}
         if view == "workspaces":
             return {"project_monitor": self.workspaces()}
         if view == "search":

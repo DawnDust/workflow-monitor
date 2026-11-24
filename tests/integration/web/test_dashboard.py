@@ -244,6 +244,37 @@ class WebProjectionTests(unittest.TestCase):
         self.assertNotIn("explorations", projected["research"])
 
 class WebDashboardBridgeTests(unittest.TestCase):
+    def test_slow_search_does_not_block_another_page(self):
+        entered, release, workflow_done = threading.Event(), threading.Event(), threading.Event()
+        provider = FakeProvider(self.root)
+        def load(view, *, force=False):
+            if view == "search":
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("test did not release search")
+            return {"branch": view}
+        provider.load_view = load
+        bridge = WebDashboardBridge(provider)
+        responses = {}
+        def workflow():
+            responses["workflow"] = bridge.refresh_view("workflow")
+            workflow_done.set()
+        search = threading.Thread(target=lambda: responses.update(search=bridge.refresh_view("search")))
+        fast = threading.Thread(target=workflow)
+        search.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            fast.start()
+            self.assertTrue(workflow_done.wait(2), "workflow waited for the unrelated search request")
+            self.assertNotIn("search", responses)
+        finally:
+            release.set()
+            search.join(5)
+            if fast.ident is not None:
+                fast.join(5)
+        self.assertTrue(responses["workflow"]["ok"])
+        self.assertTrue(responses["search"]["ok"])
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -388,6 +419,43 @@ class WebDashboardBridgeTests(unittest.TestCase):
 
 
 class WebDashboardIntegrationTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is a development-only optional test runtime")
+    def test_page_switch_starts_independent_requests_and_ignores_stale_response(self):
+        path = str(asset_root() / "app.js")
+        script = "const sourcePath=" + json.dumps(path) + ";\n" + r"""
+          const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+          let source=fs.readFileSync(sourcePath,'utf8').replace(/^import .*;\s*$/gm,'').replace(/initialize\(\);\s*$/,'');
+          const pending=new Map(),calls=[],renders=[],button={disabled:false,focus(){throw Error('stale focus');}};
+          const context={console,assert,Map,Set,URLSearchParams,setTimeout,clearTimeout,
+            matchMedia:()=>({matches:false}),loadLanguage:()=> 'zh',createWorkspacePage:()=>({}),
+            document:{querySelector:()=>button,activeElement:{id:'other'},body:{}},
+            window:{pywebview:{api:{refresh_view(view){calls.push(view);return new Promise(resolve=>pending.set(view,resolve));}}}},
+            pending,calls,renders,button};
+          const checks=String.raw`
+            (async()=>{
+              connected=true;render=()=>renders.push(state.page);
+              state.page='search';const searchRequest=refresh();
+              state.page='workflow';const workflowRequest=refresh();
+              assert.equal(calls.join(','),'search,workflow');
+              pending.get('workflow')({ok:true,data:{snapshot:{branch:'main'},state_token:'workflow-token',changed_sections:['branch']}});
+              await workflowRequest;
+              assert.equal(button.disabled,false);
+              assert.equal(state.snapshotToken,'workflow-token');
+              pending.get('search')({ok:true,data:{snapshot:{branch:'old-search'},state_token:'search-token',changed_sections:['branch']}});
+              await searchRequest;
+              assert.equal(state.snapshotToken,'workflow-token');
+              assert.equal(renders.join(','),'workflow');
+              assert.equal(snapshots.get('search').snapshot.branch,'old-search');
+              state.page='search';const one=refresh();const two=refresh();
+              assert.equal(calls.filter(x=>x==='search').length,2);
+              pending.get('search')({ok:true,data:{snapshot:{branch:'new-search'},state_token:'new-token',changed_sections:['branch']}});
+              await Promise.all([one,two]);
+              assert.equal(requests.size,0);
+            })();`;
+          (async()=>{await vm.runInNewContext(source+'\n'+checks,context);})().catch(error=>{console.error(error);process.exitCode=1;});
+        """
+        subprocess.run(["node", "-e", script], check=True)
+
     def test_loader_hide_uses_immediate_native_visibility_call(self) -> None:
         calls = []
         _hide_loader_window(

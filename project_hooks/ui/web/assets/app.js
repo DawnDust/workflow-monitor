@@ -18,7 +18,7 @@ const workspaces = createWorkspacePage({
 });
 const snapshots = new Map();
 const viewErrors = new Map();
-let currentRequest = null;
+const requests = new Map();
 let connected = false;
 const viewName = () => state.page === "settings" && state.settingsSection !== "advanced" ? "overview" : state.page;
 const pageLabel = page => state.language === "en" ? page[3] : page[2];
@@ -47,6 +47,7 @@ function renderNavigation() {
   settings.classList.toggle("active",state.page==="settings");
   settings.setAttribute("aria-current",state.page==="settings"?"page":"false");
   $("#settings-label").textContent=l("设置","Settings");
+  $("#refresh-button").disabled=requests.has(viewName());
 }
 function applyChromeLanguage(){document.documentElement.lang=state.language;$("#navigation").setAttribute("aria-label",l("主导航","Main navigation"));$("#crumb").textContent=l("本地科研工作区","LOCAL RESEARCH WORKSPACE");$("#theme-toggle").title=l("切换主题","Toggle theme");$("#theme-toggle").setAttribute("aria-label",l("切换主题","Toggle theme"));$("#refresh-button").textContent=l("↻ 刷新快照","↻ Refresh snapshot");$("#drawer-close").setAttribute("aria-label",l("关闭","Close"));}
 function statusStrip(s){
@@ -181,7 +182,7 @@ function render(){
     const error=viewErrors.get(scope);
     $("#content").innerHTML='<div class="loading-card">'+(error?esc(error):'<span></span>'+
       l("正在准备本地只读快照…","Preparing the local read-only snapshot…"))+'</div>';
-    if(connected&&!currentRequest&&!error)void refresh();
+    if(connected&&!requests.has(scope)&&!error)void refresh();
     return;
   }
   statusStrip(s);
@@ -246,9 +247,9 @@ function bindDynamic(s){
   $("#export-diagnostics")?.addEventListener("click",async()=>{const r=await invoke("export_diagnostics",null);notice(r.ok?l(`诊断包已保存：${r.data.output}`,`Diagnostics bundle saved: ${r.data.output}`):r.error.message,r.ok?"info":"error")});$("#report-bug")?.addEventListener("click",async()=>{const r=await invoke("report_bug");notice(r.ok&&r.data.opened?l("已打开 Bug 报告页面","Opened the bug report page"):l("无法打开 Bug 报告页面","Could not open the bug report page"),r.ok?"info":"error")});$("#check-updates")?.addEventListener("click",async()=>openDrawer(l("更新检查","Update check"),await invoke("check_updates")));$("#software-refresh")?.addEventListener("click",async()=>openDrawer(l("软件交付状态","Software delivery status"),await invoke("refresh_software_delivery",{})));$("#event-prev")?.addEventListener("click",()=>{state.eventPage--;const n=document.querySelector('[data-lazy="events"]');n.querySelector(".lazy-body").dataset.loaded="";fillDisclosure(n,s)});$("#event-next")?.addEventListener("click",()=>{state.eventPage++;const n=document.querySelector('[data-lazy="events"]');n.querySelector(".lazy-body").dataset.loaded="";fillDisclosure(n,s)});
 }
 async function refresh(force=false) {
-  if(currentRequest||!connected)return;
+  if(!connected||requests.has(viewName()))return;
   const view=viewName(), previous=snapshots.get(view), button=$("#refresh-button");
-  currentRequest=view;
+  requests.set(view,true);
   const returnFocus=document.activeElement===button;
   button.disabled=true;
   try {
@@ -285,9 +286,9 @@ async function refresh(force=false) {
       if(!previous)render();
     }
   } finally {
-    currentRequest=null;
-    button.disabled=false;
-    if(returnFocus&&document.activeElement===document.body)button.focus({preventScroll:true});
+    requests.delete(view);
+    button.disabled=requests.has(viewName());
+    if(returnFocus&&view===viewName()&&document.activeElement===document.body)button.focus({preventScroll:true});
     const next=viewName();
     if(next!==view&&!snapshots.has(next)&&!viewErrors.has(next))void refresh();
   }
