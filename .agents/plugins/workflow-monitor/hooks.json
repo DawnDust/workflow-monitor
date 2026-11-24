@@ -1,20 +1,21 @@
 {
-  "workflow-monitor-guard": {
-    "enabled": false,
+  "workflow-monitor-session": {
     "SessionStart": [
       {
         "type": "command",
         "command": "if exist ..\\..\\..\\workflow-monitor.exe (..\\..\\..\\workflow-monitor.exe agent-hook) else if exist ..\\..\\..\\..\\..\\workflow-monitor.exe (..\\..\\..\\..\\..\\workflow-monitor.exe agent-hook) else (echo {})",
-        "timeout": 15
+        "timeout": 30
       }
-    ],
+    ]
+  },
+  "workflow-monitor-guard": {
     "PreToolUse": [
       {
         "matcher": "write_file|edit_file",
         "hooks": [
           {
             "type": "command",
-            "command": "if exist ..\\..\\..\\workflow-monitor.exe (..\\..\\..\\workflow-monitor.exe agent-hook) else if exist ..\\..\\..\\..\\..\\workflow-monitor.exe (..\\..\\..\\..\\..\\workflow-monitor.exe agent-hook) else (echo {})",
+            "command": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File hooks\\pre-tool-guard.ps1",
             "timeout": 10
           }
         ]
@@ -24,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if exist ..\\..\\..\\workflow-monitor.exe (..\\..\\..\\workflow-monitor.exe agent-hook) else if exist ..\\..\\..\\..\\..\\workflow-monitor.exe (..\\..\\..\\..\\..\\workflow-monitor.exe agent-hook) else (echo {})",
+            "command": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File hooks\\pre-tool-guard.ps1",
             "timeout": 10
           }
         ]

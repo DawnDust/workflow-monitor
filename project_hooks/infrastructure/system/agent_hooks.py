@@ -60,44 +60,57 @@ def _resolve_target_path(raw_path: str, payload: dict, project_root: Path) -> Pa
     return (base / candidate).resolve()
 
 
-def _handle_pre_tool_use(payload: dict, project_root: Path) -> dict:
+def _is_protected_relative(relative: str) -> bool:
+    normalized = relative.replace("\\", "/").strip().lower()
+    candidates = [normalized]
+    if normalized.startswith(".worktrees/"):
+        parts = normalized.split("/", 2)
+        if len(parts) == 3 and parts[2]:
+            candidates.append(parts[2])
+    return any(
+        cand == "maintenance/events.jsonl"
+        or cand.startswith(".git/workflow-monitor/")
+        or (
+            cand.startswith(".project_hooks/")
+            and (".sqlite3" in cand or cand.startswith(".project_hooks/active-task"))
+        )
+        for cand in candidates
+    )
+
+
+def _handle_pre_tool_use(payload: dict, project_root: Path | None) -> dict:
+    ask = {"decision": "ask"}
+    if project_root is None:
+        return ask
     tool_call = payload.get("toolCall")
     if not isinstance(tool_call, dict):
-        return {}
+        return ask
     name = str(tool_call.get("name") or "")
     args = tool_call.get("args")
     if not isinstance(args, dict):
-        return {}
+        return ask
     if name in {"write_file", "edit_file"}:
         raw_path = args.get("Path") or args.get("path")
         if not isinstance(raw_path, str) or not raw_path.strip():
-            return {}
+            return ask
         try:
             target = _resolve_target_path(raw_path, payload, project_root)
             resolved_root = project_root.resolve()
         except OSError:
-            return {}
+            return ask
         if target is None or not target.is_relative_to(resolved_root):
-            return {}
+            return ask
         relative = target.relative_to(resolved_root).as_posix().lower()
-        is_protected = (
-            relative == "maintenance/events.jsonl"
-            or relative.startswith(".git/workflow-monitor/")
-            or (
-                relative.startswith(".project_hooks/")
-                and (".sqlite3" in relative or relative.startswith(".project_hooks/active-task"))
-            )
-        )
-        if is_protected:
+        if _is_protected_relative(relative):
             return {
                 "decision": "deny",
                 "reason": "禁止直接修改维护事件日志、活动状态或 SQLite 数据库；请使用 workflow-monitor.exe 生命周期命令。",
             }
-        return {}
+        return {"decision": "allow"}
     if name == "run_command":
         command = str(args.get("CommandLine") or args.get("command") or "").strip()
         if not command:
-            return {}
+            return ask
         if (
             not _WORKFLOW_MONITOR_RE.search(command)
             and _DESTRUCTIVE_TARGET_RE.search(command)
@@ -112,7 +125,7 @@ def _handle_pre_tool_use(payload: dict, project_root: Path) -> dict:
                 "decision": "force_ask",
                 "reason": "该命令涉及外部交付或高风险维护操作，按 Workflow Monitor 规范必须获得用户明确确认。",
             }
-    return {}
+    return ask
 
 
 def handle_hook_payload(
@@ -124,10 +137,15 @@ def handle_hook_payload(
     """Process one Antigravity hook event payload and return the JSON response."""
     if not isinstance(payload, dict):
         return {}
+    event_name = str(payload.get("hookEventName") or "")
     project_root = find_hook_project(payload, project_finder=project_finder)
+    if event_name == "PreToolUse":
+        try:
+            return _handle_pre_tool_use(payload, project_root)
+        except Exception:
+            return {"decision": "ask"}
     if project_root is None:
         return {}
-    event_name = str(payload.get("hookEventName") or "")
     if event_name == "SessionStart":
         try:
             brief = context_loader(project_root).strip()
@@ -136,8 +154,6 @@ def handle_hook_payload(
         if not brief:
             return {}
         return {"injectSteps": [{"systemMessage": {"systemMessage": brief}}]}
-    if event_name == "PreToolUse":
-        return _handle_pre_tool_use(payload, project_root)
     return {}
 
 

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +12,7 @@ from unittest.mock import patch
 
 from project_hooks.infrastructure.persistence.project_registry import ProjectRegistry
 from project_hooks.infrastructure.system.agent_hooks import handle_hook_payload, handle_stdin
+from project_hooks.infrastructure.system.project_manager import PLUGIN_PRE_TOOL_GUARD_PS1
 
 
 class AgentHooksTests(unittest.TestCase):
@@ -53,6 +56,8 @@ class AgentHooksTests(unittest.TestCase):
             ".project_hooks/maintenance.sqlite3",
             ".project_hooks/active-task.json",
             ".git/workflow-monitor/registry.sqlite3",
+            ".worktrees/exp/maintenance/events.jsonl",
+            ".worktrees/exp/.project_hooks/active-task.json",
         ):
             decision = handle_hook_payload(
                 {
@@ -65,20 +70,27 @@ class AgentHooksTests(unittest.TestCase):
             )
             self.assertEqual(decision["decision"], "deny", protected)
 
-        for allowed in (
-            str(self.root / "program/run.py"),
-            str(Path(self.temp.name) / "artifacts/plan.md"),
-        ):
-            decision = handle_hook_payload(
-                {
-                    "hookEventName": "PreToolUse",
-                    "cwd": str(self.root),
-                    "toolCall": {"name": "edit_file", "args": {"Path": allowed}},
-                },
-                project_finder=lambda _path: self.root,
-                context_loader=lambda _path: "",
-            )
-            self.assertEqual(decision, {}, allowed)
+        inside_safe = handle_hook_payload(
+            {
+                "hookEventName": "PreToolUse",
+                "cwd": str(self.root),
+                "toolCall": {"name": "edit_file", "args": {"Path": str(self.root / "program/run.py")}},
+            },
+            project_finder=lambda _path: self.root,
+            context_loader=lambda _path: "",
+        )
+        self.assertEqual(inside_safe, {"decision": "allow"})
+
+        outside = handle_hook_payload(
+            {
+                "hookEventName": "PreToolUse",
+                "cwd": str(self.root),
+                "toolCall": {"name": "edit_file", "args": {"Path": str(Path(self.temp.name) / "artifacts/plan.md")}},
+            },
+            project_finder=lambda _path: self.root,
+            context_loader=lambda _path: "",
+        )
+        self.assertEqual(outside, {"decision": "ask"})
 
     def test_pre_tool_use_guards_commands_without_over_allowing(self) -> None:
         deny_cmd = handle_hook_payload(
@@ -125,7 +137,115 @@ class AgentHooksTests(unittest.TestCase):
             project_finder=lambda _path: self.root,
             context_loader=lambda _path: "",
         )
-        self.assertEqual(normal, {})
+        self.assertEqual(normal, {"decision": "ask"})
+
+    def test_pre_tool_use_outside_project_and_malformed_return_ask(self) -> None:
+        outside = handle_hook_payload(
+            {
+                "hookEventName": "PreToolUse",
+                "cwd": str(self.root / "elsewhere"),
+                "toolCall": {"name": "write_file", "args": {"Path": str(self.root / "maintenance/events.jsonl")}},
+            },
+            project_finder=lambda _path: None,
+            context_loader=lambda _path: "",
+        )
+        self.assertEqual(outside, {"decision": "ask"})
+
+        malformed = handle_hook_payload(
+            {"hookEventName": "PreToolUse", "cwd": str(self.root)},
+            project_finder=lambda _path: self.root,
+            context_loader=lambda _path: "",
+        )
+        self.assertEqual(malformed, {"decision": "ask"})
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell guard script test requires Windows")
+    def test_powershell_pre_tool_guard_script_matches_contract(self) -> None:
+        self.assertTrue(PLUGIN_PRE_TOOL_GUARD_PS1.isascii())
+        config_dir = self.root / ".workflow-monitor"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "workflow.json").write_text('{"version": 3}\n', encoding="utf-8")
+        ps1 = self.root / "pre-tool-guard.ps1"
+        ps1.write_text(PLUGIN_PRE_TOOL_GUARD_PS1, encoding="ascii")
+
+        def run_ps1(raw_input: str) -> dict:
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ps1),
+                ],
+                input=raw_input,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            return json.loads(completed.stdout.strip())
+
+        protected_file = run_ps1(json.dumps({
+            "hookEventName": "PreToolUse",
+            "cwd": str(self.root),
+            "toolCall": {"name": "write_file", "args": {"Path": str(self.root / "maintenance/events.jsonl")}},
+        }))
+        self.assertEqual(protected_file["decision"], "deny")
+        self.assertIn("禁止直接修改", protected_file["reason"])
+
+        wt_protected = run_ps1(json.dumps({
+            "hookEventName": "PreToolUse",
+            "cwd": str(self.root),
+            "toolCall": {"name": "edit_file", "args": {"Path": str(self.root / ".worktrees/exp/.project_hooks/active-task.json")}},
+        }))
+        self.assertEqual(wt_protected["decision"], "deny")
+
+        safe_file = run_ps1(json.dumps({
+            "hookEventName": "PreToolUse",
+            "cwd": str(self.root),
+            "toolCall": {"name": "edit_file", "args": {"Path": str(self.root / "program/run.py")}},
+        }))
+        self.assertEqual(safe_file, {"decision": "allow"})
+
+        outside_file = run_ps1(json.dumps({
+            "hookEventName": "PreToolUse",
+            "cwd": str(self.root),
+            "toolCall": {"name": "write_file", "args": {"Path": str(Path(self.temp.name) / "artifacts/plan.md")}},
+        }))
+        self.assertEqual(outside_file, {"decision": "ask"})
+
+        destructive_cmd = run_ps1(json.dumps({
+            "hookEventName": "PreToolUse",
+            "cwd": str(self.root),
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "Remove-Item .project_hooks/active-task.json"}},
+        }))
+        self.assertEqual(destructive_cmd["decision"], "deny")
+        self.assertIn("禁止通过终端命令", destructive_cmd["reason"])
+
+        high_risk_cmd = run_ps1(json.dumps({
+            "hookEventName": "PreToolUse",
+            "cwd": str(self.root),
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "git push origin main"}},
+        }))
+        self.assertEqual(high_risk_cmd["decision"], "force_ask")
+        self.assertIn("必须获得用户明确确认", high_risk_cmd["reason"])
+
+        normal_cmd = run_ps1(json.dumps({
+            "hookEventName": "PreToolUse",
+            "cwd": str(self.root),
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "git status"}},
+        }))
+        self.assertEqual(normal_cmd, {"decision": "ask"})
+
+        outside_project = run_ps1(json.dumps({
+            "hookEventName": "PreToolUse",
+            "cwd": str(Path(self.temp.name)),
+            "toolCall": {"name": "write_file", "args": {"Path": str(self.root / "maintenance/events.jsonl")}},
+        }))
+        self.assertEqual(outside_project, {"decision": "ask"})
+
+        self.assertEqual(run_ps1("{not-json"), {"decision": "ask"})
 
     def test_handle_stdin_returns_empty_json_on_invalid_input(self) -> None:
         self.assertEqual(
