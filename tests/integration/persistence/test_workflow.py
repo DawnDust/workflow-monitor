@@ -95,7 +95,7 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         cls.seed_temp = tempfile.TemporaryDirectory()
         cls.seed_root = Path(cls.seed_temp.name) / "seed"
         cls.seed_root.mkdir()
-        for name in (".codex", ".githooks", "maintenance", "project_hooks"):
+        for name in (".codex", ".githooks", "maintenance", "docs", "project_hooks"):
             shutil.copytree(SOURCE_ROOT / name, cls.seed_root / name, ignore=shutil.ignore_patterns("__pycache__"))
         worktrees_doc = cls.seed_root / "docs/zh/worktrees.md"
         worktrees_doc.parent.mkdir(parents=True, exist_ok=True)

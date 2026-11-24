@@ -1,6 +1,7 @@
 """On-demand search across the registered workspaces of one Git clone."""
 
 import json
+import time
 from hashlib import sha256
 from pathlib import Path
 
@@ -64,6 +65,10 @@ class ProjectSearch:
         self.model = model
         self.version = None
         self.result = None
+        self.integration_refs = None
+        self.integration_statuses = {}
+        self.integration_reader = None
+        self.retry_at = 0.0
 
     def sources(self, registry):
         main = {"workflow_id": "main", "branch": git.current_branch(self.root) or "main",
@@ -77,7 +82,7 @@ class ProjectSearch:
         registry = registry_for(self.root)
         workflows = self.sources(registry)
         worktrees = {tree["path"]: tree for tree in list_worktrees(self.root)} if registry else {}
-        refs = git.run(self.root, ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads", "refs/remotes"],
+        refs = git.run(self.root, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/remotes"],
                        check=False).stdout
         versions = []
         journals = []
@@ -97,8 +102,13 @@ class ProjectSearch:
         if registry:
             versions.extend(file_version(path) for path in (registry.path, registry.path.with_name(registry.path.name + "-wal")))
         signature = (refs, tuple(versions))
-        if not force and self.result is not None and self.version == signature:
+        if (not force and self.result is not None and self.version == signature
+                and (not self.result["search_warnings"] or time.monotonic() < self.retry_at)):
             return self.result
+        if force or refs != self.integration_refs:
+            self.integration_statuses = {}
+            self.integration_refs = refs
+            self.integration_reader = git.IntegrationEvidenceReader(self.root, dict(line.split(" ", 1) for line in refs.splitlines()))
 
         task_rows = {item["task_id"]: item for item in registry.tasks()} if registry else {}
         events_by_branch = {}
@@ -151,7 +161,8 @@ class ProjectSearch:
         all_records = []
         for scope, workflow, events in sources:
             try:
-                records = search_records(self.model, events)
+                records = search_records(self.model, events, integration_statuses=self.integration_statuses,
+                                         integration_reader=self.integration_reader)
             except RuntimeError as exc:
                 warnings.append({"branch": scope["branch"], "message": str(exc)})
                 records = []
@@ -165,7 +176,11 @@ class ProjectSearch:
             all_records.extend((scope, record) for record in records)
         self.result = {"branch": workflows[0]["branch"], "search_index": merge_search_records(all_records),
                        "search_scopes": scopes, "search_warnings": warnings}
-        self.version = signature if not warnings else None
+        # A missing historical branch must not make every page refresh rebuild
+        # all healthy sources. Changed files/refs and explicit refresh retry
+        # immediately; transient failures are also retried after a short delay.
+        self.version = signature
+        self.retry_at = time.monotonic() + 10.0 if warnings else 0.0
         return self.result
 
     def events(self, workflow, journal):
