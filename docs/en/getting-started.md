@@ -30,7 +30,12 @@ Review existing repository guidance before replacing files. Initialization does 
 
 ## Work with an AI coding agent
 
-Describe the intended outcome in ordinary language. A compatible agent reads `AGENTS.md`, loads the current workflow context, starts a task before writing, records meaningful progress, runs the required tests, and ends the task with evidence.
+Describe the intended outcome in ordinary language inside **Antigravity**, **Codex**, or any compatible AI coding tool:
+
+- **Shared repository contract**: The agent reads `AGENTS.md`, loads the current workflow context, starts a task before writing, records meaningful progress, runs the required tests, and ends the task with evidence.
+- **Native Antigravity plugin**: Initialized and updated repositories include `.agents/plugins/workflow-monitor/` with progressive-disclosure Skills and lifecycle guard hooks (`SessionStart` context injection and `PreToolUse` protection against direct `events.jsonl`/SQLite edits or unconfirmed pushes/merges).
+- **Viewing the Dashboard**: Double-click `workflow-monitor.exe` at the repository root (or run `Start-Process .\workflow-monitor.exe`) at any time to open the standalone read-only WebView2 Dashboard.
+- **Sandbox vs. Turbo mode**: Read-only commands (`context`, `status`, `check`) run directly in Antigravity sandbox mode. Lifecycle writes touching `.git/workflow-monitor/` or test runners invoking a system Python outside the workspace (for example on drive `C:`) require Turbo mode or explicit path allowance.
 
 You should not need to copy lifecycle commands into every prompt. You must still explicitly approve abandonment, migration, database rebuild, software update, merge, or publication when requested.
 

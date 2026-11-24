@@ -17,6 +17,7 @@ from pathlib import Path
 from ... import __version__
 from ...core.events import canonical_json, new_event, resolve_timezone, validate_event
 from ...core.branches import classify_branch
+from ..config_paths import has_project_config, read_project_config, resolve_config_path
 from ..git import client as git
 from ..git.worktrees import invoke_workflow, list_worktrees, repository_context
 from ..persistence.active_task import load_active_state, atomic_write_json
@@ -25,13 +26,12 @@ from ..persistence.store import load_events, append_events, sync_registry_events
 from ..persistence.transaction import mutation_lock, _pid_alive
 
 
-MARKER = ".codex/project-maintenance-workflow.json"
 RESERVATION_ENV = "WORKFLOW_MONITOR_RESERVATION"
 TOPIC = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def settings(root):
-    return json.loads((Path(root) / MARKER).read_text(encoding="utf-8"))
+    return read_project_config(Path(root))
 
 
 def decode_state(row):
@@ -47,7 +47,7 @@ def scan_legacy(root):
     event_sources, journals = {}, []
     for tree in trees:
         path = Path(tree["path"])
-        if not (path / MARKER).is_file():
+        if not has_project_config(path):
             conflicts.append({"kind": "unavailable" if not path.is_dir() else "uninstalled", "path": str(path)})
             continue
         try:
@@ -192,7 +192,7 @@ def enable(root, *, apply=False):
             stack.enter_context(mutation_lock(context.shared_dir, command="worktree.enable", timeout=10))
             for item in sorted(list_worktrees(root), key=lambda t: t["path"].casefold()):
                 path = Path(item["path"])
-                if (path / MARKER).is_file():
+                if has_project_config(path):
                     stack.enter_context(mutation_lock(path / settings(path).get("state_dir", ".project_hooks"), command="worktree.migrate", timeout=10))
         scan = scan_legacy(root)
         public = {"worktrees": scan["worktrees"], "tasks": [{"task_id": i["task_id"], "path": i["path"], "branch": i["state"]["record"]["git"]["branch"], "phase": i["state"].get("phase", "active")} for i in scan["tasks"]], "conflicts": scan["conflicts"]}
@@ -217,13 +217,13 @@ def enable(root, *, apply=False):
         registry.configure(enabled=True)
         for item in scan["worktrees"]:
             path = Path(item["path"])
-            if not (path / MARKER).is_file():
+            if not has_project_config(path):
                 continue
             with mutation_lock(path / settings(path).get("state_dir", ".project_hooks"), command="worktree.migrate", timeout=10):
                 config = settings(path)
                 config["multi_worktree"] = {"minimum_event_schema": 6}
                 config["maintenance_store"]["schema_version"] = 6
-                atomic_write_json(path / MARKER, config)
+                atomic_write_json(resolve_config_path(path), config)
                 if not any(e["event_type"] == "workflow.multi_worktree_enabled" for e in load_events(path / config.get("maintenance_store", {}).get("journal", "maintenance/events.jsonl"))):
                     event = new_event("workflow.multi_worktree_enabled", branch=item["branch"] or "main", task_id=None, payload={"registry_schema": 1}, timezone=config.get("timezone", "Asia/Shanghai"))
                     registry.record_events(path, [event])
@@ -351,7 +351,7 @@ def prepare_checkout(target):
     target_config = settings(target)
     target_config["multi_worktree"] = {"minimum_event_schema": 6}
     target_config["maintenance_store"]["schema_version"] = 6
-    atomic_write_json(target / MARKER, target_config)
+    atomic_write_json(resolve_config_path(target), target_config)
     installed = invoke_workflow(target, ["install"])
     if installed.returncode:
         raise RegistryError("目标安装中断，保留任务以便恢复: " + installed.stderr)

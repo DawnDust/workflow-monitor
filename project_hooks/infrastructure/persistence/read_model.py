@@ -12,6 +12,7 @@ from typing import Callable
 from ... import __version__
 from ...core.catalog import decode_item
 from ...core.research_attention import research_attention
+from ..config_paths import read_project_config
 from ..git import client as git_client
 from ..system.finish_preflight import assemble_finish_preflight
 from ..system.resource_layout import (
@@ -759,7 +760,7 @@ class MaintenanceReadModel:
             active_data["checkpoint_status"] = checkpoint_status
             active_data["stage_id"] = linked_stage_id
         try:
-            config = json.loads((root / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
+            config = read_project_config(root)
         except (OSError, ValueError):
             config = {}
         return {
@@ -820,7 +821,7 @@ class MaintenanceReadModel:
         events = rows(connection, "SELECT event_id, event_type, occurred_at, branch, task_id, payload_json FROM events ORDER BY rowid")
         for event in events:
             event["payload"] = json.loads(event.pop("payload_json"))
-        settings = json.loads((self.repo_path / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
+        settings = read_project_config(self.repo_path)
         items = inventory(self.repo_path, context["branch"], events, context, catalog_items, catalog_relations, settings)
         context["reviews"] = items
         context["review_summary"] = summary(items, events, context["branch"])

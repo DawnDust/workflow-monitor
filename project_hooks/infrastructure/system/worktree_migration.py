@@ -9,6 +9,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from ...core.events import canonical_json
+from ..config_paths import has_project_config, resolve_config_path, resolve_installation_path
 from ..git import client as git
 from ..git.worktrees import list_worktrees, repository_context
 from ..persistence.active_task import atomic_write_json
@@ -27,7 +28,7 @@ def legacy_hook_conflicts(context, configured, trees):
             if not hook.is_file() or hook.name.endswith(".sample"):
                 continue
             if configured == ".githooks" and hook.name == "pre-commit" and not hook.is_symlink():
-                installation = directory.parent / ".codex/project-maintenance-installation.json"
+                installation = resolve_installation_path(directory.parent)
                 if installation.is_file():
                     record = json.loads(installation.read_text(encoding="utf-8"))
                     expected = record.get("managed_files", {}).get(".githooks/pre-commit", {})
@@ -70,7 +71,7 @@ def plan_migration(root):
     destinations = {str(Path(item["destination"])).casefold() for item in moves}
     for tree in scan["worktrees"]:
         path = Path(tree["path"])
-        if path == root or not (path / service.MARKER).is_file():
+        if path == root or not has_project_config(path):
             continue
         identity = repository_context(path).worktree_id
         destination = directory / path.name
@@ -107,7 +108,7 @@ def migrate_project(root):
             held = {}
             paths = sorted((Path(item["path"]) for item in scan["worktrees"]), key=str)
             for path in paths:
-                if (path / service.MARKER).is_file():
+                if has_project_config(path):
                     state_dir = service.settings(path).get("state_dir", ".project_hooks")
                     lock = locks.enter_context(mutation_lock(path / state_dir, command="worktree.migrate", timeout=1))
                     if path != root:
@@ -150,7 +151,7 @@ def apply_plan(root, context, plan, scan, held):
         config = service.settings(destination)
         if config["maintenance_store"].get("schema_version") != 6:
             config["maintenance_store"]["schema_version"] = 6
-            atomic_write_json(destination / service.MARKER, config)
+            atomic_write_json(resolve_config_path(destination), config)
     service.install_driver(root)
     service.install_shared_hooks(root)
     failures = service.sync_registry_events(registry)

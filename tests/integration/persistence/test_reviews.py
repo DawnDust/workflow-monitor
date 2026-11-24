@@ -32,7 +32,8 @@ class ReviewIntegrationTests(unittest.TestCase):
         subprocess.run(["git", "init", "-b", "main"], cwd=fresh, check=True, capture_output=True)
         result = self.hooks("init", str(fresh), check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((fresh / ".codex/project-maintenance-workflow.json").is_file())
+        self.assertTrue((fresh / ".workflow-monitor/workflow.json").is_file())
+        self.assertTrue((fresh / ".agents/plugins/workflow-monitor/plugin.json").is_file())
 
     def show_review(self):
         return json.loads(self.hooks("review", "show", "stage:chapter").stdout)

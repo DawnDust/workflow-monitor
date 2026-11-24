@@ -61,20 +61,46 @@ class ProjectRegistry:
     def __init__(self, path: Path):
         self.path = path
 
-    def connect(self):
-        connection = sqlite3.connect(self.path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=10000")
-        connection.execute("PRAGMA synchronous=FULL")
-        if connection.execute("PRAGMA user_version").fetchone()[0] not in {1, REGISTRY_SCHEMA}:
+    def _open_readonly_connection(self):
+        base_uri = self.path.resolve().as_uri()
+        last_error = None
+        for uri in (f"{base_uri}?mode=ro", f"{base_uri}?mode=ro&immutable=1"):
+            connection = None
+            try:
+                connection = sqlite3.connect(uri, uri=True, timeout=10)
+                connection.row_factory = sqlite3.Row
+                if "immutable=1" not in uri:
+                    connection.execute("PRAGMA busy_timeout=10000")
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                return connection, version
+            except sqlite3.OperationalError as exc:
+                if connection is not None:
+                    connection.close()
+                last_error = exc
+            except sqlite3.Error as exc:
+                if connection is not None:
+                    connection.close()
+                raise RegistryError(f"无法读取项目注册表: {exc}") from exc
+        raise RegistryError(f"无法读取项目注册表: {last_error}") from last_error
+
+    def connect(self, *, readonly: bool = False):
+        if readonly:
+            connection, version = self._open_readonly_connection()
+        else:
+            connection = sqlite3.connect(self.path, timeout=10)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=10000")
+            connection.execute("PRAGMA synchronous=FULL")
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version not in {1, REGISTRY_SCHEMA}:
             connection.close()
             raise RegistryError("注册表版本不兼容；保留原数据库，请使用兼容版本")
         return connection
 
     @contextmanager
     def read(self):
-        connection = self.connect()
+        connection = self.connect(readonly=True)
         try:
             yield connection
         finally:

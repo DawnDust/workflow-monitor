@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 from ...core.events import canonical_json
+from ..config_paths import read_project_config
 from ..git import client as git
 from ..persistence.project_registry import OCCUPIED, RegistryError
 from ..persistence.store import load_events
@@ -43,7 +44,7 @@ def task_changes(task, row, pending_events=()):
         previous = baseline.get(name, {}).get("sha256")
         if current != previous:
             changes["path:" + name] = {"hash": current, "previous_hash": previous, "path": name, "action": "deleted" if current is None else "modified" if previous else "added"}
-    config = json.loads((root / ".codex/project-maintenance-workflow.json").read_text(encoding="utf-8"))
+    config = read_project_config(root)
     events = load_events(root / config.get("maintenance_store", {}).get("journal", "maintenance/events.jsonl"))
     seen = {event["event_id"] for event in events}
     events.extend(event for event in pending_events if event["event_id"] not in seen)

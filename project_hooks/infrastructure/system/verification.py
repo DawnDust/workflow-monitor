@@ -9,6 +9,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from ..config_paths import read_project_config
 from ..persistence.active_task import atomic_write_json, load_active_state
 
 
@@ -97,9 +98,8 @@ def git_head(root: Path) -> str | None:
 
 
 def active_task(root: Path) -> dict | None:
-    marker = root / ".codex/project-maintenance-workflow.json"
     try:
-        config = json.loads(marker.read_text(encoding="utf-8"))
+        config = read_project_config(root)
     except (OSError, ValueError):
         return None
     state = load_active_state(root / config.get("state_dir", ".project_hooks"))

@@ -97,6 +97,9 @@ class ProjectHooksSqliteTests(unittest.TestCase):
         cls.seed_root.mkdir()
         for name in (".codex", ".githooks", "maintenance", "project_hooks"):
             shutil.copytree(SOURCE_ROOT / name, cls.seed_root / name, ignore=shutil.ignore_patterns("__pycache__"))
+        worktrees_doc = cls.seed_root / "docs/zh/worktrees.md"
+        worktrees_doc.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(SOURCE_ROOT / "docs/zh/worktrees.md", worktrees_doc)
         installation = cls.seed_root / ".codex/project-maintenance-installation.json"
         if installation.is_file():
             installed = json.loads(installation.read_text(encoding="utf-8"))
